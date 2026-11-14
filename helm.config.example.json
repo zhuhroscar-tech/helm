@@ -1,0 +1,39 @@
+{
+  "server": {
+    "port": 4377
+  },
+  "claude": {
+    "bin": "claude",
+    "model": "",
+    "effort": ""
+  },
+  "agents": {
+    "maxRuns": 8,
+    "approvalWaitMs": 900000,
+    "questionWaitMs": 900000
+  },
+  "security": {
+    "execSandbox": "on"
+  },
+  "engine": {
+    "dotnetBin": "",
+    "leanData": ""
+  },
+  "storage": {
+    "projectsDir": "",
+    "threadsDir": "",
+    "trialsFile": ""
+  },
+  "paper": {
+    "alpacaFile": "",
+    "alpacaTimeoutMs": 15000,
+    "alpacaBackoffMs": 1000
+  },
+  "qlib": {
+    "python": "",
+    "scriptsDir": "",
+    "secUserAgent": "",
+    "ideaRegistry": "",
+    "sp500PitFile": ""
+  }
+}

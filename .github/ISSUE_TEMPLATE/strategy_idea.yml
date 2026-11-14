@@ -1,0 +1,58 @@
+name: Strategy idea
+description: Share a hypothesis and how it would be tested. For discussion, not for financial advice.
+title: "[Idea]: "
+labels: ["strategy-idea"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Helm checks ideas with point-in-time data and counts every attempt. A good idea post says what would make the idea fail, not only why it should work. Do not post your own backtest numbers as evidence. Nothing here is financial advice.
+  - type: textarea
+    id: hypothesis
+    attributes:
+      label: Hypothesis
+      description: What should predict returns, and why would it be true? Give the economic or behavioural reason, not only the pattern.
+    validations:
+      required: true
+  - type: textarea
+    id: universe
+    attributes:
+      label: Universe
+      description: A named list (`sp500`, `nasdaq100`, a fixed ticker list, ETFs), and whether it is point-in-time or today's snapshot.
+    validations:
+      required: true
+  - type: textarea
+    id: rules
+    attributes:
+      label: Rules in plain words
+      description: Signal, entry and exit, holding count or weights, rebalance schedule, and cash when not invested.
+    validations:
+      required: true
+  - type: checkboxes
+    id: data
+    attributes:
+      label: Data needed
+      description: Tick what the idea needs. Helm has the first four locally.
+      options:
+        - label: Daily adjusted US stock and ETF prices
+        - label: Historical index membership (point-in-time)
+        - label: SEC fundamentals
+        - label: FRED macro series
+        - label: Other data (describe below, with a public source and the date each value became public)
+  - type: textarea
+    id: other_data
+    attributes:
+      label: Other data and where it is public
+      description: Only if you ticked "Other". Helm needs an available date for each row, so say when each fact first became public.
+  - type: textarea
+    id: validation
+    attributes:
+      label: How it would be validated
+      description: Development and validation periods, the benchmark, how many variants you would try, and what result would make you drop the idea.
+    validations:
+      required: true
+  - type: textarea
+    id: biases
+    attributes:
+      label: Known risks to the result
+      description: Look-ahead, survivorship, data gaps, transaction costs, crowding, regime dependence.

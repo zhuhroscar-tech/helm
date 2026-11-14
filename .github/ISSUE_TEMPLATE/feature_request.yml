@@ -1,0 +1,49 @@
+name: Feature request
+description: Propose a change to Helm's tools, pages, agents or engine.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What can you not do today, or what is painful? Describe the situation, not only the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+      description: Which file or page would change, and what it would do.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Web page
+        - Agents and their rules
+        - Backtest and LEAN engine
+        - Statistical checks
+        - qlib research engine
+        - Paper trading
+        - Tests and tooling
+        - Documentation
+    validations:
+      required: true
+  - type: dropdown
+    id: research_rules
+    attributes:
+      label: Does this change how results are judged?
+      description: Thresholds, trial counting, validation handling, PBO or parameter selection, or future-data rules. These need an explicit owner decision.
+      options:
+        - "No"
+        - "Yes"
+        - "Not sure"
+    validations:
+      required: true

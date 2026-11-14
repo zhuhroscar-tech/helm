@@ -1,0 +1,81 @@
+name: Bug report
+description: Something in Helm is broken or behaves differently from the README.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If this is a security problem (an agent escaping approval or the sandbox, secrets being readable, a path to live trading, or future data leaking into a backtest), stop here and follow SECURITY.md instead.
+
+        Remove API keys, Alpaca credentials and personal data from anything you paste. Do not attach the contents of `data/` or `projects/`.
+  - type: input
+    id: helm_commit
+    attributes:
+      label: Helm commit
+      description: Output of `git rev-parse --short HEAD`
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: macOS version, chip and Node version
+      description: For example "macOS 15.3, arm64, Node 22.11.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Where it happened
+      options:
+        - Web page (setup, navigation, rendering)
+        - Agent conversation
+        - Backtest or LEAN
+        - Statistical checks and validation
+        - qlib research
+        - Paper trading
+        - Tests
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: health
+    attributes:
+      label: Health check output
+      description: Output of `curl -s http://127.0.0.1:4377/api/health`
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Create a project and paste this idea: ...
+        2. Run a backtest with ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: Include the exact error text from the page, or the output of the terminal running `npm start`.
+      render: text
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and found no duplicate.
+          required: true
+        - label: I removed API keys, Alpaca credentials and personal data from this report.
+          required: true

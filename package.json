@@ -1,0 +1,30 @@
+{
+  "name": "helm-qc-console",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Helm: turn plain-language trading ideas into tested QuantConnect LEAN strategies with local Claude agents, statistical checks and paper trading. / 用大白话写交易想法，本机 Claude agent 写成 LEAN 策略、回测、做统计检验和模拟实盘。",
+  "license": "MIT",
+  "keywords": [
+    "quant",
+    "backtesting",
+    "quantconnect",
+    "lean",
+    "qlib",
+    "claude",
+    "paper-trading"
+  ],
+  "bin": {
+    "helm": "bin/helm.mjs"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "config": "node bin/helm.mjs config",
+    "doctor": "node bin/helm.mjs doctor",
+    "test": "node test/all.mjs",
+    "test:smoke": "node test/smoke.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,16 @@
+.env
+data/
+projects/
+engine/Lean/
+engine/.venv/
+node_modules/
+graphify-out/
+__pycache__/
+.DS_Store
+helm.config.json
+
+# 个人笔记，不公开
+private-notes/
+WashUAGENT.md
+.claude/
+*.log

@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title data-i18n="h001">Helm Quant Console</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b0d10'/%3E%3Ccircle cx='16' cy='16' r='7' fill='none' stroke='%23c9a96a' stroke-width='2.5'/%3E%3Ccircle cx='16' cy='16' r='2' fill='%23c9a96a'/%3E%3C/svg%3E">
+  <meta name="color-scheme" content="dark light">
+  <script src="/i18n-dict.js"></script>
+  <script src="/i18n.js"></script>
+  <script src="/theme.js"></script>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/calendar.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="app" id="app">
+    <header class="topbar">
+      <button type="button" class="menu-btn" id="menuBtn" aria-label="Open the project sidebar" aria-controls="sidebar" aria-expanded="false" data-i18n-attr="aria-label:h002">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      </button>
+      <button type="button" class="brand" id="brandBtn" title="Show/hide the project sidebar" aria-label="Helm Quant Console: show or hide the project sidebar" aria-controls="sidebar" data-i18n-attr="title:h003;aria-label:h004">
+        <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="6.2" fill="none" stroke="currentColor" stroke-width="1.8"/>
+          <circle cx="12" cy="12" r="1.8" fill="currentColor"/>
+          <g stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+            <path d="M12 1.8v3.4M12 18.8v3.4M1.8 12h3.4M18.8 12h3.4M4.8 4.8l2.4 2.4M16.8 16.8l2.4 2.4M4.8 19.2l2.4-2.4M16.8 7.2l2.4-2.4"/>
+          </g>
+        </svg>
+        <span class="brand-name">Helm</span>
+        <span class="brand-sub" data-i18n="h005">Quant Console</span>
+      </button>
+      <nav class="crumbs" id="crumbs" aria-label="Location" data-i18n-attr="aria-label:h006"></nav>
+      <div class="runs" id="runs"></div>
+      <div class="status" id="status"></div>
+      <button type="button" class="chat-toggle" id="chatToggle" title="Open/close the chat" aria-controls="chat" aria-expanded="false" data-i18n-attr="title:h007">
+        <span class="dot-live"></span><span data-i18n="h008">Agent chat</span> <kbd>⌘J</kbd>
+      </button>
+    </header>
+
+    <aside class="sidebar" id="sidebar" aria-label="Project sidebar" data-i18n-attr="aria-label:h009">
+      <a class="side-link" href="#/" data-nav="home">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 7.5 8 2.5l6 5V14H9.5v-4h-3v4H2z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/></svg>
+        <span data-i18n="h010">Overview</span>
+      </a>
+      <a class="side-link" href="#/data" data-nav="data">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><ellipse cx="8" cy="4" rx="5" ry="2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>
+        <span data-i18n="h011">Universes & data</span>
+      </a>
+      <a class="side-link" href="#/journal" data-nav="journal">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 2.5h8a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-8zM3.5 2.5v11M6 5.5h4M6 8h4" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" stroke-linecap="round"/></svg>
+        <span data-i18n="h012">Idea log</span>
+      </a>
+      <a class="side-link" href="#/pipeline" data-nav="pipeline">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="3" height="10" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="6.5" y="3" width="3" height="6.5" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/><rect x="11" y="3" width="3" height="8.5" rx="1" fill="none" stroke="currentColor" stroke-width="1.3"/></svg>
+        <span data-i18n="h013">Research pipeline</span>
+      </a>
+      <a class="side-link" href="#/agents" data-nav="agents">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="5.5" cy="5.5" r="2.2" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="11" cy="6.5" r="1.8" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M1.8 13c.4-2.3 1.9-3.6 3.7-3.6s3.3 1.3 3.7 3.6M9.4 10.2c.5-.4 1-.6 1.6-.6 1.5 0 2.6 1.1 2.9 3.2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+        Agents
+      </a>
+      <button type="button" class="new-project" id="newProjectBtn">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+        <span data-i18n="h014">New project</span>
+      </button>
+      <div class="side-section">
+        <div class="side-label">
+          <span><span data-i18n="h015">Projects</span> <span class="count" id="projCount"></span></span>
+          <button type="button" class="ghost-icon" id="refreshProjects" title="Refresh the project list" aria-label="Refresh the project list" data-i18n-attr="title:h016;aria-label:h016">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9M13.5 2.5v3h-3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
+        <label class="search">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="m10.5 10.5 3 3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+          <input id="projectSearch" type="search" placeholder="Search projects" aria-label="Search projects" autocomplete="off" data-i18n-attr="placeholder:h017;aria-label:h017">
+        </label>
+        <ul class="project-list" id="projectList"></ul>
+      </div>
+      <div class="side-foot" id="sideFoot"></div>
+    </aside>
+
+    <main class="main" id="main" tabindex="-1"></main>
+
+    <section class="chat" id="chat" aria-label="Agent chat" data-i18n-attr="aria-label:h008">
+      <div class="chat-head">
+        <button type="button" class="chat-close" id="chatClose" title="Close (Esc)" aria-label="Close the chat" data-i18n-attr="title:h018;aria-label:h019">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+        </button>
+        <div class="agent-row" id="agentRow" role="tablist"></div>
+        <div class="thread-row">
+          <button type="button" class="thread-btn" id="threadBtn" aria-haspopup="true" aria-label="Chat history" data-i18n-attr="aria-label:h020">
+            <span id="threadTitle">New chat</span>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+          </button>
+          <button type="button" class="new-btn" id="newThread" title="New chat" data-i18n-attr="title:h021">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+            <span data-i18n="h021">New chat</span>
+          </button>
+          <div class="thread-menu" id="threadMenu" hidden></div>
+        </div>
+      </div>
+
+      <div class="messages" id="messages" tabindex="-1" aria-label="Chat messages" data-i18n-attr="aria-label:h022"></div>
+      <div class="run-bar" id="runBar" hidden>
+        <span class="rb-main" role="status"><span class="spin" aria-hidden="true"></span><span id="rbText"></span></span>
+        <span class="rb-time" id="rbTime" aria-hidden="true"></span>
+        <button type="button" class="linkish" id="jumpBtn" hidden data-i18n="h023">↓ Jump to latest</button>
+        <button type="button" class="btn sm" id="stopBtn" data-i18n="h024">Stop</button>
+      </div>
+
+      <form class="composer" id="composer">
+        <div class="ctx-row" id="ctxRow"></div>
+        <div class="input-wrap">
+          <textarea id="input" rows="1" placeholder="Ask an agent to do something…" aria-label="Message to the agent" autocomplete="off" data-i18n-attr="placeholder:h025;aria-label:h026"></textarea>
+          <button type="submit" class="send" id="sendBtn" title="Send (Enter)" aria-label="Send" data-i18n-attr="title:h027;aria-label:h028">
+            <svg class="i-send" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            <svg class="i-stop" viewBox="0 0 16 16" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1.5" fill="currentColor"/></svg>
+          </button>
+        </div>
+        <div class="composer-foot">
+          <label class="danger-toggle" title="Applies to the next message only" data-i18n-attr="title:h029">
+            <input type="checkbox" id="allowDanger">
+            <span class="sw"></span><span data-i18n="h030">Allow delete</span>
+          </label>
+          <div class="run-opts">
+            <label class="opt" title="Model" data-i18n-attr="title:h031">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5 14 5v6l-6 3.5L2 11V5z M2 5l6 3.5L14 5M8 8.5V14.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>
+              <select id="modelSel" aria-label="Model" data-i18n-attr="aria-label:h031"></select>
+            </label>
+            <label class="opt" title="Thinking effort" data-i18n-attr="title:h032">
+              <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 13V9M6 13V6M10 13V4M14 13V2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+              <select id="effortSel" aria-label="Thinking effort" data-i18n-attr="aria-label:h032"></select>
+            </label>
+          </div>
+        </div>
+      </form>
+    </section>
+  </div>
+
+  <div class="scrim" id="scrim" aria-hidden="true"></div>
+  <dialog class="modal" id="projectModal" aria-labelledby="pmTitle">
+    <form method="dialog" id="projectForm">
+      <h2 id="pmTitle" data-i18n="h014">New project</h2>
+      <label class="field"><span data-i18n="h033">Name</span><input id="pmName" required maxlength="120" placeholder="E.g. SPY moving-average crossover" autocomplete="off" data-i18n-attr="placeholder:h034"></label>
+      <label class="field"><span data-i18n="h035">Description (optional)</span><input id="pmDesc" maxlength="300" placeholder="One line: what it tests" autocomplete="off" data-i18n-attr="placeholder:h036"></label>
+      <fieldset class="templates">
+        <legend data-i18n="h037">Starting code</legend>
+        <label><input type="radio" name="tpl" value="buyhold" checked><span><b data-i18n="h038">Buy and hold</b><i data-i18n="h039">The simplest skeleton; write the rest yourself</i></span></label>
+        <label><input type="radio" name="tpl" value="sma"><span><b data-i18n="h040">Moving-average crossover</b><i data-i18n="h041">SPY 50/200-day averages</i></span></label>
+        <label><input type="radio" name="tpl" value="rotation"><span><b data-i18n="h042">Momentum rotation</b><i data-i18n="h043">Hold the strongest ETF each month</i></span></label>
+      </fieldset>
+      <p class="modal-hint" data-i18n="h044">To generate one from an idea instead, close this window and describe the idea on the home page.</p>
+      <div class="modal-actions">
+        <button type="button" class="btn" id="pmCancel" data-i18n="h045">Cancel</button>
+        <button type="submit" class="btn primary" id="pmCreate" data-i18n="h046">Create</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog class="modal" id="researchModal" aria-labelledby="rmH">
+    <form method="dialog" id="researchForm">
+      <h2 id="rmH" data-i18n="h047">qlib research</h2>
+      <p class="modal-hint" style="margin-top:-4px" data-i18n="h048">Systematically test factors and models on your local qlib. The project's qlib research engine does it all, and results show live in the "Research" tab.</p>
+      <label class="field"><span data-i18n="h049">Universe</span>
+        <select id="rmTarget" class="sel">
+          <option value="QQQ" data-i18n="h050">Nasdaq 100 · historical constituents (exact, day by day)</option>
+          <option value="sp500" data-i18n="h051">S&amp;P 500 · historical constituents (extended to 2026-10)</option>
+          <option value="SOX" data-i18n="h052">Philadelphia Semiconductor · today's list</option>
+          <option value="DIA" data-i18n="h053">Dow Jones 30 · today's list</option>
+          <option value="spy100" data-i18n="h054">S&amp;P 100 · today's list</option>
+          <option value="custom" data-i18n="h055">Enter your own tickers</option>
+        </select>
+      </label>
+      <label class="field" id="rmTickersWrap" hidden><span data-i18n="h056">Tickers (at least 5, separated by commas or spaces)</span><input id="rmTickers" placeholder="AAPL MSFT NVDA AMZN GOOGL META" autocomplete="off"></label>
+      <fieldset class="templates">
+        <legend data-i18n="h057">How far to go</legend>
+        <label><input type="radio" name="rmMode" value="factors" checked><span><b data-i18n="h058">Factor scan</b><i data-i18n="h059">A few minutes: check the universe for a signal</i></span></label>
+        <label><input type="radio" name="rmMode" value="full"><span><b data-i18n="h060">Full research</b><i data-i18n="h061">Model, checks, portfolio, holdout, report (tens of minutes)</i></span></label>
+      </fieldset>
+      <fieldset class="templates">
+        <legend data-i18n="h062">Which factors</legend>
+        <label><input type="radio" name="rmFeat" value="alpha158" checked><span><b data-i18n="h063">Price-volume</b><i data-i18n="h064">qlib's Alpha158: momentum, reversal, volatility, price-volume</i></span></label>
+        <label><input type="radio" name="rmFeat" value="fundamental"><span><b data-i18n="h065">Fundamentals</b><i data-i18n="h066">SEC filings: valuation, quality, growth, earnings surprise</i></span></label>
+        <label><input type="radio" name="rmFeat" value="both"><span><b data-i18n="h067">Both</b><i data-i18n="h068">Price-volume + fundamentals</i></span></label>
+      </fieldset>
+      <div class="rm-opts">
+        <label><input type="checkbox" id="rmSector"> <span data-i18n="h069">Industry-neutral (compare only within the same industry)</span></label>
+        <label><input type="checkbox" id="rmTra"> <span data-i18n="h070">Try the TRA model when LightGBM isn't significant (30–90 minutes more)</span></label>
+        <label><span data-i18n="h071">Data start</span> <input id="rmStart" type="date" value="2008-01-01" min="2000-01-01"></label>
+      </div>
+      <label class="field"><span data-i18n="h072">Name (optional)</span><input id="rmTitle" maxlength="120" placeholder="E.g. Nasdaq 100 price-volume factor screen" autocomplete="off" data-i18n-attr="placeholder:h073"></label>
+      <div class="modal-actions">
+        <button type="button" class="btn" id="rmCancel" data-i18n="h045">Cancel</button>
+        <button type="submit" class="btn primary" id="rmStartBtn" data-i18n="h074">Start research</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog class="modal" id="paperModal" aria-labelledby="ppH">
+    <form method="dialog" id="paperForm">
+      <h2 id="ppH" data-i18n="h075">Start paper trading</h2>
+      <p class="modal-hint" style="margin-top:-4px"><span data-i18n="h076">Freezes the code of backtest "</span><b id="ppSource"></b><span data-i18n="h077">" and reruns it on the latest data every trading day after the US close (from 17:15 Eastern; Helm must be running). Returns after the freeze are out of sample.</span></p>
+      <fieldset class="templates">
+        <legend data-i18n="h078">Where to simulate</legend>
+        <label><input type="radio" name="ppMode" id="ppSim" value="sim" checked><span><b data-i18n="h079">Helm internal simulation</b><i data-i18n="h080">No account needed. Helm keeps its own books, and fills follow LEAN's rules (filled at the close)</i></span></label>
+        <label><input type="radio" name="ppMode" id="ppAlpaca" value="alpaca"><span><b data-i18n="h081">Alpaca paper account</b><i data-i18n="h082">Places real orders in your Alpaca paper account (paper only, no real money), with real fill prices and slippage</i></span></label>
+      </fieldset>
+      <p class="modal-hint warn-t" id="ppGate" hidden></p>
+      <div class="pp-alpaca"><span id="ppAlpacaState"></span></div>
+      <div id="ppConnect" class="pp-connect" hidden>
+        <p class="modal-hint"><span data-i18n="h083">On</span> <b>app.alpaca.markets</b> <span data-i18n="h084">switch to the</span> <b>Paper</b> <span data-i18n="h085">account, generate an API key and enter it below. The key is stored only on this computer (data/secrets, readable only by your user), is never shown on the web page, and is never shown to agents. Helm connects only to the paper environment; live keys won't work.</span></p>
+        <label class="field"><span>API Key ID</span><input id="ppKey" autocomplete="off" spellcheck="false" placeholder="PK…"></label>
+        <label class="field"><span>Secret Key</span><input id="ppSecret" type="password" autocomplete="new-password" spellcheck="false"></label>
+        <div class="modal-actions"><button type="button" class="btn" id="ppConnectBtn" data-i18n="h086">Verify and connect</button></div>
+      </div>
+      <label class="field" id="ppCapWrap"><span data-i18n="h087">Starting cash (USD)</span><input id="ppCapital" type="number" min="1000" step="1000" value="100000"></label>
+      <p class="modal-hint warn-t" id="ppAlpacaWarn" hidden data-i18n="h088">On start it immediately places orders in the Alpaca paper account to reach the target holdings, then rebalances daily. It trades only this simulation's positions: other holdings in the account are left alone and not counted in strategy capital (starting cash = account equity − the market value of those holdings). No orders are placed on a day when the data update failed or is stale. One Alpaca account can follow only one simulation at a time.</p>
+      <label class="field"><span data-i18n="h072">Name (optional)</span><input id="ppName" maxlength="120" placeholder="E.g. GEM main version forward test" autocomplete="off" data-i18n-attr="placeholder:h089"></label>
+      <div class="modal-actions">
+        <button type="button" class="btn" id="ppCancel" data-i18n="h045">Cancel</button>
+        <button type="submit" class="btn primary" id="ppStart" data-i18n="h090">Start</button>
+      </div>
+    </form>
+  </dialog>
+  <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+  <noscript><p style="padding:24px" data-i18n="h091">Helm needs JavaScript enabled.</p></noscript>
+</body>
+</html>
