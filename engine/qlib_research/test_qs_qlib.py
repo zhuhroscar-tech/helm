@@ -32,7 +32,7 @@ def _frames(n=8, seed=0):
 FR = _frames()
 P._write_provider(FR, TMP, "test")
 Q.write_fields(TMP, {"f_x": pd.DataFrame({t: np.arange(len(CAL), dtype=float) + i for i, t in enumerate(FR)}, index=CAL)})
-P._qinit_uri(str(TMP))
+P._qinit_uri(str(TMP), qlib=True)
 OPENS = pd.DataFrame({t: f["open"] for t, f in FR.items()}).reindex(CAL)
 CLOSES = pd.DataFrame({t: f["close"] for t, f in FR.items()}).reindex(CAL)
 DATA_END = {t: f.index[-1] for t, f in FR.items()}

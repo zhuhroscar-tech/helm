@@ -277,7 +277,7 @@ def expr_wide(expr: str, instruments: list, start, end, data: BinData, qlib_comp
     """dates x tickers (float64) for a validated formula, from start to end (None = last date)."""
     w = expr_wide_f32(expr, instruments, start, end, data, qlib_compat)
     out = w.astype("float64").replace([np.inf, -np.inf], np.nan)
-    out.attrs["failed"] = w.attrs["failed"]
+    out.attrs.update(w.attrs)
     return out
 
 
@@ -290,7 +290,7 @@ def expr_wide_f32(expr: str, instruments: list, start, end, data: BinData, qlib_
     ei = (int(cal.searchsorted(pd.Timestamp(end), side="right")) - 1) if end is not None else len(cal) - 1
     lb = lookback(node) if qlib_compat else math.inf
     qs = 0 if lb == math.inf else max(0, si - int(lb))
-    cols, failed = {}, {}
+    cols, failed, rows = {}, {}, pd.Index([], dtype="int64")
     for t in instruments:
         def field(f, t=t):
             s = data.field(t, f)
@@ -309,7 +309,36 @@ def expr_wide_f32(expr: str, instruments: list, start, end, data: BinData, qlib_
         except (ValueError, TypeError):
             pass
         res = res.loc[si:ei]
+        rows = rows.union(res.index)
         cols[t] = pd.Series(res.to_numpy(), index=cal[res.index]) if len(res) else pd.Series(dtype="float32")
     w = pd.DataFrame(cols).reindex(index=cal[si:ei + 1], columns=list(instruments)).astype("float32")
     w.attrs["failed"] = failed  # tickers left all-NaN because their data could not be evaluated
+    # what qlib's D.features + unstack would contain: tickers with data in range, dates covered by any of them
+    w.attrs["present"] = [t for t in instruments if t in cols and len(cols[t])]
+    w.attrs["rows"] = list(cal[rows])  # plain list: pandas compares attrs when it combines frames
     return w
+
+
+def fields_wide(data: BinData, names: list, fields: list, start=None, end=None) -> dict:
+    """{field: dates x tickers float32}, the same frames as qlib's D.features(names, ["$f", ...], start, end)
+    unstacked: each ticker contributes its own data span within [start, end]; dates are the union of those
+    spans; tickers with no data in the range are left out."""
+    cal = data.calendar
+    si = int(cal.searchsorted(pd.Timestamp(start))) if start is not None else 0
+    ei = (int(cal.searchsorted(pd.Timestamp(end), side="right")) - 1) if end is not None else len(cal) - 1
+    cols = {f: {} for f in fields}
+    for t in names:
+        ss = {f: data.field(t, f).loc[si:ei] for f in fields}
+        idx = pd.Index([], dtype="int64")
+        for s in ss.values():
+            idx = idx.union(s.index)
+        if not len(idx):
+            continue
+        for f, s in ss.items():
+            cols[f][t] = pd.Series(s.reindex(idx).to_numpy(dtype="float32"), index=cal[idx])
+    out = {}
+    for f in fields:
+        df = pd.DataFrame(cols[f])
+        df.index.name, df.columns.name = "datetime", "instrument"
+        out[f] = df.sort_index().astype("float32")
+    return out

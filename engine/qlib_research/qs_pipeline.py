@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
-"""quant-strategy pipeline engine (Qlib + LightGBM), resumable phase by phase.
+"""quant-strategy pipeline engine, resumable phase by phase.
 
-Usage (normally via run.sh, which finds the Python that already has Qlib):
+The env / universe / data / design / idea phases (idea tests and universe exports) need only numpy and pandas:
+formulas are evaluated by qs_expr and prices are read straight from the run's data directory. The full
+research phases (features .. report: LightGBM, Qlib's backtest engine) still need qlib, imported on first use.
+
+Usage (normally via run.sh, which picks the Python):
   run.sh run    --target QQQ [--workdir DIR] [options]
   run.sh status --target QQQ [--workdir DIR]
 
@@ -41,8 +45,30 @@ import qs_core as C  # noqa: E402
 import qs_membership as M  # noqa: E402
 import qs_data as Dq  # noqa: E402
 import qs_describe as W  # noqa: E402
-import qs_qlib as Q  # noqa: E402  (imports qlib: Qlib backtest, LGBModel, risk_analysis, calc_ic, processors)
 import qs_idea as IDEA  # noqa: E402  (idea test: user factors, dev period only)
+import qs_expr as X  # noqa: E402  (formula evaluation and price reads without qlib)
+import qs_metrics as QM  # noqa: E402  (provider writers, rank-IC cross-check; no qlib)
+
+
+class _Lazy:
+    """qs_qlib imports qlib at module level; load it only when a full-research phase first needs it."""
+
+    def __init__(self, name):
+        self._name, self._mod = name, None
+
+    def __getattr__(self, attr):
+        if self._mod is None:
+            import importlib
+            try:
+                self._mod = importlib.import_module(self._name)
+            except ImportError as e:
+                raise RuntimeError(QLIB_NEEDED + f" ({e})") from e
+        return getattr(self._mod, attr)
+
+
+QLIB_NEEDED = ("Full factor research (LightGBM / Qlib backtest) needs qlib, which this Python does not have. "
+               "Idea tests and universe exports work without it. Install: engine/qlib_research/run.sh header.")
+Q = _Lazy("qs_qlib")  # noqa: N816
 
 PHASES = ["env", "universe", "data", "design", "features", "factors", "model",
           "robustness", "advanced", "portfolio", "overlay", "holdout", "report"]
@@ -145,23 +171,32 @@ def provider_info(uri):
 
 
 def phase_env(run, args):
-    import qlib  # noqa: F401  (fail loudly if missing; run.sh guarantees it)
+    full = not ((run.cfg or {}).get("idea") or getattr(args, "idea_file", None) or args.stop_after in ("data", "design"))
     info = {"python": sys.executable, "python_version": platform.python_version(),
             "platform": platform.platform(),
             "packages": {m: _ver(m) for m in ["qlib", "lightgbm", "pandas", "numpy", "scipy",
                                               "matplotlib", "yfinance", "torch"]},
-            "qlib_location": os.path.dirname(qlib.__file__),
+            "qlib_location": _qlib_location(),
             "shared_provider": provider_info(SHARED_QLIB),
             "cache_dir": str(CACHE)}
-    missing = [m for m in ["qlib", "lightgbm", "pandas", "numpy", "matplotlib"] if not info["packages"][m]]
+    need = ["qlib", "lightgbm", "pandas", "numpy", "matplotlib"] if full else ["pandas", "numpy", "matplotlib"]
+    missing = [m for m in need if not info["packages"][m]]
     if missing:
-        raise RuntimeError(f"Missing required packages in {sys.executable}: {missing}")
-    if "site-packages" not in info["qlib_location"] and "dist-packages" not in info["qlib_location"]:
+        raise RuntimeError(f"Missing required packages in {sys.executable}: {missing}"
+                           + (f". {QLIB_NEEDED}" if "qlib" in missing else ""))
+    if info["qlib_location"] and "site-packages" not in info["qlib_location"] and "dist-packages" not in info["qlib_location"]:
         log(f"WARNING: qlib imported from {info['qlib_location']} (source checkout?)")
     run.write("env.json", info)
     sp = info["shared_provider"]
     shared = f"to {sp.get('calendar_end')} ({sp.get('stale_days')}d old)" if sp["exists"] else "missing"
-    log(f"python {info['python_version']} at {sys.executable}; qlib {info['packages']['qlib']}; shared Qlib data {shared}")
+    log(f"python {info['python_version']} at {sys.executable}; qlib {info['packages']['qlib'] or 'not installed (not needed)'}; "
+        f"shared Qlib data {shared}")
+
+
+def _qlib_location():
+    import importlib.util
+    spec = importlib.util.find_spec("qlib")
+    return os.path.dirname(spec.origin) if spec and spec.origin else None
 
 
 # ---------------------------------------------------------------------------
@@ -216,13 +251,15 @@ def _last_bday():
 def _yahoo_frames(tickers, start):
     """Return {ticker: OHLCV DataFrame}. Reuse ~/.qlib/qs_cache/yahoo/<T>.csv when it was
     downloaded from <= start and reaches the last business day; download only the rest.
-    Today's (possibly partial) bar is never requested."""
+    Today's (possibly partial) bar is never requested.
+    The cache doubles as an archive: when a refresh fails (typically a name delisted since it was cached, which
+    Yahoo stops serving), the history already cached is used instead of dropping the name."""
     import yfinance as yf
     ydir = CACHE / "yahoo"
     ydir.mkdir(parents=True, exist_ok=True)
     ipath = ydir / "index.json"
     index = json.loads(ipath.read_text()) if ipath.exists() else {}
-    need, out, stats = [], {}, {"reused": 0, "downloaded": 0, "failed": []}
+    need, out, stats = [], {}, {"reused": 0, "downloaded": 0, "failed": [], "archived": []}
     target_last = _last_bday() - pd.Timedelta(days=4)  # tolerate holidays
     for t in tickers:
         f, meta = ydir / f"{t}.csv", index.get(t)
@@ -249,7 +286,12 @@ def _yahoo_frames(tickers, start):
                 out[t] = df
                 stats["downloaded"] += 1
             except Exception as e:  # noqa: BLE001
-                stats["failed"].append(f"{t}: {e}")
+                old = ydir / f"{t}.csv"
+                if old.exists() and index.get(t):
+                    out[t] = pd.read_csv(old, index_col=0, parse_dates=True)
+                    stats["archived"].append(t)
+                else:
+                    stats["failed"].append(f"{t}: {e}")
         C.atomic_write_json(ipath, index)
     return out, stats
 
@@ -319,6 +361,7 @@ def phase_data(run, args):
         try:
             yf_frames, st = _yahoo_frames(all_names + alias_targets, cfg["start"])
             notes.append(f"Yahoo cache: {st['reused']} reused, {st['downloaded']} downloaded, "
+                         f"{len(st['archived'])} kept from the cache after a failed refresh (typically delisted since), "
                          f"{len(st['failed'])} unavailable (typically delisted/renamed)")
         except Exception as e:  # noqa: BLE001
             if src == "yahoo":
@@ -382,16 +425,10 @@ def phase_data(run, args):
             shutil.rmtree(tmp_uri, ignore_errors=True)
         notes.append(f"Built Qlib provider {uri}")
         _prune_providers(cfg["name"], keep=uri)
-    import qlib
-    from qlib.constant import REG_US
-    from qlib.data import D
-    qlib.init(provider_uri=uri, region=REG_US, kernels=1)
     names = sorted(t for t in frames if t in all_names)
-    px = D.features(names, ["$open", "$close", "$volume"], start_time=cfg["start"], freq="day")
-    px.columns = ["open", "close", "volume"]
-    if px.index.names[0] != "datetime":
-        px = px.swaplevel().sort_index()
-    opens, closes, vol = (px[c].unstack() for c in ["open", "close", "volume"])
+    # read back exactly what qlib's D.features would return (checked equal on a 601-name S&P 500 run)
+    px = X.fields_wide(X.BinData(uri), names, ["open", "close", "volume"], start=cfg["start"])
+    opens, closes, vol = px["open"], px["close"], px["volume"]
     uni_cols = [t for t in uni["tickers"] if t in closes]
     member = M.member_matrix(iv, closes.index, uni["tickers"])
     priced = closes.reindex(columns=uni["tickers"]).notna() & opens.reindex(columns=uni["tickers"]).notna()
@@ -432,10 +469,10 @@ def phase_data(run, args):
         out["fundamentals"] = _sec_data(run, closes, eligible, present, rename_info)
     if _uses_fund(cfg):  # fundamentals become Qlib fields ($f_ep, $f_roa, ...) of the run's provider
         fp = pd.read_pickle(run.p("data", "fundamentals.pkl"))
-        Q.write_fields(uri, {f.lower(): v for f, v in fp.items()})
+        QM.write_fields(uri, {f.lower(): v for f, v in fp.items()})
     if _idea_mkt(cfg):  # $mkt: the universe's own equal-weight market return, the same series on every name
         mkt = IDEA.market_return(closes, eligible)
-        Q.write_fields(uri, {IDEA.MARKET_FIELD: pd.DataFrame({t: mkt for t in names}, index=mkt.index)})
+        QM.write_fields(uri, {IDEA.MARKET_FIELD: pd.DataFrame({t: mkt for t in names}, index=mkt.index)})
         out["market_field"] = {"field": "$" + IDEA.MARKET_FIELD, "days": int(mkt.notna().sum()),
                                "first": str(mkt.first_valid_index().date()) if mkt.notna().any() else None,
                                "min_names": IDEA.MARKET_MIN_NAMES,
@@ -444,7 +481,7 @@ def phase_data(run, args):
         log(f"data: built $mkt (equal-weight market return of the universe) on {out['market_field']['days']} days")
     # Point-in-time universe as a Qlib market: one instruments line per eligible spell
     el_now = pd.read_pickle(run.p("data", "eligible.pkl"))
-    Q.write_instruments(uri, _pit_market(run), Q.spells_from_mask(el_now.reindex(columns=present).fillna(False)))
+    QM.write_instruments(uri, _pit_market(run), QM.spells_from_mask(el_now.reindex(columns=present).fillna(False)))
     out["qlib_market"] = _pit_market(run)
     run.write("data_audit.json", out)
     for n in notes:
@@ -573,18 +610,26 @@ _RUN_URI = [None]
 _QINIT = {"uri": None}
 
 
-def _qinit_uri(uri):
-    if uri and _QINIT["uri"] != uri:
-        import qlib
-        from qlib.constant import REG_US
-        qlib.init(provider_uri=uri, region=REG_US, kernels=1)
+def _qinit_uri(uri, qlib=False):
+    """Point formula evaluation (qs_idea / qs_expr) at the run's data; with qlib=True also qlib.init it
+    for the full-research phases."""
+    if not uri:
+        return
+    IDEA.set_provider(uri)
+    if qlib and _QINIT["uri"] != uri:
+        try:
+            import qlib as _qlib
+            from qlib.constant import REG_US
+        except ImportError as e:
+            raise RuntimeError(QLIB_NEEDED + f" ({e})") from e
+        _qlib.init(provider_uri=uri, region=REG_US, kernels=1)
         _QINIT["uri"] = uri
 
 
-def _qinit(run):
+def _qinit(run, qlib=False):
     if run.p("data_audit.json").exists():
         _RUN_URI[0] = run.read("data_audit.json")["provider_uri"]
-        _qinit_uri(_RUN_URI[0])
+        _qinit_uri(_RUN_URI[0], qlib=qlib)
 
 
 def _pit_market(run):
@@ -593,7 +638,7 @@ def _pit_market(run):
 
 def _sim(run, targets, cost, start, end):
     """Every backtest runs in Qlib's engine (qlib.backtest; see qs_qlib.py)."""
-    _qinit(run)
+    _qinit(run, qlib=True)
     if getattr(run, "_bt_ctx", None) is None:
         closes = pd.read_pickle(run.p("data", "prices.pkl"))["close"]
         bench = run.read("universe.json")["benchmark_etf"]
@@ -648,7 +693,7 @@ def phase_design(run, args):
 
 def phase_features(run, args):
     cfg, da, sp = run.cfg, run.read("data_audit.json"), run.read("splits.json")
-    _qinit(run)
+    _qinit(run, qlib=True)
     labels = ([C.label_expr(h) for h in HORIZONS], [f"LABEL{h}" for h in HORIZONS])
     mode = cfg.get("features", "alpha158")
     cut = sp["folds"][len(sp["folds"]) // 2]["test"][0]
@@ -878,7 +923,7 @@ _SEL_CACHE = {}  # per-fold feature screen (uses unshuffled training labels, so 
 def fit_predict(X, Y, fold, h, seeds, shuffle_seed=None, params=None, predict="test"):
     """predict="valid" scores the fold's purged validation year instead of its test year (used only by
     hyperparameter tuning, so that tuning never looks at a test year or the holdout)."""
-    _qinit_uri(_RUN_URI[0])
+    _qinit_uri(_RUN_URI[0], qlib=True)
     lab = Y[f"LABEL{h}"]
     tr = _between(X.index, *fold["train"]) & lab.notna().values
     va = _between(X.index, *fold["valid"]) & lab.notna().values
@@ -2246,10 +2291,10 @@ def phase_idea(run, args):
             parts.append((raw.loc[fstart:dev_end], c["weight"]))
         score = IDEA.combine_components(parts, el_dev)
         res = IDEA.evaluate_factor(score, rets, known, cfg["cost_bps"], el_dev)
-        if i == 0:  # cross-check the vectorised IC against Qlib's calc_ic on the chosen horizon
+        if i == 0:  # cross-check the vectorised IC against a groupby Spearman (qlib calc_ic's method)
             h0 = res["best_horizon"]
             s_, r_ = score.stack(), rets[h0].stack()
-            q_ic = Q.qlib_ic(s_, r_)
+            q_ic = QM.rank_ic_check(s_, r_)
             res["qlib_calc_ic_check"] = {"horizon": h0, "qlib_mean_ic": float(q_ic.mean()),
                                          "engine_mean_ic": res["ic"][str(h0)]["mean"],
                                          "abs_diff": abs(float(q_ic.mean()) - (res["ic"][str(h0)]["mean"] or 0))}
@@ -2410,7 +2455,7 @@ def main():
         if run.cfg is None:
             print(f"No run at {rdir}", file=sys.stderr)
             return 2
-        _qinit(run)
+        _qinit(run, qlib=True)
         rescore(run, args)
         return 0
     cfg = make_cfg(args, name)
@@ -2448,7 +2493,7 @@ def main():
             t0 = time.time()
             try:
                 if p != "data":
-                    _qinit(run)
+                    _qinit(run, qlib=p not in IDEA_PHASES)
                 RUNNERS[p](run, args)
             except Exception as e:  # noqa: BLE001
                 run.set(p, "failed", error=f"{type(e).__name__}: {e}", trace=traceback.format_exc()[-2000:])

@@ -273,36 +273,5 @@ def lgb_fit_predict(X: pd.DataFrame, label: pd.Series, segments: dict, params: d
 # Provider writers (Qlib binary layout)
 # ---------------------------------------------------------------------------
 
-def write_fields(uri, fields: dict):
-    """Add daily fields ({name: DataFrame dates x tickers}) to an existing Qlib provider, aligned to
-    the span of each ticker's existing close.day.bin (header = start index in the calendar)."""
-    uri = Path(uri)
-    cal = pd.DatetimeIndex(pd.read_csv(uri / "calendars" / "day.txt", header=None)[0])
-    for name, df in fields.items():
-        for t in df.columns:
-            f = uri / "features" / t.lower() / "close.day.bin"
-            if not f.exists():
-                continue
-            raw = np.fromfile(f, dtype="<f4")
-            start_i, n = int(raw[0]), len(raw) - 1
-            vals = df[t].reindex(cal[start_i: start_i + n]).astype("float32").values
-            np.hstack([[start_i], vals]).astype("<f4").tofile(f.parent / f"{name.lower()}.day.bin")
-
-
-def write_instruments(uri, market: str, spells: list):
-    """Point-in-time universe as a Qlib instruments file: one line per (ticker, start, end) spell."""
-    lines = [f"{t.upper()}\t{pd.Timestamp(a):%Y-%m-%d}\t{pd.Timestamp(b):%Y-%m-%d}" for t, a, b in spells]
-    (Path(uri) / "instruments" / f"{market}.txt").write_text("\n".join(lines) + "\n")
-
-
-def spells_from_mask(mask: pd.DataFrame) -> list:
-    """(ticker, first, last) for each run of consecutive True days in a dates x tickers mask."""
-    out = []
-    for t in mask.columns:
-        m = mask[t].astype(bool)
-        if not m.any():
-            continue
-        grp = (m != m.shift(fill_value=False)).cumsum()[m]
-        for _, g in grp.groupby(grp):
-            out.append((t, g.index[0], g.index[-1]))
-    return out
+# Moved to qs_metrics (no qlib needed); re-exported for older callers and test_qs_qlib.py
+from qs_metrics import spells_from_mask, write_fields, write_instruments  # noqa: E402,F401
