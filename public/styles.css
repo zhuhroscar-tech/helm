@@ -1143,6 +1143,8 @@ p.gate-why[hidden] { display: none; }
 .idea { margin-top: 20px; border: 1px solid var(--line-2); padding: 14px 14px 12px 16px; }
 .idea textarea { width: 100%; border: 0; outline: 0; background: none; resize: vertical; min-height: 72px; font-size: 15px; line-height: 1.6; }
 .idea-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
+.idea-foot .idea-opts { margin-left: auto; }
+.foot .auto-pick { color: var(--muted); cursor: help; }
 .quick { display: grid; gap: 8px; padding: 12px; }
 .quick button {
   display: grid;

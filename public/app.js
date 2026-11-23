@@ -272,6 +272,8 @@ const S = {
   validation: null,    // 当前回测的统计检验
   universes: null,     // qlib 股票池
   route2: store.get('ideaRoute', 'auto'), // 首页想法的研究路线：auto | fast | deep
+  ideaModel: store.get('ideaModel', ''),   // 首页想法用的模型：'' 默认 | 'auto' 自动挑 | 模型 id
+  ideaEffort: store.get('ideaEffort', ''), // 首页想法用的思考深度：同上
 };
 // agents.json 里的默认名字 / 定位 / 示例任务是中文；英文界面下换成字典里的英文。用户改过的（和默认不一样）原样显示。
 function localizeAgents(raw) {
@@ -2500,6 +2502,31 @@ function attnSummary() {
     .map(([k, key]) => [list.filter((a) => a[k]).length, key]).filter(([n]) => n).map(([n, key]) => _t(key, { n }));
   return { n: list.length, bad: list.some((a) => a.paper || a.bt), line: parts.join(_t('k0007')) };
 }
+// 首页想法框的模型 / 思考深度：默认、自动（Haiku 先读一遍任务再挑）、或指定一个
+const OPT_ICON = {
+  model: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 1.5 14 5v6l-6 3.5L2 11V5z M2 5l6 3.5L14 5M8 8.5V14.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"/></svg>',
+  effort: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 13V9M6 13V6M10 13V4M14 13V2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>',
+};
+function ideaOptsHTML() {
+  const { models = [], efforts = [] } = S.options || {};
+  const m = S.ideaModel === 'auto' || models.some((x) => x.id === S.ideaModel) ? S.ideaModel : '';
+  const e = S.ideaEffort === 'auto' || efforts.some((x) => x.id === S.ideaEffort) ? S.ideaEffort : '';
+  const opt = (v, label, cur) => `<option value="${esc(v)}"${v === cur ? ' selected' : ''}>${esc(label)}</option>`;
+  const ms = opt('', _t('k1530'), m) + opt('auto', _t('am_autoModel'), m) + models.map((x) => opt(x.id, x.label, m)).join('');
+  const es = opt('', _t('k1532'), e) + opt('auto', _t('am_autoEffort'), e) + efforts.map((x) => opt(x.id, _t('k1441', { v: x.label }), e)).join('');
+  return `<div class="run-opts idea-opts">
+      <label class="opt${m ? ' set' : ''}" title="${esc(m === 'auto' ? _t('am_autoTip') : _t('h031'))}">${OPT_ICON.model}<select id="ideaModelSel" aria-label="${esc(_t('h031'))}">${ms}</select></label>
+      <label class="opt${e ? ' set' : ''}" title="${esc(e === 'auto' ? _t('am_autoTip') : _t('h032'))}">${OPT_ICON.effort}<select id="ideaEffortSel" aria-label="${esc(_t('h032'))}">${es}</select></label>
+    </div>`;
+}
+// 消息底部：自动挑了什么、为什么（挑失败时说明用了默认值）
+function autoPickHTML(a) {
+  if (!a) return '';
+  if (a.error && !a.model && !a.effort) return `<span class="auto-pick" title="${esc(a.error)}">${_t('am_failed')}</span>`;
+  const eff = a.effort ? (S.options.efforts.find((x) => x.id === a.effort) || {}).label || a.effort : '';
+  const v = [a.model ? modelLabel(a.model) : '', eff ? _t('k1441', { v: eff }) : ''].filter(Boolean).join(' · ');
+  return `<span class="auto-pick" title="${esc(a.reason || '')}">${esc(_t('am_picked', { v }))}</span>`;
+}
 // 首页视线：① 标题直接说「有几件事卡在你这里」→ ② 项目表，需要你处理的排最前、下一步用强调色 → ③ 写下一个想法 → ④ 直接问智能体。
 // 回访用户的顺序固定不变（不随状态跳动）；第一次用、还没有项目时，输入框就是全部重点，放最前。
 function homeHTML() {
@@ -2526,6 +2553,7 @@ function homeHTML() {
       <div class="idea-foot">
         <div class="route-pick" role="radiogroup" aria-label="${_t('k1023')}">${ROUTES.map(([k, zh, tip]) => `<button type="button" role="radio" aria-checked="${S.route2 === k}" class="${S.route2 === k ? 'active' : ''}" data-route2="${k}" title="${esc(tip)}">${zh}</button>`).join('')}
           ${((rt) => `<span class="route-tip" title="${esc(rt[2])}">${esc(rt[3])}</span>`)(ROUTES.find((r) => r[0] === S.route2) || ROUTES[0])}</div>
+        ${ideaOptsHTML()}
         <button class="btn primary" type="submit" id="ideaSubmit">${_t('k1024', { MOD_KEY })}</button>
       </div>
     </form>
@@ -4145,7 +4173,7 @@ function aiInner(m, live, last = false) {
     const eff = m.effort ? (S.options.efforts.find((e) => e.id === m.effort) || {}).label || m.effort : '';
     html += `<div class="foot">
       ${m.model ? `<span class="mdl">${esc(prettyModel(m.model))}</span>` : ''}${eff ? `<span>${_t('k1441', { v: esc(eff) })}</span>` : ''}
-      ${swapped ? `${_t('k1442', { v: esc(modelLabel(m.requestedModel)) })}` : ''}
+      ${swapped ? `${_t('k1442', { v: esc(modelLabel(m.requestedModel)) })}` : ''}${autoPickHTML(m.auto)}
       ${m.duration ? `<span>${(m.duration / 1000).toFixed(1)}s</span>` : ''}${m.cost ? `${_t('k1443', { toFixed: (+m.cost).toFixed(3) })}` : ''}
     </div>`;
   }
@@ -4319,7 +4347,9 @@ async function send(text, opts = {}) {
   S.sending = true;
   updateComposer();
   try {
-    r = await post('/api/chat', { threadId: opts.idea ? undefined : S.thread && S.thread.id, agent: opts.idea ? 'mia' : S.thread ? S.thread.agent : S.agentId, message: text, context: ctx, allowDanger, model: S.model || null, effort: S.effort || null, lang: HELM_I18N.lang() });
+    const model = (opts.idea ? S.ideaModel : S.model) || null;
+    const effort = (opts.idea ? S.ideaEffort : S.effort) || null;
+    r = await post('/api/chat', { threadId: opts.idea ? undefined : S.thread && S.thread.id, agent: opts.idea ? 'mia' : S.thread ? S.thread.agent : S.agentId, message: text, context: ctx, allowDanger, model, effort, lang: HELM_I18N.lang() });
   } catch (e) {
     if (!opts.idea) { toast(`${_t('k1477', { message: e.message })}`); if (!input.value) { input.value = text; autosize(); } }
     return { ok: false, error: e.message };
@@ -4327,7 +4357,7 @@ async function send(text, opts = {}) {
   S.agentId = r.agent;
   store.set('agent', r.agent);
   if (!S.thread || S.thread.id !== r.threadId) S.thread = { id: r.threadId, title: r.title, agent: r.agent, messages: [] };
-  S.thread.messages.push({ role: 'user', text, context: ctx, allowDanger }, { role: 'assistant', agent: r.agent, parts: [], requestedModel: S.model || null, effort: S.effort || null });
+  S.thread.messages.push({ role: 'user', text, context: ctx, allowDanger }, { role: 'assistant', agent: r.agent, parts: [], requestedModel: r.model || null, effort: r.effort || null, auto: r.auto || null });
   store.set('thread', r.threadId);
   S.running.set(r.threadId, { agent: r.agent, title: r.title });
   (S.runStart = S.runStart || new Map()).set(r.threadId, Date.now());
@@ -4863,18 +4893,18 @@ function renderRunOpts() {
   const { models, efforts, envModel, envEffort } = S.options;
   const ms = $('#modelSel');
   const es = $('#effortSel');
-  ms.innerHTML = `<option value="">${envModel ? `${_t('k1529', { v: esc(modelLabel(envModel)) })}` : _t('k1530')}</option>` + models.map((m) => `<option value="${esc(m.id)}">${esc(m.label)}</option>`).join('');
-  es.innerHTML = `<option value="">${envEffort ? `${_t('k1531')} ${esc((efforts.find((e) => e.id === envEffort) || {}).label || envEffort)}${_t('k0017')}` : _t('k1532')}</option>` + efforts.map((e) => `<option value="${esc(e.id)}">${_t('k1441', { v: esc(e.label) })}</option>`).join('');
-  if (!models.some((m) => m.id === S.model)) S.model = '';
-  if (!efforts.some((e) => e.id === S.effort)) S.effort = '';
+  ms.innerHTML = `<option value="">${envModel ? `${_t('k1529', { v: esc(modelLabel(envModel)) })}` : _t('k1530')}</option><option value="auto">${esc(_t('am_autoModel'))}</option>` + models.map((m) => `<option value="${esc(m.id)}">${esc(m.label)}</option>`).join('');
+  es.innerHTML = `<option value="">${envEffort ? `${_t('k1531')} ${esc((efforts.find((e) => e.id === envEffort) || {}).label || envEffort)}${_t('k0017')}` : _t('k1532')}</option><option value="auto">${esc(_t('am_autoEffort'))}</option>` + efforts.map((e) => `<option value="${esc(e.id)}">${_t('k1441', { v: esc(e.label) })}</option>`).join('');
+  if (S.model !== 'auto' && !models.some((m) => m.id === S.model)) S.model = '';
+  if (S.effort !== 'auto' && !efforts.some((e) => e.id === S.effort)) S.effort = '';
   ms.value = S.model;
   es.value = S.effort;
   ms.closest('.opt').classList.toggle('set', Boolean(S.model));
   es.closest('.opt').classList.toggle('set', Boolean(S.effort));
   const mSel = models.find((m) => m.id === S.model);
   const eSel = efforts.find((e) => e.id === S.effort);
-  ms.closest('.opt').title = mSel ? `${_t('k1533', { label: mSel.label, desc: mSel.desc })}` : _t('k1534');
-  es.closest('.opt').title = eSel ? `${_t('k1535', { label: eSel.label, desc: eSel.desc })}` : _t('k1536');
+  ms.closest('.opt').title = S.model === 'auto' ? _t('am_autoTip') : mSel ? `${_t('k1533', { label: mSel.label, desc: mSel.desc })}` : _t('k1534');
+  es.closest('.opt').title = S.effort === 'auto' ? _t('am_autoTip') : eSel ? `${_t('k1535', { label: eSel.label, desc: eSel.desc })}` : _t('k1536');
 }
 
 /* ================= wiring ================= */
@@ -5029,6 +5059,13 @@ function wire() {
   $('#main').addEventListener('change', (e) => {
     const k = { jrProject: 'project', jrStage: 'stage', jrOutcome: 'outcome' }[e.target.id];
     if (k && S.journal) { S.journal[k] = e.target.value; renderMain(); const sel = $('#' + e.target.id); if (sel) sel.focus({ preventScroll: true }); }
+    // 首页想法框的模型 / 思考深度：只改这一块，不重画整页（输入框里的字和焦点要保留）
+    const io = { ideaModelSel: ['ideaModel', 'ideaModel'], ideaEffortSel: ['ideaEffort', 'ideaEffort'] }[e.target.id];
+    if (io) {
+      S[io[0]] = e.target.value; store.set(io[1], e.target.value);
+      const box = e.target.closest('.idea-opts'); const id = e.target.id;
+      if (box) { box.outerHTML = ideaOptsHTML(); const sel = $('#' + id); if (sel) sel.focus({ preventScroll: true }); }
+    }
   });
   $('#main').addEventListener('keydown', (e) => {
     if (e.target.id === 'ideaInput' && e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.isComposing) { e.preventDefault(); $('#ideaForm').requestSubmit(); }

@@ -2047,7 +2047,12 @@ window.HELM_DICT = {
     "cx_diag": "让分析师诊断",
     "cx_read": "让研究员解读",
     "cx_diagT": "诊断当前项目的回测 {backtestId}（{name}）：结果可信吗？看统计、订单和日志，指出前视偏差、过拟合或数据问题，再说下一步该做什么。先别改代码。",
-    "cx_copyFail": "没能拷贝。可以手动选中文字后按 ⌘C。"
+    "cx_copyFail": "没能拷贝。可以手动选中文字后按 ⌘C。",
+    "am_autoModel": "自动选模型",
+    "am_autoEffort": "自动选深度",
+    "am_autoTip": "发出前先让 Haiku 读一遍任务，挑最合适的模型和思考深度；交接出去的每一段也会按自己的任务重新挑",
+    "am_picked": "自动：{v}",
+    "am_failed": "自动选择没成功，用了默认值"
   },
   en: {
     "ag_analyst_name": "Backtest Analyst",
@@ -4095,6 +4100,11 @@ window.HELM_DICT = {
     "cx_diag": "Ask the analyst to diagnose",
     "cx_read": "Ask the researcher to explain",
     "cx_diagT": "Diagnose backtest {backtestId} ({name}) in the current project: can the result be trusted? Look at the statistics, orders and logs, point out look-ahead bias, overfitting or data problems, then say what to do next. Don't change the code yet.",
-    "cx_copyFail": "Couldn't copy. Select the text and press ⌘C instead."
+    "cx_copyFail": "Couldn't copy. Select the text and press ⌘C instead.",
+    "am_autoModel": "Auto model",
+    "am_autoEffort": "Auto effort",
+    "am_autoTip": "Before sending, Haiku reads the task and picks the best model and thinking effort. Each handoff gets its own pick for its own task.",
+    "am_picked": "Auto: {v}",
+    "am_failed": "Auto-pick failed; used the default"
   }
 };
