@@ -1,5 +1,12 @@
 # 更新记录
 
+## 2026-11-23
+
+### 波动率目标（HelmVol）
+- `helm_data.HelmVol`：只用过去数据的波动率预测（HAR，历史不够用 EWMA），给出仓位系数 = min(上限, 目标波动率 / 预测波动率)。策略选什么、何时买卖不变，只改仓位大小，用来降回撤。
+- 代码检查允许 `from helm_data import HelmVol`；`engine/test_helm_vol.py` + `test/helm-vol.test.mjs`（无前视、预测比常数好、回撤下降、仓位上限、速度）。
+- `workspace/CLAUDE.md` 新增「波动率目标」一节：用法 + 事先定好的合格线和终止规则；工程师 / 总控 / 风控官提示词。网页没有改动。
+
 ## 未发布
 
 ### 直接发到 QuantConnect

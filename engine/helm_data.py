@@ -17,6 +17,10 @@
     y2.value(self.time)                  # 当时已经公布的最新值
     y2.change(self.time, 63)             # 和约 63 个日历日前相比的变化
 
+    vol = HelmVol(target=0.10, max_leverage=1.0)   # 波动率目标：按预测波动率调仓位（不需要任何外部数据）
+    vol.update(self.time, daily_return)  # 每个交易日收盘后喂一次策略（或资产）的日收益
+    w = vol.scale()                      # 仓位系数 = min(上限, 目标波动率 / 预测波动率)，再乘到原来的目标权重上
+
 文件放在 LEAN 数据目录下的 helm/ 里，由 Helm 写入。这个模块只在本地 LEAN 可用，搬到 QC 云端时要换成 QC 自己的数据。
 """
 import bisect
@@ -28,7 +32,7 @@ from datetime import datetime, timedelta
 # `from helm_data import *` 只给这几个名字（不把 os / csv 带进策略）
 # 数据都存在下划线开头的属性里（_spells、_by、_dates、_values、_avail、_rows）：整份文件包括“未来”的行都在里面，
 # 策略只能通过方法读（方法只给当时已经知道的数据）。lint_strategy.py 拒绝在 self 以外的对象上读下划线属性。
-__all__ = ["HelmUniverse", "HelmSignals", "HelmMacro", "HelmDataset"]
+__all__ = ["HelmUniverse", "HelmSignals", "HelmMacro", "HelmDataset", "HelmVol"]
 
 _DATA = os.environ.get("HELM_LEAN_DATA") or os.path.join(os.path.dirname(os.path.realpath(__file__)), "Lean", "Data")
 
@@ -304,3 +308,146 @@ def _dataset_value(v):
         return x if math.isfinite(x) else v
     except ValueError:
         return v
+
+
+
+# ---------------------------------------------------------------------------
+# HelmVol：波动率预测 + 仓位系数（波动率目标）
+# ---------------------------------------------------------------------------
+# 收益难预测，波动率好预测：今天波动大，接下来几周大概率也大。按预测波动率缩放仓位，
+# 不改变策略选什么、何时买卖，只改「买多少」，目标是把回撤和波动压下来。
+#
+# 方法（事先定好，不在回测里挑）：
+#   - HAR（Corsi 2009, "A Simple Approximate Long-Memory Model of Realized Volatility"）：
+#     未来 h 天的平均日方差 ≈ b0 + b1·昨天的平方收益 + b2·过去 5 天平均 + b3·过去 22 天平均。
+#     用到「现在」为止、目标窗口已经完整发生的样本做最小二乘（扩张窗口），每 refit_every 天重估一次。
+#   - EWMA（RiskMetrics, λ = 0.94）：历史不够 min_history 天、或 HAR 给出非正 / 离谱的预测时的后备。
+#   - 历史连 EWMA 都不够（< 22 天）时 forecast() 返回 None，scale() 返回 1（不调仓位）。
+# 只能逐日 update，不能回头改历史；所有估计只用已经 update 过的数据，不可能看到未来。
+
+class HelmVol:
+    TRADING_DAYS = 252
+
+    def __init__(self, target=0.10, max_leverage=1.0, horizon=21, min_history=504, refit_every=21,
+                 method="har", ewma_lambda=0.94, min_scale=0.0):
+        if not (0 < target < 2):
+            raise ValueError("target 是年化波动率目标，比如 0.10 = 10%")
+        if not (0 < max_leverage <= 3):
+            raise ValueError("max_leverage 要在 (0, 3] 之间；现金账户不加杠杆就用 1.0")
+        if method not in ("har", "ewma"):
+            raise ValueError('method 只能是 "har" 或 "ewma"')
+        if not (1 <= int(horizon) <= 63):
+            raise ValueError("horizon（预测几天）要在 1–63 之间")
+        self.target, self.max_leverage, self.min_scale = float(target), float(max_leverage), float(min_scale)
+        self.horizon, self.min_history, self.refit_every = int(horizon), max(int(min_history), 66), max(int(refit_every), 1)
+        self.method, self.lam = method, float(ewma_lambda)
+        self._dates, self._r2 = [], []          # 已经发生的日期和平方日收益
+        self._cum = [0.0]                       # 平方收益的前缀和：_cum[i] = r2[0] + ... + r2[i-1]
+        self._A = [[0.0] * 4 for _ in range(4)]  # 最小二乘的累加量（扩张窗口：新样本只加不改）
+        self._b = [0.0] * 4
+        self._nobs, self._next_i = 0, 21
+        self._ewma = None                       # EWMA 方差
+        self._coef, self._fit_at = None, -1      # 系数用到第几个交易日为止的数据（按固定日历重估，和何时调用无关）
+        self.last_source = None                 # 最近一次预测用的是 "har" / "ewma" / None
+
+    # --- 喂数据 ---
+    def update(self, when, ret):
+        """加一个交易日的简单收益（比如 0.01 = +1%）。日期必须严格递增；NaN / None 忽略。"""
+        if ret is None:
+            return
+        r = float(ret)
+        if not math.isfinite(r) or abs(r) > 1.0:
+            return  # 单日超过 ±100% 视为坏数据
+        d = _day(when)
+        if self._dates and d <= self._dates[-1]:
+            raise ValueError(f"HelmVol.update 的日期必须递增：{d} 不晚于 {self._dates[-1]}")
+        self._dates.append(d)
+        self._r2.append(r * r)
+        self._cum.append(self._cum[-1] + r * r)
+        self._ewma = r * r if self._ewma is None else self.lam * self._ewma + (1 - self.lam) * r * r
+
+    def warmup(self, pairs):
+        """批量 update：[(日期, 日收益), ...]，常用于 initialize 里用 history 预热。"""
+        for d, r in pairs:
+            self.update(d, r)
+
+    # --- 预测 ---
+    def _features(self, i):
+        c = self._cum
+        return (1.0, self._r2[i], (c[i + 1] - c[i - 4]) / 5.0, (c[i + 1] - c[i - 21]) / 22.0)
+
+    def _fit(self, m):
+        """扩张窗口最小二乘，只用前 m 个交易日：样本 i 的目标 = 第 i+1..i+h 天的平均平方收益，
+        只加入目标窗口在第 m 天之前已经完整发生的 i。"""
+        h, c = self.horizon, self._cum
+        while self._next_i < m - h:
+            i = self._next_i
+            x = self._features(i)
+            t = (c[i + 1 + h] - c[i + 1]) / h
+            for a in range(4):
+                self._b[a] += x[a] * t
+                for bb in range(4):
+                    self._A[a][bb] += x[a] * x[bb]
+            self._nobs += 1
+            self._next_i += 1
+        if self._nobs < 60:
+            return None
+        k = 4
+        A = [row[:] for row in self._A]
+        b = self._b[:]
+        scale = max(A[a][a] for a in range(k)) or 1.0
+        for a in range(1, k):
+            A[a][a] += 1e-8 * scale  # 极小的 ridge，只为数值稳定
+        return _solve(A, b)
+
+    def forecast(self):
+        """未来 horizon 天的年化波动率预测；历史不足返回 None。"""
+        n = len(self._r2)
+        if n < 22 or self._ewma is None:
+            self.last_source = None
+            return None
+        ewma_var = self._ewma
+        var = None
+        if self.method == "har" and n >= self.min_history:
+            m = n - n % self.refit_every  # 每 refit_every 个交易日重估一次，时点只由日期序号决定
+            if m != self._fit_at:
+                self._coef, self._fit_at = self._fit(m), m
+            if self._coef is not None:
+                f = self._features(n - 1)
+                v = sum(c * x for c, x in zip(self._coef, f))
+                # 非正、或比 EWMA 离谱 10 倍以上的预测不用
+                if v > 0 and ewma_var / 10 <= v <= ewma_var * 10:
+                    var = v
+        self.last_source = "har" if var is not None else "ewma"
+        if var is None:
+            var = ewma_var
+        return math.sqrt(var * self.TRADING_DAYS)
+
+    def scale(self):
+        """仓位系数 = min(max_leverage, target / 预测波动率)，不低于 min_scale；没法预测时为 1（不调）。"""
+        f = self.forecast()
+        if f is None or f <= 0:
+            return min(1.0, self.max_leverage)
+        return max(self.min_scale, min(self.max_leverage, self.target / f))
+
+    def info(self):
+        f = self.forecast()
+        return {"days": len(self._r2), "forecast": f, "source": self.last_source, "scale": self.scale(),
+                "target": self.target, "max_leverage": self.max_leverage, "method": self.method, "horizon": self.horizon}
+
+
+def _solve(A, b):
+    """小型线性方程组（高斯消元，部分选主元）。奇异时返回 None。"""
+    n = len(b)
+    M = [row[:] + [b[i]] for i, row in enumerate(A)]
+    for c in range(n):
+        p = max(range(c, n), key=lambda r: abs(M[r][c]))
+        if abs(M[p][c]) < 1e-300:
+            return None
+        M[c], M[p] = M[p], M[c]
+        for r in range(n):
+            if r != c:
+                f = M[r][c] / M[c][c]
+                for k in range(c, n + 1):
+                    M[r][k] -= f * M[c][k]
+    return [M[i][n] / M[i][i] for i in range(n)]

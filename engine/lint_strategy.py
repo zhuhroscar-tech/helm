@@ -42,7 +42,7 @@ FORBIDDEN_CALLS = {"open", "exec", "eval", "compile", "__import__", "globals", "
 SAFE_DUNDERS = {"__init__", "__name__", "__doc__", "__qualname__", "__module__"}
 SAFE_DUNDER_STRINGS = SAFE_DUNDERS | {"__main__", "__future__"}
 BAD_RESOLUTIONS = {"minute", "second", "tick", "hour"}
-HELM_DATA_CLASSES = {"HelmUniverse", "HelmSignals", "HelmMacro", "HelmDataset"}
+HELM_DATA_CLASSES = {"HelmUniverse", "HelmSignals", "HelmMacro", "HelmDataset", "HelmVol"}
 UNIVERSE_CALLS = {
     "add_universe", "add_universe_selection", "set_universe_selection",
     "AddUniverse", "AddUniverseSelection", "SetUniverseSelection",
