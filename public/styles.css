@@ -1292,6 +1292,13 @@ td.next a span { margin-left: 6px; transition: margin .12s; color: var(--faint);
   overflow-wrap: anywhere;
 }
 .hl-foot { margin: 10px 0 0; color: var(--muted); font-size: 12px; }
+/* 缺的组件：怎么补（可复制的命令 / AI 设置按钮） */
+.health li .hl-cmd { margin: 6px 0 2px; }
+.hl-cmd-k { display: block; margin-bottom: 4px; color: var(--muted); font-size: 12px; }
+.hl-cmd pre { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 9px 64px 9px 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.health li .hl-cmd code { font: 12px/1.55 var(--mono); color: var(--text); }
+.hl-cmd .copy-code { top: auto; bottom: 6px; }
+.health li .hl-act { justify-self: start; margin: 6px 0 2px; }
 .hl-when { margin-left: 10px; color: var(--faint); }
 .health > .btn { flex-shrink: 0; }
 .health-opt { margin-top: 14px; display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; color: var(--muted); font-size: 12.5px; }
@@ -1890,6 +1897,7 @@ details.st-more .data-note { margin: 6px 0 0; }
 .uni .u-st { grid-area: s; font-size: 12.5px; color: var(--muted); }
 .uni .u-st.ok { color: var(--text-2); }
 .uni .u-st i { display: block; font-style: normal; font-size: 11.5px; color: var(--faint); }
+.uni .u-st i.u-fail { color: var(--down); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .uni > .btn { grid-area: a; justify-self: end; }
 .uni .u-warn { grid-area: w; font-size: 12px; }
 .uni .u-warn, .u-warn, .data-note.warn, details.data-notes > summary .warn { color: var(--down); }
@@ -2856,3 +2864,15 @@ table.home-proj tr.grp ~ tr:not(.grp) td.name b { color: var(--text-2); }
 tr.ctx-target td { background: color-mix(in srgb, var(--accent) 7%, transparent); }
 table.home-proj tr.ctx-target, #projectList a.ctx-target { outline-offset: 3px; } /* 首列没有内边距：描边放外面，别压住文字 */
 @media (prefers-reduced-motion: reduce) { .ctx, .ctx.hide { transition: none; } .ctx-item.blink { animation: none; } }
+
+/* 键盘快捷键一览（帮助 → 键盘快捷键 / ⌘/） */
+dialog.sc-dlg { width: min(620px, calc(100vw - 32px)); }
+.sc-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 18px 28px; }
+.sc-grid h3 { margin: 0 0 6px; font-size: 12px; font-weight: 550; color: var(--muted); }
+.sc-grid dl { margin: 0; display: grid; gap: 2px; }
+.sc-grid dl > div { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; padding: 4px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+.sc-grid dl > div:last-child { border-bottom: 0; }
+.sc-grid dt { color: var(--text-2); }
+.sc-grid dd { margin: 0; }
+.sc-grid kbd { font: 12px var(--mono); color: var(--text); white-space: pre; }
+.sc-note { margin: 0; color: var(--muted); font-size: 12.5px; }

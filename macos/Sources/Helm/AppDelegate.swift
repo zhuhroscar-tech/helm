@@ -164,6 +164,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         }
     }
 
+    // 网页命令：菜单项的 representedObject 是命令名，交给 window.helmMenu
+    @objc func webCommand(_ sender: NSMenuItem) {
+        guard let cmd = sender.representedObject as? String else { return }
+        if NSApp.keyWindow !== win.window { win.showWindow(nil) }
+        win.runMenu(cmd)
+    }
+    @objc func openURL(_ sender: NSMenuItem) { if let s = sender.representedObject as? String, let u = URL(string: s) { NSWorkspace.shared.open(u) } }
+
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
         case #selector(toggleLoginItem(_:)):
@@ -172,14 +180,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         case #selector(openInBrowser(_:)): return server?.port != nil
         case #selector(goBack(_:)): return win.webView.canGoBack
         case #selector(goForward(_:)): return win.webView.canGoForward
+        case #selector(webCommand(_:)):
+            guard let st = win.menuState, let cmd = item.representedObject as? String else { item.state = .off; return false }
+            // 主题 / 语言 / 当前页面：打勾
+            if let v = cmd.split(separator: "-", maxSplits: 1).last.map(String.init), cmd.hasPrefix("theme-") || cmd.hasPrefix("lang-") {
+                item.state = (st[cmd.hasPrefix("theme-") ? "theme" : "lang"] as? String) == v ? .on : .off
+                return true
+            }
+            if cmd.hasPrefix("nav-") { item.state = (st["nav"] as? String) == String(cmd.dropFirst(4)) ? .on : .off; return true }
+            // 只在当前页面上真有那个按钮时可用（比如不在项目里时「跑回测」变灰）
+            let needs = ["run": "run", "compile": "compile", "research": "research", "paper": "paper", "set-main": "setMain", "project-rename": "rename", "project-delete": "del"]
+            if let k = needs[cmd] { return st[k] as? Bool == true }
+            return true
         default: return true
         }
     }
 
     // MARK: 菜单
+    // 结构参考专业 Mac App（Logic Pro 等）：App / 文件 / 编辑 / 显示 / 项目 / 服务 / 窗口 / 帮助。
+    // 和 Helm 相关的命令交给网页执行（webCommand），快捷键在这里统一定义；网页里的「键盘快捷键」一览（⌘/）要同步改。
 
     private func buildMenu() -> NSMenu {
         let main = NSMenu()
+        @discardableResult
         func add(_ title: String, _ items: [NSMenuItem]) -> NSMenu {
             let top = NSMenuItem(); let m = NSMenu(title: title)
             items.forEach { m.addItem($0) }
@@ -192,9 +215,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             if let target { i.target = target } else if let action, responds(to: action) { i.target = self }
             return i
         }
+        func web(_ title: String, _ cmd: String, _ key: String = "", _ mods: NSEvent.ModifierFlags = .command) -> NSMenuItem {
+            let i = item(title, #selector(webCommand(_:)), key, mods)
+            i.representedObject = cmd
+            return i
+        }
+        func link(_ title: String, _ url: String) -> NSMenuItem { let i = item(title, #selector(openURL(_:))); i.representedObject = url; return i }
+        func sub(_ title: String, _ items: [NSMenuItem]) -> NSMenuItem {
+            let i = NSMenuItem(title: title, action: nil, keyEquivalent: ""); let m = NSMenu(title: title)
+            items.forEach { m.addItem($0) }
+            i.submenu = m
+            return i
+        }
 
-        _ = add("Helm", [
+        add("Helm", [
             item(L("关于 Helm", "About Helm"), #selector(NSApplication.orderFrontStandardAboutPanel(_:)), target: NSApp),
+            .separator(),
+            web(L("设置…", "Settings…"), "settings", ","),
+            web(L("AI 连接…", "AI Connection…"), "ai"),
             .separator(),
             item(L("开机时启动", "Open at Login"), #selector(toggleLoginItem(_:))),
             item(L("选择 Helm 文件夹…", "Choose Helm Folder…"), #selector(chooseFolder(_:))),
@@ -205,14 +243,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             .separator(),
             item(L("退出 Helm", "Quit Helm"), #selector(NSApplication.terminate(_:)), "q", target: NSApp),
         ])
-        _ = add(L("文件", "File"), [
+        add(L("文件", "File"), [
+            web(L("新建项目…", "New Project…"), "new-project", "n"),
+            web(L("写下一个想法", "New Idea"), "new-idea", "n", [.command, .shift]),
+            .separator(),
             item(L("在浏览器中打开", "Open in Browser"), #selector(openInBrowser(_:)), "o", [.command, .shift]),
             item(L("在访达中显示 Helm 文件夹", "Show Helm Folder in Finder"), #selector(openHelmFolder(_:))),
             .separator(),
             item(L("关闭窗口", "Close Window"), #selector(NSWindow.performClose(_:)), "w"),
         ])
         // 没有「编辑」菜单的话，网页里的 ⌘C / ⌘V / ⌘A 都不起作用
-        _ = add(L("编辑", "Edit"), [
+        add(L("编辑", "Edit"), [
             item(L("撤销", "Undo"), Selector(("undo:")), "z"),
             item(L("重做", "Redo"), Selector(("redo:")), "z", [.command, .shift]),
             .separator(),
@@ -220,12 +261,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             item(L("拷贝", "Copy"), #selector(NSText.copy(_:)), "c"),
             item(L("粘贴", "Paste"), #selector(NSText.paste(_:)), "v"),
             item(L("全选", "Select All"), #selector(NSText.selectAll(_:)), "a"),
+            .separator(),
+            web(L("搜索项目", "Find Project"), "find", "f"),
         ])
-        _ = add(L("显示", "View"), [
+        add(L("显示", "View"), [
+            web(L("总览", "Overview"), "nav-home", "1"),
+            web(L("股票池与数据", "Universe & Data"), "nav-data", "2"),
+            web(L("想法记录", "Idea Journal"), "nav-journal", "3"),
+            web(L("研究流水线", "Research Pipeline"), "nav-pipeline", "4"),
+            web(L("智能体", "Agents"), "nav-agents", "5"),
+            .separator(),
+            web(L("智能体对话", "Agent Chat"), "chat", "j"),
+            web(L("问智能体…", "Ask an Agent…"), "ask", "k"),
+            .separator(),
             item(L("后退", "Back"), #selector(goBack(_:)), "["),
             item(L("前进", "Forward"), #selector(goForward(_:)), "]"),
+            item(L("重新载入页面", "Reload Page"), #selector(reloadPage(_:)), "r", [.command, .shift]),
             .separator(),
-            item(L("重新载入", "Reload"), #selector(reloadPage(_:)), "r"),
+            sub(L("外观", "Appearance"), [
+                web(L("跟随系统", "System"), "theme-auto"), web(L("浅色", "Light"), "theme-light"), web(L("深色", "Dark"), "theme-dark"),
+            ]),
+            sub(L("界面语言", "Language"), [
+                web(L("跟随系统", "System"), "lang-auto"), web("中文", "lang-zh"), web("English", "lang-en"),
+            ]),
             .separator(),
             item(L("实际大小", "Actual Size"), #selector(actualSize(_:)), "0"),
             item(L("放大", "Zoom In"), #selector(zoomIn(_:)), "="),
@@ -233,18 +291,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             .separator(),
             item(L("进入全屏幕", "Enter Full Screen"), #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control]),
         ])
-        _ = add(L("服务", "Server"), [
+        add(L("项目", "Project"), [
+            web(L("跑回测", "Run Backtest"), "run", "r"),
+            web(L("编译检查", "Compile Check"), "compile", "b"),
+            .separator(),
+            web(L("新的因子研究…", "New Factor Research…"), "research"),
+            web(L("开始模拟实盘…", "Start Paper Trading…"), "paper"),
+            web(L("设为主版本", "Set as Main Version"), "set-main"),
+            .separator(),
+            web(L("重命名…", "Rename…"), "project-rename"),
+            web(L("删除项目…", "Delete Project…"), "project-delete"),
+        ])
+        add(L("服务", "Server"), [
+            web(L("重新检查环境", "Check Environment Again"), "health"),
             item(L("重启 Helm 服务", "Restart Helm Server"), #selector(restartServer(_:))),
+            .separator(),
             item(L("显示服务日志", "Show Server Log"), #selector(showLog(_:)), "l", [.command, .option]),
         ])
         let windowMenu = add(L("窗口", "Window"), [
             item(L("最小化", "Minimize"), #selector(NSWindow.performMiniaturize(_:)), "m"),
             item(L("缩放", "Zoom"), #selector(NSWindow.performZoom(_:))),
             .separator(),
-            item(L("Helm 主窗口", "Helm Main Window"), #selector(showMainWindow(_:)), "1"),
+            item(L("Helm 主窗口", "Helm Main Window"), #selector(showMainWindow(_:))),
             item(L("前置全部窗口", "Bring All to Front"), #selector(NSApplication.arrangeInFront(_:)), target: NSApp),
         ])
         NSApp.windowsMenu = windowMenu
+        let repo = "https://github.com/zhuhroscar-tech/helm"
+        let helpMenu = add(L("帮助", "Help"), [
+            web(L("键盘快捷键", "Keyboard Shortcuts"), "shortcuts", "/"),
+            .separator(),
+            link(L("入门指南", "Getting Started"), "\(repo)/blob/main/docs/\(isChinese ? "GETTING-STARTED.zh.md" : "GETTING-STARTED.md")"),
+            link(L("常见问题", "FAQ"), "\(repo)/blob/main/docs/FAQ.md"),
+            link(L("报告问题…", "Report an Issue…"), "\(repo)/issues/new/choose"),
+        ])
+        NSApp.helpMenu = helpMenu
         return main
     }
 }

@@ -30,6 +30,7 @@ const SUITES = [
   ['journal.test.mjs', [], []],
   ['research-list.test.mjs', [], []],
   ['project-delete.test.mjs', [], []],
+  ['project-rename.test.mjs', [], []],
   ['main-needs.test.mjs', [], []],
   ['macro.test.mjs', [], []],
   ['dataset.test.mjs', [], []],

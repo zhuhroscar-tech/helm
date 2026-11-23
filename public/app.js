@@ -194,7 +194,7 @@ function openModal({ cls = '', labelId, describedBy, role, html, onClick, onClos
   d.addEventListener('cancel', (e) => { e.preventDefault(); close(false); }); // Esc
   d.addEventListener('keydown', (e) => {
     if (e.key !== 'Tab') return;
-    const f = [...d.querySelectorAll('button, a[href]')];
+    const f = [...d.querySelectorAll('input:not([type=hidden]), textarea, select, button:not([disabled]), a[href]')];
     const i = f.indexOf(document.activeElement);
     if (e.shiftKey && i <= 0) { e.preventDefault(); f[f.length - 1].focus(); } else if (!e.shiftKey && i === f.length - 1) { e.preventDefault(); f[0].focus(); }
   });
@@ -330,6 +330,14 @@ async function loadHealth(force = false) {
   renderHomeSoon();
   return S.health;
 }
+// 「重新检查」：首页按钮和 App 菜单「服务 → 重新检查环境」共用。还缺东西时把怎么补直接摊开，提示里点名缺的是哪一项
+async function recheckHealth() {
+  S.healthClosed = false;
+  const h = await loadHealth(true);
+  if (!h || !Array.isArray(h.components)) { toast(_t('k1548')); return; }
+  const hn = (id) => { const c = h.components.find((x) => x.id === id); return c ? (HELM_I18N.lang() === 'en' ? c.en || c.zh : c.zh) : id; };
+  toast(h.missing && h.missing.length ? _t('k1546', { names: h.missing.map(hn).join(_t('k0015')) }) : _t('k1547'));
+}
 function healthHTML() {
   const st = S.status || {};
   const h = S.health;
@@ -348,11 +356,14 @@ function healthHTML() {
   const opt = (h.optionalMissing || []).map(byId).filter(Boolean);
   const hName = (c) => (HELM_I18N.lang() === 'en' ? c.en || c.zh : c.zh);
   const hHint = (c) => (HELM_I18N.lang() === 'en' ? c.hintEn || c.hint : c.hint);
-  const item = (c) => `<li><b>${esc(hName(c))}</b>${hHint(c) ? `<span>${esc(zhErr(hHint(c)))}</span>` : ''}${c.detail ? `<code>${esc(zhErr(c.detail))}</code>` : ''}</li>`;
+  // 每一项：缺什么 → 怎么补（说明 + 可复制的命令 / AI 设置按钮）→ 现在检查到的状态
+  const fix = (c) => (c.cmd ? `<div class="md-code hl-cmd"><span class="hl-cmd-k">${_t('hl_cmd')}</span><button type="button" class="copy-code" data-copy-code aria-label="${_t('k1415')}">${_t('k1416')}</button><pre><code>${esc(c.cmd)}</code></pre></div>` : '')
+    + (c.id === 'ai' ? `<button type="button" class="btn sm hl-act" data-ai-open>${_t('hl_ai')}</button>` : '');
+  const item = (c) => `<li><b>${esc(hName(c))}</b>${hHint(c) ? `<span>${esc(zhErr(hHint(c)))}</span>` : ''}${c.ok ? '' : fix(c)}${c.detail ? `<code>${esc(zhErr(c.detail))}</code>` : ''}</li>`;
   const when = h.checkedAt ? `${_t('k0082')} ${esc(parseDate(h.checkedAt) ? parseDate(h.checkedAt).toLocaleTimeString(LOC(), { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }) : '—')}</span>` : '';
   const recheck = _t('k0083');
   const req = miss.length ? `<section class="health bad" role="alert" aria-label="${_t('k0084')}">
-      <details class="health-d" ${S.healthClosed === false ? 'open' : ''}><summary>${_t('k0085', { n: miss.length })}</summary>
+      <details class="health-d" ${S.healthClosed === true ? '' : 'open'}><summary>${_t('k0085', { names: esc(miss.map(hName).join(_t('k0015'))) })}</summary>
         <ul>${miss.map(item).join('')}</ul><p class="hl-foot">${_t('k0086', { when })}</p></details>
       ${recheck}</section>` : '';
   const optSec = opt.length ? `<section class="health-opt" aria-label="${_t('k0087')}">
@@ -795,6 +806,7 @@ function projectHTML() {
     menuItem(`data-dk="new"`, _t('dk002')),
     menuItem(`data-action="research"`, _t('k0747')),
     menuItem(`data-action="compile"`, _t('k0046'), _t('ux002')),
+    menuItem(`data-action="project-rename"`, `${_t('pr_rename')}${ELL}`),
     menuSep,
     menuItem(`data-action="project-delete"`, _t('k0172'), '', true),
   ])}
@@ -2299,12 +2311,14 @@ function universesHTML() {
     : `<div class="unis">${list.map((u) => {
       const job = u.job && u.job.status === 'running' ? u.job : null;
       const ex = u.exported;
+      // 已有旧数据、但最近一次更新失败：之前这里只显示「已就绪」，失败被藏起来，用户只能一遍遍点「更新」
+      const lastFail = ex && u.job && u.job.status === 'failed' ? `<i class="u-fail" title="${esc(u.job.error || '')}">${_t('u_fail', { v: esc(String(u.job.error || '').slice(0, 80)) })}</i>` : '';
       const st = job ? `${_t('k0904')} ${Math.round((job.progress || 0) * 100)}%<i>${esc(job.phase || '')}</i></span>`
-        : ex ? `${_t('k0905', { v: esc(ex.start), v2: esc(ex.end) })} ${esc(ex.members_per_day ? ex.members_per_day.median : '?')} ${_t('k0906')}`
+        : ex ? `<span class="u-st ok">${_t('k0905', { v: esc(ex.start), v2: esc(ex.end) })} ${esc(ex.members_per_day ? ex.members_per_day.median : '?')} ${_t('k0906')}${lastFail}</span>`
           : u.job && u.job.status === 'failed' ? `<span class="u-st bad" title="${esc(u.job.error || '')}">${_t('k0907')}${esc(String(u.job.error || '').slice(0, 60))}</i></span>` : _t('k0908');
       return `<div class="uni"><div class="u-n"><b>${esc(u.label)}</b><span class="u-k ${u.kind === 'snapshot' ? 'snap' : u.kind === 'partial-point-in-time' ? 'part' : 'pit'}" ${u.kind === 'partial-point-in-time' ? `${_t('k0909')} ${esc(u.qlib_as_of || '?')}${_t('k0910')}` : u.membership_source ? `${_t('k0911', { v: esc(u.membership_source) })}` : ''}>${u.kind === 'snapshot' ? _t('k0912') : u.kind === 'partial-point-in-time' ? `${_t('k0913')} ${esc(String(u.qlib_as_of || '?').slice(0, 7))}` : u.membership_source ? `${_t('k0913')} ${esc(String(u.qlib_as_of || '?').slice(0, 7))}` : _t('k0914')}</span></div>
         <div class="u-m">${_t('k0920')} ${esc(u.names_ever ?? '?')} ${_t('k0921', { v: esc(u.bench) })}</div>${u.data_warning ? `<div class="u-warn" title="${esc(u.data_warning)}">${_t('k0915')}</div>` : ''}${st}
-        ${job ? '' : `<button type="button" class="btn sm" data-prepare="${esc(u.key)}" aria-label="${ex ? _t('k0916') : _t('k0917')} ${_t('k0919', { v: esc(u.label) })}">${ex ? _t('k0916') : _t('k0918')}</button>`}</div>`;
+        ${job ? '' : `<button type="button" class="btn sm" data-prepare="${esc(u.key)}" aria-label="${ex ? _t('k0916') : _t('k0917')} ${_t('k0919', { v: esc(u.label) })}">${lastFail ? _t('u_retry') : ex ? _t('k0916') : _t('k0918')}</button>`}</div>`;
     }).join('')}</div>`;
   return `<div class="panel" id="uniPanel"><div class="panel-head"><h2>${_t('k0922')}</h2><span class="meta">${_t('k0923')}</span></div>${body}</div>`;
 }
@@ -3086,6 +3100,7 @@ function renderMain() {
   if (v === 'backtest' && S.charts && $('#eqChart')) drawCharts();
   if (v === 'paper' && $('#pxChart')) drawPaperChart();
   if (v === 'project' && S.route.tab === 'compare' && $('#cmpChart')) drawCompare();
+  menuSync();
 }
 
 /* ================= charts (纯 SVG) ================= */
@@ -4489,6 +4504,8 @@ function connectBus() {
           if (m) toast(_t('k1486'), { label: _t('k0129'), run: () => { location.hash = `#/p/${pid}/b/${m[1]}`; } });
         }
       }
+    } else if (ev.type === 'project_renamed') {
+      refreshViews();
     } else if (ev.type === 'project_deleted') {
       if (S.route.projectId === ev.projectId) location.hash = '#/';
       loadProjects();
@@ -4576,6 +4593,7 @@ function projCtx(pid) {
       { label: `${_t('k0152')}${ELL}`, title: _t('k0153'), run: ask('risk', _t('k0154')) },
     ] },
     'sep',
+    { label: `${_t('pr_rename')}${ELL}`, run: () => doAction('project-rename', { pid }) },
     { label: _t('cx_copyId'), run: () => ctxCopy(`#${pid}`) },
     'sep',
     { label: `${_t('k0172')}${ELL}`, danger: true, run: () => doAction('project-delete', { pid }) },
@@ -4665,6 +4683,7 @@ async function doAction(kind, ds = {}) {
     await loadProjects();
     return;
   }
+  if (kind === 'project-rename') { openRenameModal(projectId); return; }
   if (kind === 'research') { openResearchModal(); return; }
   if (kind === 'paper-new') { openPaperModal(); return; }
   if (kind === 'set-main') {
@@ -4775,6 +4794,55 @@ function openProjectModal() {
   $('#pmName').removeAttribute('aria-invalid');
   d.showModal();
   $('#pmName').focus();
+}
+
+// 项目改名（项目页 ⋯ 菜单、侧栏/首页右键、Mac 菜单「项目 → 重命名…」）：回车确认，Esc 取消，空名不能提交。
+// 服务端把名字写进 name 和当前界面语言的 nameZh / nameEn（pName 优先显示后者），这里先就地更新，再等 project_renamed 广播刷新
+function openRenameModal(projectId) {
+  const p = (S.project && S.project.projectId === projectId ? S.project : null) || (S.projects || []).find((x) => x.projectId === projectId);
+  const cur = p ? pName(p) : '';
+  const prevFocus = document.activeElement;
+  const id = `rn${Date.now().toString(36)}`;
+  let busy = false;
+  const { d, close } = openModal({
+    cls: 'rename-dlg', labelId: `${id}t`,
+    html: `<form class="cd-body" novalidate><h2 id="${id}t">${_t('pr_title')}</h2>
+      <label class="field"><span>${_t('h033')}</span><input name="name" maxlength="120" autocomplete="off" spellcheck="false" value="${esc(cur)}" aria-describedby="${id}e"><span class="field-err" id="${id}e" role="alert" hidden></span></label>
+      <div class="modal-actions"><button type="button" class="btn" data-rn="no">${_t('k0033')}</button><button type="submit" class="btn primary" data-rn="yes">${_t('pr_save')}</button></div></form>`,
+    onClick: (e, cl) => { if (e.target.closest('[data-rn=no]')) cl(false); },
+    onClose: () => setTimeout(() => { if (prevFocus && prevFocus.isConnected && prevFocus.focus) { try { prevFocus.focus({ preventScroll: true }); } catch { /* 忽略 */ } } }, 30),
+  });
+  const inp = d.querySelector('input');
+  const err = d.querySelector('.field-err');
+  const ok = d.querySelector('[data-rn=yes]');
+  const showErr = (msg) => { err.textContent = msg; err.hidden = false; inp.setAttribute('aria-invalid', 'true'); };
+  const sync = () => { const empty = !inp.value.trim(); ok.disabled = empty || busy; if (!empty) { err.hidden = true; inp.removeAttribute('aria-invalid'); } };
+  inp.addEventListener('input', sync);
+  d.querySelector('form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (busy) return;
+    const name = inp.value.replace(/\s+/g, ' ').trim();
+    if (!name) { showErr(_t('pr_empty')); inp.focus(); return; }
+    if (name === cur) { close(false); return; }
+    busy = true; sync();
+    const r = await safePost('/api/actions/project-rename', { projectId, name, lang: HELM_I18N.lang() });
+    busy = false; sync();
+    if (!r.success) { showErr(zhErr((r.errors || [_t('x011')]).join(_t('k0007')))); inp.focus(); return; }
+    const np = r.projects[0];
+    for (const x of [S.project, ...(S.projects || [])]) {
+      if (!x || x.projectId !== projectId) continue;
+      for (const k of ['name', 'nameEn', 'nameZh', 'modified']) { if (np[k] === undefined) delete x[k]; else x[k] = np[k]; }
+    }
+    close(true);
+    renderProjects();
+    renderCrumbs();
+    if (S.route.projectId === projectId && S.route.view === 'project') renderMain();
+    if (onHomePage()) renderHomeSoon();
+    toast(_t('pr_done'));
+  });
+  sync();
+  inp.focus();
+  inp.select();
 }
 
 /* ================= toast ================= */
@@ -5004,14 +5072,7 @@ function wire() {
     if (e.target.closest('[data-reload]')) { reloadView(); return; }
     if (e.target.closest('[data-clear-search]')) { const si = $('#projectSearch'); si.value = ''; renderProjects(); si.focus(); return; }
     const hr = e.target.closest('[data-health-refresh]');
-    if (hr) {
-      once('health', hr, async () => {
-        const h = await loadHealth(true);
-        if (h && Array.isArray(h.components)) toast(h.missing && h.missing.length ? `${_t('k1546', { n: h.missing.length })}` : _t('k1547'));
-        else toast(_t('k1548'));
-      });
-      return;
-    }
+    if (hr) { once('health', hr, recheckHealth); return; }
     const ex = e.target.closest('[data-example]');
     if (ex) { const t = $('#ideaInput'); if (t) { t.value = ex.dataset.example; store.set('ideaDraft', t.value); t.focus(); t.setSelectionRange(t.value.length, t.value.length); } return; }
     if (e.target.closest('[data-idea-retry]')) { const f = $('#ideaForm'); if (f) f.requestSubmit(); return; }
@@ -5052,7 +5113,7 @@ function wire() {
       const k = act.dataset.action;
       // 打开菜单/对话框的按钮立即响应；会发请求的按钮在返回前不能再点
       if (k === 'backtest') doAction(k, { kb: e.detail === 0 ? '1' : '0' });
-      else if (k === 'research' || k === 'paper-new') doAction(k, act.dataset);
+      else if (k === 'research' || k === 'paper-new' || k === 'project-rename') doAction(k, act.dataset);
       else once(`action:${k}`, act, () => doAction(k, act.dataset));
       return;
     }
@@ -5204,6 +5265,7 @@ function applyLang(v) {
   renderStatus(); renderRuns(); renderProjects(); renderAgents(); renderRunOpts(); renderThread(); renderRunBar();
   renderCrumbs(); renderCtx(); setTitle(); renderMain();
   refreshContent(); // 数据（项目说明、对话……）按新语言重新取
+  menuSync();
 }
 document.addEventListener('click', (e) => { const b = e.target.closest('[data-lang-set]'); if (b) applyLang(b.dataset.langSet); });
 document.addEventListener('click', (e) => {
@@ -5246,5 +5308,95 @@ async function init() {
   loadProjects();
   setInterval(() => { if (S.route.view === 'home' && !document.hidden) loadStatus(); }, 120000);
 }
+
+/* ================= Mac App 菜单 ↔ 网页 =================
+ * App 的菜单栏（Swift）通过 window.helmMenu('命令') 调到这里；网页把「现在哪些命令能用、主题和语言是什么」
+ * 推给 App（webkit.messageHandlers.helmMenu），菜单项据此变灰或打勾。浏览器里没有这个桥，这一段什么都不做。
+ * 命令尽量「点页面上已有的那个按钮」，这样和用鼠标点走同一条路（同样的确认框、防连点）。 */
+const IN_APP = Boolean(window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.helmMenu);
+const mainBtn = (sel) => document.querySelector(`#main ${sel}:not([disabled])`);
+function goThen(hash, fn) {
+  if (location.hash === hash || (hash === '#/' && !location.hash)) { fn(); return; }
+  addEventListener('hashchange', () => setTimeout(fn, 0), { once: true });
+  location.hash = hash;
+}
+function focusWhenReady(sel, n = 20) { const el = document.querySelector(sel); if (el) { el.focus(); if (el.select) el.select(); } else if (n) setTimeout(() => focusWhenReady(sel, n - 1), 50); }
+const MENU_CMDS = {
+  'nav-home': () => { location.hash = '#/'; },
+  'nav-data': () => { location.hash = '#/data'; },
+  'nav-journal': () => { location.hash = '#/journal'; },
+  'nav-pipeline': () => { location.hash = '#/pipeline'; },
+  'nav-agents': () => { location.hash = '#/agents'; },
+  'new-project': () => openProjectModal(),
+  'new-idea': () => goThen('#/', () => focusWhenReady('#ideaInput')),
+  find: () => { if (narrow()) $('#app').classList.add('side-open'); focusWhenReady('#projectSearch'); },
+  chat: () => $('#chatToggle').click(),
+  ask: () => { openChat(); $('#input').focus(); },
+  settings: () => openSettings(),
+  ai: () => openAiModal(),
+  health: () => goThen('#/', recheckHealth),
+  shortcuts: () => openShortcuts(),
+  // ⌘R 容易顺手按到（以前是重新载入），而每次回测都计入尝试次数：先确认
+  run: async () => {
+    if (!mainBtn('[data-run-role="candidate"]')) return;
+    if (!(await askConfirm({ title: _t('mr_title'), message: _t('mr_msg'), ok: _t('k0047') }))) return;
+    const b = mainBtn('[data-run-role="candidate"]'); if (b) b.click();
+  },
+  compile: () => { const b = mainBtn('[data-action="compile"]'); if (b) b.click(); },
+  research: () => { const b = mainBtn('[data-action="research"]'); if (b) b.click(); },
+  paper: () => { const b = mainBtn('[data-action="paper-new"]'); if (b) b.click(); },
+  'set-main': () => { const b = mainBtn('[data-action="set-main"]'); if (b) b.click(); },
+  'project-delete': () => { const b = mainBtn('[data-action="project-delete"]'); if (b) b.click(); },
+  'project-rename': () => { const b = mainBtn('[data-action="project-rename"]'); if (b) b.click(); },
+};
+window.helmMenu = (cmd) => {
+  const m = /^(theme|lang)-(auto|light|dark|zh|en)$/.exec(cmd);
+  if (m) { if (m[1] === 'theme') applyTheme(m[2]); else applyLang(m[2]); return; }
+  // 已经开着一个对话框：不在它上面再叠别的（主题、语言除外）
+  if (document.querySelector('dialog[open]')) return;
+  const f = MENU_CMDS[cmd];
+  if (f) f();
+};
+let menuSent = '';
+function menuSync() {
+  if (!IN_APP) return;
+  const has = (sel) => Boolean(mainBtn(sel));
+  const st = {
+    run: has('[data-run-role="candidate"]'), compile: has('[data-action="compile"]'), research: has('[data-action="research"]'),
+    paper: has('[data-action="paper-new"]'), setMain: has('[data-action="set-main"]'), del: has('[data-action="project-delete"]'), rename: has('[data-action="project-rename"]'),
+    nav: S.route.view !== 'home' ? 'project' : S.route.page || (S.route.data ? 'data' : S.route.journal ? 'journal' : 'home'),
+    theme: themePref(), lang: HELM_I18N.pref(),
+  };
+  const j = JSON.stringify(st);
+  if (j === menuSent) return;
+  menuSent = j;
+  try { window.webkit.messageHandlers.helmMenu.postMessage(st); } catch { /* App 关窗时可能已断开 */ }
+}
+// 快捷键一览（帮助 → 键盘快捷键，⌘/）。浏览器里只列网页自己能接住的那几个
+function openShortcuts() {
+  const K = (k) => k.replace(/⌘/g, MOD_KEY);
+  const app = [
+    [_t('sc_g_go'), [['⌘1', _t('sc_home')], ['⌘2', _t('sc_data')], ['⌘3', _t('sc_journal')], ['⌘4', _t('sc_pipeline')], ['⌘5', _t('sc_agents')], ['⌘F', _t('sc_find')], ['⌘[  ⌘]', _t('sc_back')]]],
+    [_t('sc_g_make'), [['⌘N', _t('sc_newproj')], ['⇧⌘N', _t('sc_newidea')], ['⌘↩', _t('sc_submit')]]],
+    [_t('sc_g_proj'), [['⌘R', _t('sc_run')], ['⌘B', _t('sc_compile')]]],
+    [_t('sc_g_agent'), [['⌘J', _t('sc_chat')], ['⌘K', _t('sc_ask')], ['Esc', _t('sc_esc')]]],
+    [_t('sc_g_app'), [['⌘,', _t('sc_settings')], ['⇧⌘R', _t('sc_reload')], ['⌘+  ⌘−  ⌘0', _t('sc_zoom')], ['⌘/', _t('sc_this')]]],
+  ];
+  const web = [[_t('sc_g_agent'), [['⌘J', _t('sc_chat')], ['⌘K', _t('sc_ask')], ['⌘↩', _t('sc_submit')], ['Esc', _t('sc_esc')]]]];
+  const groups = IN_APP ? app : web;
+  openModal({
+    cls: 'sc-dlg', labelId: 'scH',
+    html: `<div class="cd-body"><h2 id="scH">${_t('sc_title')}</h2>
+      <div class="sc-grid">${groups.map(([g, rows]) => `<section><h3>${g}</h3><dl>${rows.map(([k, d]) => `<div><dt>${esc(d)}</dt><dd><kbd>${esc(K(k))}</kbd></dd></div>`).join('')}</dl></section>`).join('')}</div>
+      ${IN_APP ? '' : `<p class="sc-note">${_t('sc_web')}</p>`}
+      <div class="modal-actions"><button type="button" class="btn primary" data-sc-close>${_t('k0032')}</button></div></div>`,
+    onClick: (e, close) => { if (e.target.closest('[data-sc-close]')) close(); },
+  }).d.querySelector('[data-sc-close]').focus();
+}
+document.addEventListener('keydown', (e) => { if ((e.metaKey || e.ctrlKey) && e.key === '/' && !IN_APP) { e.preventDefault(); if (!document.querySelector('dialog[open]')) openShortcuts(); } });
+addEventListener('hashchange', () => setTimeout(menuSync, 0));
+// 页面有 40 多处只局部重画（回测诊断、股票池、模拟实盘……），不经过 renderMain：盯住 #main 的变化再同步一次，
+// 不然菜单会停在旧状态（例如回测页上明明有「设为主版本」按钮，菜单里却是灰的）。menuSync 状态没变时不发消息
+if (IN_APP) { let mt = 0; new MutationObserver(() => { clearTimeout(mt); mt = setTimeout(menuSync, 120); }).observe($('#main'), { childList: true, subtree: true, attributes: true, attributeFilter: ['disabled'] }); }
 
 init();

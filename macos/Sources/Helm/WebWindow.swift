@@ -9,6 +9,8 @@ import WebKit
 final class WebWindowController: NSWindowController, NSWindowDelegate, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate {
     let webView: WKWebView
     var onAppAction: ((String) -> Void)?
+    /// 网页推来的菜单状态（哪些命令现在能用、主题、语言）；状态页 / 出错页上为 nil，网页命令全部变灰
+    private(set) var menuState: [String: Any]?
     private var allowedPort: Int?
     private var downloadDestinations: [ObjectIdentifier: URL] = [:]
 
@@ -16,6 +18,8 @@ final class WebWindowController: NSWindowController, NSWindowDelegate, WKNavigat
         let cfg = WKWebViewConfiguration()
         cfg.websiteDataStore = .default() // 网页的语言、主题等偏好存在这里，重开 App 还在
         cfg.preferences.javaScriptCanOpenWindowsAutomatically = false
+        let bridge = MenuBridge()
+        cfg.userContentController.add(bridge, name: "helmMenu")
         webView = WKWebView(frame: .zero, configuration: cfg)
         webView.allowsBackForwardNavigationGestures = true // 触控板双指左右滑动 = 后退 / 前进，和 Safari 一样
         webView.allowsMagnification = true
@@ -37,24 +41,35 @@ final class WebWindowController: NSWindowController, NSWindowDelegate, WKNavigat
         window.delegate = self
         webView.navigationDelegate = self
         webView.uiDelegate = self
+        bridge.allowedPort = { [weak self] in self?.allowedPort }
+        bridge.onState = { [weak self] st in self?.menuState = st }
     }
 
     required init?(coder: NSCoder) { fatalError("not used") }
 
     // MARK: 内容
 
+    /// 菜单命令交给网页：window.helmMenu('run') 等（见 public/app.js「Mac App 菜单 ↔ 网页」）
+    func runMenu(_ cmd: String) {
+        guard menuState != nil, let arg = try? JSONSerialization.data(withJSONObject: [cmd]), let js = String(data: arg, encoding: .utf8) else { return }
+        webView.evaluateJavaScript("window.helmMenu && window.helmMenu(...\(js))")
+    }
+
     func load(port: Int) {
+        menuState = nil
         allowedPort = port
         webView.load(URLRequest(url: URL(string: "http://127.0.0.1:\(port)/")!))
     }
 
     func showStatus(_ message: String) {
         allowedPort = nil
+        menuState = nil
         webView.loadHTMLString(Self.page(body: "<div class=spin></div><p>\(Self.esc(message))</p>"), baseURL: nil)
     }
 
     func showError(title: String, detail: String, canChooseFolder: Bool = false) {
         allowedPort = nil
+        menuState = nil
         let buttons = [
             "<a class=btn href='helm-app://restart'>\(L("重试", "Try again"))</a>",
             "<a class=btn href='helm-app://log'>\(L("打开日志", "Open log"))</a>",
@@ -186,5 +201,17 @@ final class WebWindowController: NSWindowController, NSWindowDelegate, WKNavigat
         panel.allowsMultipleSelection = parameters.allowsMultipleSelection
         panel.canChooseDirectories = parameters.allowsDirectories
         panel.beginSheetModal(for: window!) { completionHandler($0 == .OK ? panel.urls : nil) }
+    }
+}
+
+/// 网页 → App 的消息通道。单独一个对象：WKUserContentController 会强引用它，不能直接挂窗口控制器（会循环引用）
+private final class MenuBridge: NSObject, WKScriptMessageHandler {
+    var onState: (([String: Any]) -> Void)?
+    var allowedPort: (() -> Int?)?
+    func userContentController(_ c: WKUserContentController, didReceive message: WKScriptMessage) {
+        // 只认本机 Helm 页面发来的（主机和端口都要对上；状态页 / 出错页 allowedPort 为 nil，一律不认）
+        guard message.frameInfo.isMainFrame, let url = message.frameInfo.request.url, let host = url.host, ["127.0.0.1", "localhost"].contains(host),
+              let port = allowedPort?(), url.port == port, let st = message.body as? [String: Any] else { return }
+        onState?(st)
     }
 }

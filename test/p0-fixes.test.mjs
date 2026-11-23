@@ -108,6 +108,11 @@ class Peek(HelmSignals):
   check('沙盒（agent）：只能写临时目录', /\(deny file-write\*\)/.test(ag) && !ag.includes(`(subpath "${path.join(ROOT, 'lib')}")`) && !ag.includes(`(subpath "${ROOT}")`));
   check('沙盒：密钥目录和 .env 读写都不行（规则写在最后，优先）', ag.trim().split('\n').pop().startsWith('(deny file-read* file-write*') && ag.includes(path.join(ROOT, 'data', 'secrets')) && ag.includes(path.join(ROOT, '.env')));
   check('沙盒（research）：可以联网但连不上 Helm；只能写 projects/<id>/research/', /\(deny network-outbound \(remote ip "localhost:4999"\)\)/.test(rs) && !/^\(deny network-outbound\)$/m.test(rs) && /\/\[0-9\]\+\/research\//.test(rs));
+  const LD = path.join(ROOT, 'engine', 'Lean', 'Data');
+  const ex = X.sandboxProfile('export', { port: 4999, root: ROOT, projectsDir: path.join(ROOT, 'projects'), leanDataDir: LD });
+  check('沙盒（export）：股票池导出能写 LEAN 日线价格目录和 helm-meta.json', ['daily', 'map_files', 'factor_files'].every((d) => ex.includes(`(subpath "${path.join(LD, 'equity', 'usa', d)}")`)) && ex.includes(`(literal "${path.join(LD, 'helm-meta.json')}")`));
+  check('沙盒（research）：普通研究任务写不了 LEAN 价格数据', !rs.includes(path.join('equity', 'usa', 'daily')) && !rs.includes('helm-meta.json'));
+  check('沙盒（export）：其余限制和 research 一样（连不上 Helm、密钥规则在最后）', /\(deny network-outbound \(remote ip "localhost:4999"\)\)/.test(ex) && ex.trim().split('\n').pop().startsWith('(deny file-read* file-write*'));
   check('去掉密钥环境变量', !('ALPACA_API_KEY' in X.scrubEnv({ ALPACA_API_KEY: 'x', HELM_TOKEN: 'y', PATH: '/bin' })) && !('HELM_TOKEN' in X.scrubEnv({ HELM_TOKEN: 'y' })) && X.scrubEnv({ PATH: '/bin' }).PATH === '/bin');
   if (process.platform !== 'darwin') check('不是 macOS：沙盒报告不可用（规则会收紧为要批准）', X.sandboxReady('agent', { port: 4999 }) === false && X.wrapAgentCommand('npm test -- --fast', { port: 4999 }) === null);
 }

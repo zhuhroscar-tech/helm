@@ -13,7 +13,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { engineStatus, listProjects, DATA_DIR, READ_ENDPOINTS, runSensitivity, sensitivityRead, runTune, tuneRead, PROJECTS_DIR, compileProject, createBacktest, createProject, trashProject, updateBacktest, reconcileLedgers, templateCode, secretDirs, setMainByUser, leanSandboxState, updateProjectFileByUser } from './lib/engine.mjs';
+import { engineStatus, listProjects, DATA_DIR, READ_ENDPOINTS, runSensitivity, sensitivityRead, runTune, tuneRead, PROJECTS_DIR, compileProject, createBacktest, createProject, trashProject, updateBacktest, reconcileLedgers, templateCode, secretDirs, setMainByUser, leanSandboxState, updateProjectFileByUser, renameProject } from './lib/engine.mjs';
 import { setupHints, setupCommand } from './lib/setup-hints.mjs';
 import * as Q from './lib/qlib.mjs';
 import { loadRobust } from './lib/robust.mjs';
@@ -280,7 +280,7 @@ const NUM_FIELDS = ['costBps', 'holdoutYears', 'capital'];
 const BOOL_FIELDS = ['full', 'fresh', 'allowDanger', 'wait', 'reviewOutline', 'clearTemplate', 'clearLogo'];
 const ARR_MAX = { tickers: 2000, factors: 20, horizons: 20, backtestIds: 6 };
 const REQUIRED = {
-  '/api/actions/project': ['name'], '/api/actions/project-delete': ['projectId'], '/api/actions/compile': ['projectId'], '/api/actions/backtest': ['projectId'],
+  '/api/actions/project': ['name'], '/api/actions/project-delete': ['projectId'], '/api/actions/project-rename': ['projectId', 'name'], '/api/actions/compile': ['projectId'], '/api/actions/backtest': ['projectId'],
   '/api/actions/backtest-tag': ['projectId', 'backtestId'], '/api/actions/backtest-main': ['projectId', 'backtestId'], '/api/actions/sensitivity': ['projectId', 'backtestId'], '/api/actions/tune': ['projectId', 'backtestId'], '/api/actions/universe': ['index'], '/api/actions/research': ['projectId'], '/api/actions/idea': ['projectId'],
   '/api/actions/research-stop': ['projectId', 'jobId'], '/api/actions/research-resume': ['projectId', 'jobId'],
   '/api/actions/paper-start': ['projectId', 'backtestId'], '/api/actions/paper-stop': ['projectId', 'sessionId'], '/api/actions/paper-run': ['projectId', 'sessionId'],
@@ -1155,6 +1155,14 @@ const server = http.createServer(async (req, res) => {
       const { name, description, template, nameEn, nameZh } = await readJson(req);
       const r = await createProject({ name: String(name || '').trim(), nameEn, nameZh, description: String(description || '').slice(0, 2000), code: templateCode(template, res.helmLang) });
       if (r.success) broadcast({ type: 'project_created', projectId: r.projects[0].projectId });
+      return sendJson(res, 200, r);
+    }
+    // 改名：走同一套写请求校验（checkMutation），project.json 原子写入；名字按界面语言写进 nameZh / nameEn
+    if (p === '/api/actions/project-rename' && req.method === 'POST') {
+      const b = await readJson(req);
+      const projectId = Number(b.projectId);
+      const r = await renameProject({ projectId, name: b.name, lang: b.lang || res.helmLang });
+      if (r.success) broadcast({ type: 'project_renamed', projectId });
       return sendJson(res, 200, r);
     }
     if (p === '/api/actions/project-delete' && req.method === 'POST') {
