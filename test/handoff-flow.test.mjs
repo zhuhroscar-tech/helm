@@ -66,7 +66,7 @@ function subscribe() {
 }
 
 // 假的 claude。prompt 从 stdin 读：
-//  - 以「【」开头：是被交接的任务，直接回答（含 SLOW 则先等 1.5 秒）
+//  - 以「【」开头：是被交接的任务，直接回答（含 SLOW 则先等 1.5 秒，含 HANG 则等 30 秒，用来测「停止」）
 //  - 以「PLAN」开头：后面是 JSON 数组，每项是 /api/handoff 的请求体（可用 fromThreadId 覆盖），按 MCP 工具的方式依次 POST，
 //    每项前后各输出 tool_use / tool_result 事件，响应写到 OUT/<threadId>.json
 const FAKE = path.join(TMP, 'fake-claude.mjs');
@@ -85,6 +85,7 @@ emit({ type: 'system', subtype: 'init', session_id: sid, model: 'fake-model' });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 if (prompt.startsWith('【')) {
   if (prompt.includes('SLOW')) await sleep(1500);
+  if (prompt.includes('HANG')) await sleep(30000);
   emit({ type: 'assistant', message: { content: [{ type: 'text', text: '子任务完成：' + prompt.split('\\n\\n')[1].slice(0, 30) }] } });
 } else if (prompt.startsWith('PLAN')) {
   const plan = JSON.parse(prompt.slice(4));
@@ -249,6 +250,36 @@ try {
   const p3 = await getThread(c3.json.threadId);
   const tools3 = p3.messages.flatMap((m) => m.parts || []).filter((p) => p.kind === 'tool');
   check('被拒绝的 handoff 工具块 status=error', tools3.length === 6 && tools3.every((t) => t.status === 'error'), tools3.map((t) => t.status).join(','));
+
+  /* ---- 6. 停掉总控：它用 wait=true 等着的子对话一起停；wait=false 的不受影响 ---- */
+  const c6 = await chat('mia', planOf([
+    { agent: 'analyst', task: 'HANG 并行任务：给项目 3 写一段摘要，不需要等。', wait: false },
+    { agent: 'engineer', task: 'HANG 被等的任务：检查项目 3 的回测有没有未来函数。', wait: true },
+  ]));
+  const p6 = c6.json.threadId;
+  const kids = await until(() => {
+    const st = bus.events.filter((e) => e.type === 'run_start' && e.from && e.from.threadId === p6);
+    return st.length === 2 ? st : null;
+  });
+  check('两个子对话都开始了', Boolean(kids));
+  const waited = kids && kids.find((e) => e.agent === 'engineer').threadId;
+  const parallel = kids && kids.find((e) => e.agent === 'analyst').threadId;
+  await sleep(300);
+  const t0 = Date.now();
+  const st6 = await req('POST', '/api/chat/stop', { headers: good, body: { threadId: p6 } });
+  check('停止返回连带停了 2 个（总控 + 被等的子对话）', st6.status === 200 && st6.json.stopped === 2, JSON.stringify(st6.json));
+  const endW = await until(() => bus.events.find((e) => e.type === 'run_end' && e.threadId === waited), 8000);
+  check('被等的子对话随总控一起停止（不用再到它的对话里停）', endW && endW.stopped === true && Date.now() - t0 < 8000, JSON.stringify(endW));
+  const endP = await until(() => bus.events.find((e) => e.type === 'run_end' && e.threadId === p6), 8000);
+  check('总控本身停止', endP && endP.stopped === true);
+  await sleep(500);
+  check('wait=false 的并行子对话仍在运行', !bus.events.some((e) => e.type === 'run_end' && e.threadId === parallel));
+  const hello6 = subscribe(); subs.push(hello6);
+  const h6 = await until(() => hello6.events.find((e) => e.type === 'hello'));
+  check('运行列表里只剩并行子对话', h6 && h6.running.some((r) => r.threadId === parallel) && !h6.running.some((r) => r.threadId === waited || r.threadId === p6), JSON.stringify(h6 && h6.running.map((r) => r.threadId)));
+  await req('POST', '/api/chat/stop', { headers: good, body: { threadId: parallel } });
+  const endPar = await until(() => bus.events.find((e) => e.type === 'run_end' && e.threadId === parallel), 8000);
+  check('并行子对话可以单独停止', endPar && endPar.stopped === true);
 } catch (e) {
   check('测试本身没有抛异常', false, e && e.stack);
   console.log(serverLog.slice(-800));

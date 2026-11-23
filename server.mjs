@@ -1033,12 +1033,36 @@ async function handleHandoff(req, res) {
     return sendJson(res, Number.isInteger(e.code) && e.code >= 400 && e.code < 600 ? e.code : 500, { error: e.message });
   }
   if (!body.wait) return sendJson(res, 200, { threadId: thread.id, agent: target.id, agentName: target.name, wait: false });
+  // wait=true：交出任务的一方在等结果，子对话属于它。它被停掉（或进程没了）时，子对话也要停，
+  // 否则用户点了「停止」，被等的那个 agent 还在后台继续跑、继续花钱（以前要到对方的对话里再停一次）。
+  // 两条路：1) /api/chat/stop 停父对话时顺着 waitingOn 一起停（stopRunTree）；2) 父进程没了 → MCP 的这个请求断开 → 停子对话。
+  // wait=false 的交接是有意并行的，不跟着停。
+  if (srcRun) (srcRun.waitingOn || (srcRun.waitingOn = new Set())).add(thread.id);
+  let answered = false;
+  const onGone = () => { if (!answered && runs.get(thread.id) === run) stopRunTree(thread.id); };
+  res.on('close', onGone);
   // 最多等 14 分钟（MCP 那边 16 分钟超时）：等不完就把 threadId 交回去，并说明对方仍在运行。
   // 以前一直等，MCP 先超时，调用方只看到「交接失败」，很可能再交接一次，同一个任务开出两个 agent
   let timer;
   const out = await Promise.race([run.done, new Promise((r) => { timer = setTimeout(() => r({ stillRunning: true }), HANDOFF_WAIT_MS); })]);
   clearTimeout(timer);
+  answered = true;
+  res.off('close', onGone);
+  // 等超时交回去以后，调用方已经知道对方还在跑，之后再停它就不连带这个子对话
+  if (srcRun && srcRun.waitingOn) srcRun.waitingOn.delete(thread.id);
   return sendJson(res, 200, { threadId: thread.id, agent: target.id, agentName: target.name, wait: true, ...out });
+}
+
+/** 停一个对话，以及它正用 wait=true 等着的子对话（递归）。返回停掉的对话数。 */
+function stopRunTree(threadId, seen = new Set()) {
+  if (seen.has(threadId)) return 0;
+  seen.add(threadId);
+  const r = runs.get(threadId);
+  if (!r) return 0;
+  let n = 0;
+  for (const childId of r.waitingOn || []) n += stopRunTree(childId, seen);
+  if (r.child && !r.child.killed) r.child.kill('SIGTERM');
+  return n + 1;
 }
 
 /* ---------------- http ---------------- */
@@ -1597,8 +1621,8 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/chat/stop' && req.method === 'POST') {
       const { threadId } = await readJson(req);
       const r = runs.get(threadId);
-      if (r && r.child) r.child.kill('SIGTERM');
-      return sendJson(res, 200, { ok: Boolean(r) });
+      const stopped = r ? stopRunTree(threadId) : 0;
+      return sendJson(res, 200, { ok: Boolean(r), stopped });
     }
     // 必须 await：直接 return 一个 Promise 的话，里面抛的错不会进下面的 catch，变成未处理的 rejection 把服务带崩
     if (p === '/api/handoff' && req.method === 'POST') return await handleHandoff(req, res);

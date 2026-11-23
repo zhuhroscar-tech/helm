@@ -23,6 +23,9 @@ Confirmed in `CHANGELOG.md` (2026-11-14) and the review's status updates.
 - Review section 2.5: `regimeLabels` made incremental. Python exports vectorised (`lean_lines`, `lean_rows`).
 - Monday-start backtests dropping their first day, and wrong excess annualisation when the benchmark covers only part of the period.
 
+- Flaky `test/tune.test.mjs` "recommended parameter is near the true optimum": the test was already seeded, but the cause was in the product. Recommending the top plateau point picked a range edge in about 1 in 8 samples. Helm now recommends the candidate nearest the centre of the best plateau (`recommendFromPlateau` in `lib/tune.mjs`). With random task ids the check now fails about 1 in 40 instead of 1 in 6.
+- Stopping the orchestrator now also stops the agent it is waiting on (`handoff` with `wait=true`): explicitly via `/api/chat/stop`, and also when the caller's process disappears. `wait=false` handoffs keep running. Covered in `test/handoff-flow.test.mjs`.
+
 Owner decision, not a plan:
 
 - P0 #5 (a paper session still trading from a backtest that was later demoted). The existing session was kept running by choice. A manual "set as main" button was added instead.
@@ -33,8 +36,6 @@ Checks that are missing or known to be broken.
 
 - Verify the macOS sandbox rules on a real Mac. The changelog says they were checked only as text on Linux.
 - Run full `npm test` (with LEAN) against the 2026-11-14 changes. The changelog records only the fast run.
-- Fix the flaky `test/tune.test.mjs` check "recommended parameter is near the true optimum". About 1 run in 6 recommends 11 where 14-18 is expected. The cause is the seed taken from the random task id.
-- Fix the known bug: when the orchestrator is stopped, a handoff it sent with `wait=true` keeps running. It must be stopped separately in the other agent's conversation.
 - Run the 2026-11-12 paper-trading changes (failure records, market calendar, catch-up after interruption) against real LEAN. The changelog says this has not been done.
 - Run the 2026-11-13 handoff flow once with the real `claude` command. The changelog says only a fake `claude` has been used.
 - Run the `--parameters` path to LEAN for parameter sensitivity. Only the full-mode `sensitivity.test.mjs` covers it, and it has not run.
