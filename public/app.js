@@ -95,9 +95,13 @@ function pct(v, sign = true, d = 1) {
   return `${n < 0 && +t !== 0 ? '−' : sign && n > 0 && +t !== 0 ? '+' : ''}${t}%`;
 }
 const num = (v, d = 2) => (v == null || v === '' || Number.isNaN(+v) ? '—' : (+v).toFixed(d).replace(/^-(?=\d*\.?\d*[1-9])/, '−').replace(/^-/, ''));
-function signClass(v) {
-  const n = parseFloat(String(v ?? '').replace(/−/g, '-').replace(/[^0-9.\-]/g, ''));
-  return Number.isNaN(n) || n === 0 ? '' : n > 0 ? 'up' : 'down';
+// 接近 0 的不上色（显示成 +0.0% 却标绿 / 标红只会误导）：带 % 的字符串按百分数、其余字符串（夏普等）都是 |x| < 0.05；
+// 数字按小数收益率，|x| < 0.0005（即 0.05%）。eps 可以自己指定
+function signClass(v, eps) {
+  const s = String(v ?? '');
+  const n = parseFloat(s.replace(/−/g, '-').replace(/[^0-9.\-]/g, ''));
+  const e = eps ?? (typeof v === 'number' ? 0.0005 : 0.05);
+  return Number.isNaN(n) || Math.abs(n) < e ? '' : n > 0 ? 'up' : 'down';
 }
 const isRunning = (b) => Boolean(b) && !b.error && /queue|progress/i.test(b.status || '');
 const isFailed = (b) => Boolean(b) && (/error/i.test(b.status || '') || Boolean(b.error));
@@ -315,6 +319,7 @@ function renderHomeSoon() {
 }
 async function loadStatus(force = false) {
   loadHealth(force);
+  loadAi(force);
   try { S.status = await api(`/api/status${force ? '?refresh=1' : ''}`); } catch (e) { S.status = { error: e.message }; }
   renderStatus();
   renderHomeSoon();
@@ -362,8 +367,69 @@ function renderStatus() {
   const c = st.claude || {};
   const e = st.engine || {};
   $('#status').innerHTML = `
-    <button class="pill ${c.ok ? 'ok' : 'bad'}" data-refresh title="${esc(c.ok ? `${_t('k0090', { version: c.version })}` : zhErr(c.error))}"><span class="led"></span><span class="txt">${c.ok ? `Claude ${esc(String(c.version).split(' ')[0])}` : _t('k0091')}</span></button>
-    <button class="pill ${e.ok ? 'ok' : 'bad'}" data-refresh title="${esc(e.ok ? `${_t('k0092', { tickers: e.tickers })}` : `${_t('k0093')}${(e.missing || []).join(', ')}`)}"><span class="led"></span><span class="txt">${e.ok ? _t('k0094') : _t('k0095')}</span></button>`;
+    <button class="pill ${c.ok ? 'ok' : 'bad'}" data-refresh title="${esc(c.ok ? `${_t('k0090', { version: c.version })}` : zhErr(c.error))}" aria-label="${esc(`Claude: ${c.ok ? _t('k0090', { version: c.version }) : zhErr(c.error)}`)}"><span class="led"></span><span class="txt">${c.ok ? `Claude ${esc(String(c.version).split(' ')[0])}` : _t('k0091')}</span><span class="txt-s" aria-hidden="true">Claude</span></button>
+    <button class="pill ${e.ok ? 'ok' : 'bad'}" data-refresh title="${esc(e.ok ? `${_t('k0092', { tickers: e.tickers })}` : `${_t('k0093')}${(e.missing || []).join(', ')}`)}" aria-label="${esc(`${e.ok ? _t('k0094') : _t('k0095')}: ${e.ok ? _t('k0092', { tickers: e.tickers }) : `${_t('k0093')}${(e.missing || []).join(', ')}`}`)}"><span class="led"></span><span class="txt">${e.ok ? _t('k0094') : _t('k0095')}</span><span class="txt-s" aria-hidden="true">LEAN</span></button>${aiPillHTML()}`;
+}
+
+/* ---- AI 连接：订阅 / API key / 兼容接口（lib/ai.mjs）。密钥只发给服务端保存，网页只拿到末 4 位 ---- */
+const aiModeName = (m) => ({ auto: _t('k1560'), subscription: _t('k1561'), apiKey: _t('k1562'), custom: _t('k1563') }[m] || m);
+async function loadAi(force = false) {
+  try { S.ai = await api(`/api/ai/status${force ? '?refresh=1' : ''}`); } catch { S.ai = null; }
+  renderStatus();
+}
+function aiPillHTML() {
+  if (!S.ai || !S.ai.ai) return '';
+  const { ai, login } = S.ai;
+  const ok = !login || login.ok;
+  const tip = ok ? _t('k1564', { mode: aiDetected() }) : zhErr((login && login.error) || '');
+  return `<button type="button" class="pill ${ok ? 'ok' : 'bad'}" data-ai-open title="${esc(tip)}" aria-label="${esc(`AI: ${tip}`)}"><span class="led"></span><span class="txt">AI · ${esc(aiDetected())}</span><span class="txt-s" aria-hidden="true">AI</span></button>`;
+}
+function aiSelectedMode() { const r = document.querySelector('#aiForm input[name="aiMode"]:checked'); return r ? r.value : 'auto'; }
+function renderAiModal() {
+  const mode = aiSelectedMode();
+  const cur = (S.ai && S.ai.ai) || { mode: 'auto' };
+  const needsKey = mode === 'apiKey' || mode === 'custom';
+  $('#aiKeyWrap').hidden = !needsKey;
+  $('#aiUrlWrap').hidden = mode !== 'custom';
+  $('#aiModelWrap').hidden = mode !== 'custom';
+  $('#aiCustomNote').hidden = mode !== 'custom';
+  $('#aiSubNote').hidden = mode !== 'subscription';
+  // 留空沿用旧 key：只在同一种方式、同一个接口地址时成立（服务端也是这么判断的）
+  const sameTarget = cur.mode === mode && (mode !== 'custom' || ($('#aiUrl').value.trim().replace(/\/+$/, '') === cur.baseUrl));
+  $('#aiKeyKeep').hidden = !(needsKey && cur.hasKey && sameTarget);
+  $('#aiKey').placeholder = cur.hasKey && sameTarget ? cur.keyHint : (mode === 'apiKey' ? 'sk-ant-…' : '');
+  const login = S.ai && S.ai.login;
+  $('#aiState').textContent = `${_t('k1565', { mode: aiModeName(cur.mode) })}${cur.hasKey ? ` · ${cur.keyHint}` : ''}${login && !login.ok ? ` · ${zhErr(login.error || '')}` : ''}`;
+}
+async function openAiModal() {
+  await loadAi(true);
+  const cur = (S.ai && S.ai.ai) || { mode: 'auto' };
+  for (const r of document.querySelectorAll('#aiForm input[name="aiMode"]')) r.checked = r.value === cur.mode;
+  $('#aiUrl').value = cur.baseUrl || '';
+  $('#aiModel').value = cur.model || '';
+  $('#aiKey').value = '';
+  renderAiModal();
+  $('#aiModal').showModal();
+}
+async function saveAiUI() {
+  const body = { aiMode: aiSelectedMode(), apiKey: $('#aiKey').value.trim(), baseUrl: $('#aiUrl').value.trim(), aiModel: $('#aiModel').value.trim() };
+  const r = await once('ai-save', $('#aiSave'), () => safePost('/api/actions/ai-save', body));
+  if (!r) return;
+  if (!r.success) { toast(`${_t('k1566')}${(r.errors || []).map(zhErr).join('; ')}`); return; }
+  $('#aiKey').value = '';
+  S.ai = { success: true, ai: r.ai, login: r.login };
+  renderStatus();
+  loadHealth(true);
+  if (r.login && !r.login.ok) { renderAiModal(); toast(`${_t('k1567')}${zhErr(r.login.error || '')}`); return; }
+  $('#aiModal').close();
+  toast(_t('k1568', { mode: aiModeName(r.ai.mode) }));
+}
+async function testAiUI() {
+  const r = await once('ai-test', $('#aiTest'), () => safePost('/api/actions/ai-test', {}));
+  if (!r) return;
+  if (r.ai) S.ai = { success: true, ai: r.ai, login: r.login || (S.ai && S.ai.login) };
+  renderStatus(); renderAiModal();
+  toast(r.success ? _t('k1569') : `${_t('k1566')}${(r.errors || []).map(zhErr).join('; ')}`);
 }
 
 // 顶栏“运行中”：并行任务一览
@@ -423,14 +489,14 @@ function renderProjects() {
     ul.innerHTML = `<li class="side-empty">${_t('k0098')}<button type="button" class="linkish" data-reload>${_t('k0013')}</button></li>`;
     return;
   }
-  const list = S.projects.filter((p) => !q || String(p.name || '').toLowerCase().includes(q));
+  const list = S.projects.filter((p) => !q || [p.name, p.nameEn, p.nameZh].some((x) => String(x || '').toLowerCase().includes(q)));
   if (q && !list.length) {
     ul.innerHTML = `<li class="side-empty" role="status">${_t('k0099')}${esc($('#projectSearch').value.trim())}${_t('k0100')}<button type="button" class="linkish" data-clear-search>${_t('k0101')}</button></li>`;
     return;
   }
   ul.innerHTML = list.map((p) => `
-    <li><a href="#/p/${p.projectId}" class="${S.route.projectId === p.projectId ? 'active' : ''}" ${S.route.projectId === p.projectId ? 'aria-current="page"' : ''} title="${esc(p.name)}">
-      <span class="pname">${esc(p.name)}</span><span class="lang">${agoT(p.modified)}</span>
+    <li><a href="#/p/${p.projectId}" class="${S.route.projectId === p.projectId ? 'active' : ''}" ${S.route.projectId === p.projectId ? 'aria-current="page"' : ''} title="${esc(pName(p))}">
+      <span class="pname">${esc(pName(p))}</span><span class="lang">${agoT(p.modified)}</span>
     </a></li>`).join('') || `<li class="side-empty">${S.projects.length ? _t('k0102') : _t('k0103')}</li>`;
 }
 async function ensureProject(projectId) {
@@ -456,6 +522,8 @@ function parseRoute() {
   if (m) return { view: 'paper', projectId: +m[1], sessionId: m[2] };
   m = h.match(/^\/p\/(\d+)\/compare(?:\/([a-f0-9,]*))?/);
   if (m) return { view: 'project', projectId: +m[1], tab: 'compare', ids: [...new Set((m[2] || '').split(',').filter(Boolean))] };
+  m = h.match(/^\/p\/(\d+)\/reports(?:\/([a-z0-9-]{6,64}))?/);
+  if (m) return { view: 'project', projectId: +m[1], tab: 'reports', deckId: m[2] || null };
   m = h.match(/^\/p\/(\d+)(?:\/(code|backtests|research|paper|rules))?/);
   if (m) return { view: 'project', projectId: +m[1], tab: m[2] || null };
   m = h.match(/^\/pipeline(?:\/(\d+))?$/);
@@ -466,14 +534,21 @@ function parseRoute() {
   if (m) return { view: 'home', page: 'agents', agentsView: m[1] || 'list' };
   return { view: 'home', data: h === '/data', journal: h === '/journal' };
 }
+// 同一个页面的两种写法（#/p/1 和 #/p/1/backtests）当成一样
+const sameHref = (a, b) => String(a || '').replace(/\/(backtests|research|paper)$/, '') === String(b || '').replace(/\/(backtests|research|paper)$/, '');
 function onRoute() {
+  const nk = navKey();
+  NAV.cur = location.hash;
+  const back = nk.revisit && NAV.pos.has(nk.key) ? NAV.pos.get(nk.key) : null;
   const prev = S.route;
   S.route = parseRoute();
   stopPoll();
   const sameProject = prev.projectId === S.route.projectId;
   const sameBacktest = prev.backtestId && prev.backtestId === S.route.backtestId;
-  if (!sameProject) { chartCache.clear(); S.project = null; S.files = null; S.backtests = null; S.research = null; S.papers = null; S.cmpSel = []; S.cmpCache = null; S.compileResult = null; S.fileSel = 'main.py'; }
+  if (!sameProject) { chartCache.clear(); S.project = null; S.files = null; S.backtests = null; S.research = null; S.papers = null; S.cmpSel = []; S.cmpCache = null; S.compileResult = null; S.fileSel = 'main.py'; S.codeEdit = null; }
   S.ctxOff = false;
+  // 从 /research、/paper 链接进来：画好后滚到概览里对应的区块（后退回来恢复原位置时不抢）
+  S.secJump = back == null && S.route.view === 'project' && (S.route.tab === 'research' || S.route.tab === 'paper') ? S.route.tab : null;
   $('#app').classList.remove('side-open');
   $('[data-nav=home]').classList.toggle('active', S.route.view === 'home' && !S.route.data && !S.route.journal && !S.route.page);
   $('[data-nav=pipeline]').classList.toggle('active', S.route.page === 'pipeline');
@@ -483,7 +558,7 @@ function onRoute() {
   renderProjects();
   renderCrumbs();
   renderCtx();
-  if (S.route.view === 'project') loadProjectView(sameProject && prev.view === 'project');
+  if (S.route.view === 'project') { loadProjectView(sameProject && prev.view === 'project'); if (S.route.tab === 'reports' && window.HelmDecks) HelmDecks.load(S.route.projectId, S.route.deckId); }
   else if (S.route.view === 'backtest') { if (sameBacktest) { renderMain(); loadTabData(); } else loadBacktestView(); }
   else if (S.route.view === 'research') loadResearchView(prev.jobId === S.route.jobId);
   else if (S.route.view === 'paper') loadPaperView(prev.sessionId === S.route.sessionId);
@@ -495,7 +570,31 @@ function onRoute() {
   }
   else if (S.route.page === 'agents') { if (S.ag && prev.agentsView !== S.route.agentsView) { S.ag.dirty = false; S.ag.detail = null; } renderMain(); loadAgentsPage(); }
   else { renderMain(); loadUniverses(); if (S.route.data) loadDatasets(); }
-  if (!(sameProject && (prev.view === S.route.view))) $('#main').scrollTop = 0;
+  if (back != null) restoreScroll(back);
+  else if (!(sameProject && (prev.view === S.route.view))) $('#main').scrollTop = 0;
+}
+// 后退 / 前进（含触控板双指滑动）回到上一页时，回到离开时看的位置，像 Safari 一样。
+// 每条历史记录在 history.state 里带一个 key；新打开的页面没有 key → 从顶部开始。
+const NAV = { seq: 0, pos: new Map(), want: null };
+function navKey() {
+  const st = history.state;
+  if (st && st.helmNav) return { key: st.helmNav, revisit: true };
+  const key = `${Date.now().toString(36)}-${++NAV.seq}`;
+  try { history.replaceState({ ...(st || {}), helmNav: key, helmPrev: NAV.keepPrev !== undefined ? NAV.keepPrev : NAV.cur || null }, ''); } catch { /* 忽略 */ }
+  NAV.keepPrev = undefined;
+  return { key, revisit: false };
+}
+function restoreScroll(top) {
+  NAV.want = { key: history.state && history.state.helmNav, top, until: Date.now() + 4000 };
+  applyScrollWant();
+}
+// 内容是异步加载的：每次重画后再试一次，直到页面够高或超时
+function applyScrollWant() {
+  const w = NAV.want; const main = $('#main');
+  if (!w || !main) return;
+  if (Date.now() > w.until || (history.state && history.state.helmNav) !== w.key) { NAV.want = null; return; }
+  main.scrollTop = w.top;
+  if (main.scrollHeight - main.clientHeight >= w.top - 2 && !main.querySelector('.skeleton')) NAV.want = null;
 }
 function renderCrumbs() {
   const r = S.route;
@@ -506,7 +605,7 @@ function renderCrumbs() {
   if (r.page === 'agents') parts.push('<a href="#/agents">Agents</a>');
   if (r.page === 'agents' && r.agentsView === 'tasks') parts.push(_t('k0107'));
   else if (r.page === 'agents' && r.agentsView && r.agentsView !== 'list') parts.push(`<a href="#/agents/${esc(r.agentsView)}">${esc(agentOf(r.agentsView).name)}</a>`);
-  if (r.projectId) parts.push(`<a href="#/p/${r.projectId}">${esc(S.project?.name || `${_t('k0108', { projectId: r.projectId })}`)}</a>`);
+  if (r.projectId) parts.push(`<a href="#/p/${r.projectId}">${esc((S.project && S.project.projectId === r.projectId ? pName(S.project) : pNameById(r.projectId)) || `${_t('k0108', { projectId: r.projectId })}`)}</a>`);
   if (r.tab === 'compare') parts.push(`${_t('k0109', { projectId: r.projectId })}`, `<a href="#/p/${r.projectId}/compare/${(r.ids || []).join(',')}">${_t('k0110')}`);
   if (r.backtestId) parts.push(`<a href="#/p/${r.projectId}/b/${r.backtestId}">${esc(S.backtest?.name || _t('k0111'))}</a>`);
   if (r.sessionId) parts.push(`${_t('k0112', { projectId: r.projectId })}`, `<a href="#/p/${r.projectId}/s/${r.sessionId}">${esc(S.paper && S.paper.session && S.paper.session.sessionId === r.sessionId ? S.paper.session.name : r.sessionId)}</a>`);
@@ -516,9 +615,20 @@ function renderCrumbs() {
 }
 // 浏览器标签页标题跟着当前页面走
 let TAB_ZH; _regT(() => { TAB_ZH = { code: _t('k0114'), backtests: _t('k0111'), research: _t('k0115'), paper: _t('k0116'), orders: _t('k0117'), logs: _t('k0118'), rules: _t('k0119'), spec: _t('k0119'), robust: _t('k0120'), compare: _t('k0121') }; });;
+// 项目名按界面语言显示：英文界面用 nameEn，中文界面用 nameZh，没有就用原来的 name（agent 建项目时会两种都给）
+function pName(p) {
+  if (!p) return '';
+  return (HELM_I18N.lang() === 'en' ? p.nameEn : p.nameZh) || p.name || '';
+}
+// 想法记录、流水线里只有 projectId + 服务端给的原名：从项目列表里找到项目再按语言取名
+function pNameById(id, fallback = '') {
+  const n = Number(id);
+  const p = (S.project && S.project.projectId === n ? S.project : null) || (S.projects || []).find((x) => x.projectId === n);
+  return p ? pName(p) : fallback || '';
+}
 function setTitle() {
   const r = S.route;
-  const proj = S.project && S.project.projectId === r.projectId ? S.project.name : r.projectId ? `${_t('k0108', { projectId: r.projectId })}` : '';
+  const proj = S.project && S.project.projectId === r.projectId ? pName(S.project) : r.projectId ? `${_t('k0108', { projectId: r.projectId })}` : '';
   let t = _t('k0122');
   if (r.data) t = _t('k0123');
   else if (r.journal) t = _t('k0124');
@@ -601,9 +711,9 @@ async function loadProjectView(silent = false) {
   } else if (!Array.isArray(S.research)) S.research = { error: (rs.errors || []).join(_t('k0007')) };
   if (bt.success) { S.backtests = bt.backtests; track(S.backtests); } else if (!silent || !Array.isArray(S.backtests)) S.backtests = { error: (bt.errors || []).join('; ') };
   if (files.success) S.files = files.files; else if (!Array.isArray(S.files)) S.files = { error: (files.errors || []).join(_t('k0007')) };
-  if (!S.route.tab) S.route.tab = Array.isArray(S.backtests) && S.backtests.length ? 'backtests' : 'code';
+  if (!S.route.tab) S.route.tab = 'backtests';
   // 轮询回来的数据和上次一样、页面也没换标签：不重画整页
-  const sig = JSON.stringify([S.route.tab, S.route.ids, S.backtests, S.files, S.research, S.papers, S.project && S.project.modified, S.compileResult]);
+  const sig = JSON.stringify([S.route.tab, S.route.deckId, S.route.ids, S.backtests, S.files, S.research, S.papers, S.project && S.project.modified, S.compileResult]);
   const unchanged = silent && sig === S.projSig;
   S.projSig = sig;
   if (!unchanged) { renderMain(); renderCrumbs(); renderCtx(); }
@@ -621,11 +731,37 @@ function statusBadge(b) {
 }
 function askItem(agentId, label, hint, text) {
   const a = agentOf(agentId);
-  return `<button data-ask="${agentId}" data-text="${esc(text)}"><span class="agent-dot" style="background:${a.color}"></span><span class="ai-l"><b>${esc(label)}</b><i>${esc(hint)} · ${esc(a.name)}</i></span></button>`;
+  return `<button role="menuitem" data-ask="${agentId}" data-text="${esc(text)}"><span class="agent-dot" style="background:${a.color}"></span><span class="ai-l"><b>${esc(label)}</b><i>${esc(hint)} · ${esc(a.name)}</i></span></button>`;
 }
 function askBtn(agentId, label, text, primary = false) {
   const a = agentOf(agentId);
   return `<button class="btn ${primary ? 'primary' : ''}" data-ask="${agentId}" data-text="${esc(text)}" title="${_t('k0139', { v: esc(a.name) })}"><span class="agent-dot" style="background:${a.color}"></span>${esc(label)}</button>`;
+}
+// 「更多」菜单：次要 / 危险操作收进 ⋯，页面上只留一个主操作和少量次操作（学 macOS 工具栏的做法）
+const MORE_SVG = '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><circle cx="3.5" cy="8" r="1.3" fill="currentColor"/><circle cx="8" cy="8" r="1.3" fill="currentColor"/><circle cx="12.5" cy="8" r="1.3" fill="currentColor"/></svg>';
+function moreMenu(id, items) {
+  const body = items.filter(Boolean).join('');
+  if (!body) return '';
+  return `<div class="run-wrap"><button type="button" class="btn icon-only" data-menu="${id}" aria-haspopup="menu" aria-expanded="false" aria-controls="${id}" aria-label="${_t('ux001')}" title="${_t('ux001')}">${MORE_SVG}</button><div class="run-menu more-menu" id="${id}" role="menu" hidden>${body}</div></div>`;
+}
+const menuItem = (attrs, label, hint = '', danger = false) => `<button type="button" role="menuitem" class="${danger ? 'danger' : ''}" ${attrs}><span class="ai-l"><b>${label}</b>${hint ? `<i>${hint}</i>` : ''}</span></button>`;
+const menuSep = '<hr class="rm-sep">';
+// 弹出菜单统一开关：同步 aria-expanded，打开时焦点进第一项，关闭时焦点回到触发按钮
+function menuTrigger(m) { return m && document.querySelector(`[aria-controls="${m.id}"]`); }
+function closeMenus(except, refocus = false) {
+  document.querySelectorAll('.run-menu').forEach((x) => {
+    if (x === except || x.hidden) return;
+    x.hidden = true;
+    const t = menuTrigger(x); if (t) { t.setAttribute('aria-expanded', 'false'); if (refocus) t.focus(); }
+  });
+}
+function toggleMenu(m, viaKeyboard = false) {
+  if (!m) return;
+  const open = m.hidden;
+  closeMenus(m);
+  m.hidden = !open;
+  const t = menuTrigger(m); if (t) t.setAttribute('aria-expanded', String(open));
+  if (open && viaKeyboard) { const first = m.querySelector('button:not([disabled])'); if (first) first.focus(); }
 }
 function tabsHTML(base, tabs, active) {
   return `<nav class="tabs" role="tablist">${tabs.map(([id, label, count]) => `<a role="tab" aria-selected="${id === active}" class="${id === active ? 'active' : ''}" href="${base}${id === tabs[0][0] && base.includes('/b/') ? '' : `/${id}`}">${esc(label)}${count != null ? `<span class="count">${count}</span>` : ''}</a>`).join('')}</nav>`;
@@ -636,16 +772,18 @@ function projectHTML() {
   const p = S.project && S.project.projectId === projectId ? S.project : null;
   const bts = S.backtests;
   const count = Array.isArray(bts) ? bts.length : null;
-  const head = `<div class="page-head">
+  const stg = Array.isArray(S.backtests) && Array.isArray(S.research) ? projStage({ projectId }, { bts: S.backtests, rs: S.research, pap: Array.isArray(S.papers) ? S.papers : [] }) : null;
+  const overview = isOverview(tab);
+  const head = `<div class="page-head pv-head">
       <div>
-        <div class="eyebrow">${_t('k0167', { projectId })}${p ? `<span>${_t('k0140', { v: agoT(p.modified) })}</span>` : ''}</div>
-        <h1>${esc(p ? p.name : `${_t('k0108', { projectId })}`)}</h1>
+        <h1>${esc(p ? pName(p) : `${_t('k0108', { projectId })}`)}</h1>
         ${p && p.description ? `<p class="sub clamp" title="${esc(p.description)}">${esc(p.description)}</p>` : ''}
+        <p class="pv-meta"><span class="mono">#${esc(projectId)}</span>${p ? `<span>${_t('k0140', { v: agoT(p.modified) })}</span>` : ''}</p>
       </div>
       <div class="actions">
         <div class="run-wrap">
-          <button class="btn" data-menu="askMenu" aria-haspopup="true">${_t('k0168')}<svg viewBox="0 0 16 16" width="11" height="11"><path d="m4 6 4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
-          <div class="run-menu ask-menu" id="askMenu" hidden><div class="rm-h">${_t('k0169')}</div>
+          <button class="btn" data-menu="askMenu" aria-haspopup="menu" aria-expanded="false" aria-controls="askMenu">${_t('k0168')}<svg viewBox="0 0 16 16" width="11" height="11"><path d="m4 6 4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+          <div class="run-menu ask-menu" id="askMenu" role="menu" hidden><div class="rm-h">${_t('k0169')}</div>
             ${askItem('researcher', _t('k0141'), _t('k0142'), IDEA_ASK)}
             ${askItem('engineer', _t('k0143'), _t('k0144'), _t('k0145'))}
             ${askItem('engineer', _t('k0146'), _t('k0147'), _t('k0148'))}
@@ -653,23 +791,105 @@ function projectHTML() {
             ${askItem('risk', _t('k0152'), _t('k0153'), _t('k0154'))}
           </div>
         </div>
-        <button class="btn" data-action="compile">${_t('k0046')}</button>
+        ${moreMenu('projMore', [
+    menuItem(`data-dk="new"`, _t('dk002')),
+    menuItem(`data-action="research"`, _t('k0747')),
+    menuItem(`data-action="compile"`, _t('k0046'), _t('ux002')),
+    menuSep,
+    menuItem(`data-action="project-delete"`, _t('k0172'), '', true),
+  ])}
         <div class="run-wrap">
-          <button class="btn" data-action="backtest" aria-haspopup="true"><svg viewBox="0 0 16 16" width="12" height="12"><path d="M4 2.5v11l9-5.5z" fill="currentColor"/></svg>${_t('k0047')}<svg viewBox="0 0 16 16" width="11" height="11"><path d="m4 6 4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
-          <div class="run-menu" id="runMenu" hidden><div class="rm-h">${_t('k0170')}</div>
+          <span class="split-btn"><button class="btn ${overview ? '' : 'primary'}" data-run-role="candidate" title="${_t('ux006')}"><svg viewBox="0 0 16 16" width="12" height="12"><path d="M4 2.5v11l9-5.5z" fill="currentColor"/></svg>${_t('k0047')}</button><button class="btn split-caret ${overview ? '' : 'primary'}" data-action="backtest" aria-haspopup="menu" aria-expanded="false" aria-controls="runMenu" aria-label="${_t('ux007')}" title="${_t('ux007')}"><svg viewBox="0 0 16 16" width="11" height="11"><path d="m4 6 4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button></span>
+          <div class="run-menu" id="runMenu" role="menu" hidden><div class="rm-h">${_t('k0170')}</div>
             ${[['candidate', _t('k0155'), _t('k0156')], ['main', _t('k0157'), _t('k0158')], ['control', _t('k0159'), _t('k0160')], ['ablation', _t('k0161'), _t('k0162')], ['benchmark', _t('k0163'), _t('k0164')], ['debug', _t('k0165'), _t('k0166')]]
-    .map(([k, zh, d]) => `<button data-run-role="${k}"><span class="role ${ROLE_META[k][1]}">${zh}</span><i>${d}</i></button>`).join('')}
+    .map(([k, zh, d]) => `<button role="menuitem" data-run-role="${k}"><span class="role ${ROLE_META[k][1]}">${zh}</span><i>${d}</i></button>`).join('')}
           </div>
         </div>
-        <button class="btn quiet-del" data-action="project-delete" title="${_t('k0171')}" aria-label="${_t('k0172')}"><svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
       </div>
     </div>
     `;
-  const tabs = flowTabsHTML(projectId, tab === 'compare' ? 'backtests' : tab || 'backtests');
-  const stg = Array.isArray(S.backtests) && Array.isArray(S.research) ? projStage({ projectId }, { bts: S.backtests, rs: S.research, pap: Array.isArray(S.papers) ? S.papers : [] }) : null;
-  const nextLine = stg ? `<p class="next-line"><span>${_t('k0173')}</span>${stg.next.ask ? `<button class="btn primary" data-ask="${stg.next.ask}" data-text="${esc(IDEA_ASK)}">${stg.next.t}</button>` : `<a class="btn primary" href="${stg.next.href}">${stg.next.t}<i aria-hidden="true">→</i></a>`}</p>` : '';
-  const body = tab === 'compare' ? compareTabHTML(projectId) : tab === 'rules' ? rulesTabHTML(projectId) : tab === 'code' ? codeTabHTML() : tab === 'research' ? researchTabHTML(projectId) : tab === 'paper' ? paperTabHTML(projectId) : backtestsTabHTML(bts, projectId);
-  return `<div class="page">${head}${tabs}${nextLine}${body}</div>`;
+  const tabs = flowTabsHTML(projectId, tab);
+  const body = tab === 'compare' ? compareTabHTML(projectId) : tab === 'rules' ? rulesTabHTML(projectId) : tab === 'code' ? codeTabHTML() : tab === 'reports' && window.HelmDecks ? HelmDecks.tabHTML(projectId) : projOverviewHTML(projectId, stg);
+  return `<div class="page">${head}${tabs}${body}</div>`;
+}
+// 概览 = 想法检验 + 回测 + 模拟实盘放在一页，从上到下就是项目的进展；旧链接 /research、/paper 滚到对应区块
+const isOverview = (tab) => !tab || tab === 'backtests' || tab === 'research' || tab === 'paper';
+// 项目状态卡：一眼看出走到哪一步、结论是什么、下一步只有一个按钮。
+// 按钮不和页头重复：页头已有「运行回测」，这里永远不放它。
+const CHECK_SVG = '<svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="m3.5 8.5 3 3 6-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const CHEVRON_SVG = '<svg class="rl-chev" viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><path d="m6 3 5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+// 验证期已经跑过且没通过：这就是结论（诊断结果由 mainSummaryHTML 异步取回，回来后整页重画）
+function holdoutFailed(projectId) {
+  if (!Array.isArray(S.backtests)) return false;
+  const ho = S.backtests.filter((b) => b.role === 'candidate' && b.period === 'holdout' && !isRunning(b) && !isFailed(b))
+    .sort((x, y) => String(y.created).localeCompare(String(x.created)))[0];
+  const d = ho && S.mainDiag && S.mainDiag.key === `${projectId}:${ho.backtestId}` ? S.mainDiag.v : null;
+  return Boolean(d && d.ok && !d.pass);
+}
+function projHero(projectId, stg) {
+  if (!stg) return { html: `<div class="pv-hero"><div class="skeleton" style="height:84px"></div></div>`, asksIdea: false };
+  const base = `#/p/${projectId}`;
+  const rs = Array.isArray(S.research) ? S.research : [];
+  const ideas = rs.filter((j) => j.mode === 'idea').sort((a, b) => String(b.created).localeCompare(String(a.created)));
+  const last = ideas[0];
+  const signal = ideas.find((j) => j.verdict === '有信号' || j.verdict === '信号弱');
+  const step = stg.step;
+  const nBt = Array.isArray(S.backtests) ? S.backtests.filter((b) => b.role !== 'debug').length : 0;
+  const askIdea = (label) => `<button class="btn primary" data-ask="researcher" data-text="${esc(IDEA_ASK)}">${label}</button>`;
+  const go = (label, href, bad = false) => `<a class="btn primary ${bad ? 'danger' : ''}" href="${href}">${label}</a>`;
+  const link = (label, href) => `<a class="pv-link" href="${href}">${label}</a>`;
+  // cur：当前在第几步（1–4）；tone：none / run / bad
+  let cur; let tone = ''; let title; let desc; let act = ''; let asksIdea = false;
+  if (step === 4) { cur = 4; if (stg.paperBad) { tone = 'bad'; title = _t('pv_t4b'); desc = _t('pv_d4b'); act = go(_t('ux024'), stg.next.href, true); } else { tone = 'live'; title = _t('pv_t4'); desc = _t('pv_d4'); act = go(stg.next.t, stg.next.href); } }
+  else if (step === 3) { cur = 4; title = _t('pv_t3'); desc = _t('pv_d3'); act = go(stg.next.t, stg.next.href); }
+  else if (step === 2 && holdoutFailed(projectId)) { cur = 3; tone = 'bad'; title = _t('pv_tHo'); desc = _t('pv_dHo'); act = askIdea(_t('k0233')); asksIdea = true; }
+  else if (step === 2) { cur = 3; title = _t('pv_t2', { n: nBt }); desc = _t('pv_d2'); act = go(stg.next.t, stg.next.href); }
+  else if (signal) { cur = 2; title = signal.verdict === '信号弱' ? _t('pv_tWeak') : _t('pv_tSig'); desc = _t('pv_dSig'); act = link(_t('pv_cSee'), `${base}/r/${esc(signal.jobId)}`) + go(stg.next.t, stg.next.href); }
+  else if (Array.isArray(S.backtests) && S.backtests.some(isRunning)) { cur = 2; tone = 'run'; title = _t('pv_tBt'); desc = _t('pv_dBt'); }
+  else if (last && last.status === 'running') { cur = 1; tone = 'run'; title = _t('pv_tRun'); desc = esc(last.idea || last.current || ''); act = link(_t('pv_cRun'), `${base}/r/${esc(last.jobId)}`); }
+  else if (last && last.status === 'failed') { cur = 1; tone = 'bad'; title = _t('pv_tErr'); desc = _t('pv_dErr'); act = go(_t('ux024'), `${base}/r/${esc(last.jobId)}`); }
+  else if (last) { cur = 1; tone = 'bad'; title = _t('pv_tNo'); desc = _t('pv_dNo'); act = link(_t('pv_cSee'), `${base}/r/${esc(last.jobId)}`) + askIdea(_t('k0233')); asksIdea = true; }
+  else { cur = 1; title = _t('pv_t0'); desc = _t('pv_d0'); act = askIdea(_t('pv_c0')); asksIdea = true; }
+  const skipped = !ideas.length && cur > 1; // 没做想法检验直接回测：第一步记为「跳过」
+  const steps = [1, 2, 3, 4].map((i) => {
+    const st = i < cur || (i === 4 && step === 4 && !stg.paperBad) ? (i === 1 && skipped ? 'skip' : 'done') : i === cur ? (tone === 'bad' ? 'bad' : 'cur') : 'todo';
+    const mark = st === 'done' ? CHECK_SVG : `<span>${i}</span>`;
+    return `<li class="pv-st ${st}" ${st === 'cur' || st === 'bad' ? 'aria-current="step"' : ''}><span class="pv-bar"></span><span class="pv-lbl"><span class="pv-n">${mark}</span>${_t(`pv_s${i}`)}${st === 'skip' ? `<em>${_t('pv_skip')}</em>` : ''}</span></li>`;
+  }).join('');
+  return {
+    asksIdea,
+    html: `<section class="pv-hero ${tone}" aria-labelledby="pvTitle">
+      <ol class="pv-steps" aria-label="${_t('pv_prog')}">${steps}</ol>
+      <div class="pv-main">
+        <div class="pv-text"><h2 id="pvTitle">${tone === 'run' ? '<span class="led" aria-hidden="true"></span>' : ''}${title}</h2>${desc ? `<p>${desc}</p>` : ''}</div>
+        ${act ? `<div class="pv-act">${act}</div>` : ''}
+      </div>
+    </section>`,
+  };
+}
+function projOverviewHTML(projectId, stg) {
+  const hero = projHero(projectId, stg);
+  const sec = (id, title, n, act, body) => `<section class="psec" id="sec-${id}"><div class="sec-head"><h2>${title}${n ? ` <span class="meta">${n}</span>` : ''}</h2>${act ? `<div class="sec-act">${act}</div>` : ''}</div>${body}</section>`;
+  const rs = S.research; const bts = S.backtests; const pap = S.papers;
+  const step = stg ? stg.step : 0;
+  // 想法检验：走到回测之后折叠成一行摘要；没做过就不出现（状态卡已经说清楚了，不放「还没有」）
+  const ideaN = Array.isArray(rs) ? rs.length : 0;
+  const rsBody = researchTabHTML(projectId);
+  const rsAct = hero.asksIdea ? '' : askBtn('researcher', _t('ux033'), IDEA_ASK).replace('class="btn ', 'class="btn sm quiet ');
+  const research = !Array.isArray(rs) ? sec('research', _t('k0115'), 0, '', rsBody)
+    : !ideaN ? ''
+      : step >= 2 ? `<details class="psec psec-fold" id="sec-research"><summary class="sec-head"><h2>${_t('k0115')} <span class="meta">${ideaN}</span></h2><span class="meta">${researchSummary(rs)}</span></summary>${rsBody}</details>`
+        : sec('research', _t('k0115'), ideaN, rsAct, rsBody);
+  const btN = Array.isArray(bts) ? bts.filter((b) => b.role !== 'debug').length : 0;
+  const backtests = !Array.isArray(bts) || bts.length ? sec('backtests', _t('ux034'), btN, '', backtestsTabHTML(bts, projectId)) : '';
+  const papN = Array.isArray(pap) ? pap.length : 0;
+  const paper = step >= 3 || papN ? sec('paper', _t('k0116'), papN, '', paperTabHTML(projectId, stg)) : '';
+  return `${hero.html}${research}${backtests}${paper}`;
+}
+function researchSummary(rs) {
+  const ideas = rs.filter((j) => j.mode === 'idea');
+  const good = ideas.filter((j) => j.verdict === '有信号' || j.verdict === '信号弱').length;
+  return ideas.length ? _t('k0847', { n: ideas.length, good }) : '';
 }
 
 let ROLE_META; _regT(() => { ROLE_META = {
@@ -746,7 +966,7 @@ function mainDiagHTML(projectId, b, holdout = false) {
   if (holdout) return `<div class="md-diag">
     <p class="md-verdict">${_t('k0235')}</p>
     <p class="md-sub">${_t('k0236', { projectId, backtestId: b.backtestId, v: esc(b.name), okN, n: v.gates.length })}${needs.map((n) => esc(GATE_SHORT[n.id] || n.zh)).join(_t('k0015'))}${_t('k0237')}</p>
-    <div class="md-next"><span>${_t('k0238')}</span>${askBtn('researcher', _t('k0233'), IDEA_ASK)}${setMainBtn(b, _t('k0234'))}</div>
+    <div class="md-next">${setMainBtn(b, _t('k0234'))}</div>
   </div>`;
   return `<div class="md-diag">
     <p class="md-verdict">${_t('k0242')}</p>
@@ -769,10 +989,24 @@ function mainSummaryHTML(bts, projectId) {
   const benchOf = (period) => done.find((b) => b.role === 'benchmark' && b.period === period);
   const line = (b) => {
     const bm = benchOf(b.period);
-    const vs = bm ? `<span class="ms-vs">${_t('k0246', { v: esc(bm.name), v2: pct(bm.compoundingAnnualReturn), v3: num(bm.sharpeRatio) })}</span>` : '';
+    const vs = bm ? `<span class="ms-vs">${_t('k0246', { v: esc(String(bm.name || '').replace(/^(基准|Benchmark)\s*[:：]\s*/i, '')), v2: pct(bm.compoundingAnnualReturn), v3: num(bm.sharpeRatio) })}</span>` : '';
     return `${_t('k0247', { projectId, backtestId: b.backtestId, v: periodTag(b.period), v2: mainByUserTag(b), v3: esc(b.name), v4: signClass(b.compoundingAnnualReturn), v5: pct(b.compoundingAnnualReturn), v6: num(b.sharpeRatio), v7: pct(b.drawdown, false), vs })}`;
   };
-  if (mains.length) return `<div class="main-sum"><div class="ms-h"><span class="role main">${_t('k0157')}</span>${mains.some((b) => b.mainBy === 'user') ? _t('k0248') : _t('k0249')}</div>${mains.sort((a, b) => String(a.period).localeCompare(String(b.period))).map(line).join('')}</div>`;
+  // 一句白话结论：和同期基准比，收益和风险各怎么样（新手不用自己判断 0.40 算高还是低）
+  const verdictOf = (b) => {
+    const bm = benchOf(b.period);
+    if (!bm) return '';
+    const r = parseFloat(b.compoundingAnnualReturn); const rb = parseFloat(bm.compoundingAnnualReturn);
+    const d = parseFloat(b.drawdown); const db = parseFloat(bm.drawdown);
+    if (![r, rb, d, db].every(Number.isFinite)) return '';
+    // 年化差不到 0.05 个百分点（显示出来一样）算「和基准持平」，不说跑赢 / 落后
+    const toPct = (v, n) => (/%/.test(String(v)) ? n : n * 100);
+    const tie = Math.abs(toPct(b.compoundingAnnualReturn, r) - toPct(bm.compoundingAnnualReturn, rb)) < 0.05;
+    const k = tie ? ['mid', d <= db ? 'ux060' : 'ux061'] : r >= rb && d <= db ? ['good', 'ux008'] : r >= rb ? ['mid', 'ux009'] : d < db ? ['mid', 'ux010'] : ['bad', 'ux011'];
+    return `<span class="ms-verdict ${k[0]}">${_t(k[1])}</span>`;
+  };
+  const mainDev = mains.find((b) => b.period !== 'holdout') || mains[0];
+  if (mains.length) return `<div class="main-sum"><div class="ms-h"><span class="role main">${_t('k0157')}</span>${verdictOf(mainDev)}</div>${mains.sort((a, b) => String(a.period).localeCompare(String(b.period))).map(line).join('')}</div>`;
   const untagged = bts.filter((b) => !b.role).length;
   const ho = cands.filter((b) => b.period === 'holdout').sort((x, y) => String(y.created).localeCompare(String(x.created)))[0];
   const best = cands.filter((b) => b.period !== 'holdout').sort((x, y) => (+y.sharpeRatio || -9) - (+x.sharpeRatio || -9))[0];
@@ -792,8 +1026,7 @@ function backtestsTabHTML(bts, projectId) {
   if (bts == null) return `<div class="panel" style="padding:16px;display:grid;gap:10px">${Array.from({ length: 4 }, () => '<div class="skeleton" style="height:18px"></div>').join('')}</div>`;
   if (bts.error) return errorBox(_t('k0258'), bts.error);
   if (!bts.length) {
-    return `<div class="panel empty"><div class="big">${_t('k0259')}</div><p>${_t('k0260')}</p>
-      <button type="button" class="btn primary" data-run-role="candidate">${_t('k0047')}</button></div>`;
+    return `<p class="psec-empty">${_t('ux036')} ${_t('ux077')}</p>`;
   }
   const nDebug = bts.filter((b) => b.role === 'debug').length;
   const f = S.btFilter;
@@ -801,20 +1034,17 @@ function backtestsTabHTML(bts, projectId) {
   const rank = (b) => ROLE_ORDER.indexOf(b.role || null);
   const prank = (b) => ['dev', 'holdout', 'full', null].indexOf(b.period || null);
   shown.sort((a, b) => rank(a) - rank(b) || prank(a) - prank(b) || String(b.created).localeCompare(String(a.created)));
-  const chip = (k, label, n) => `<button class="fchip ${f === k ? 'active' : ''}" data-bt-filter="${k}">${label}${n != null ? `<span>${n}</span>` : ''}</button>`;
+  const chip = (k, label, n) => `<button class="fchip ${f === k ? 'active' : ''}" aria-pressed="${f === k}" data-bt-filter="${k}">${label}${n != null ? `<span>${n}</span>` : ''}</button>`;
   return `${mainSummaryHTML(bts, projectId)}
-    <div class="filters">${chip('key', _t('k0261'), bts.length - nDebug)}${chip('all', _t('k0262'), bts.length)}${nDebug ? chip('debug', _t('k0165'), nDebug) : ''}
-      <span class="meta">${f === 'key' && nDebug ? `${_t('k0263', { nDebug })}` : _t('k0264')}</span></div>
-    ${cmpBarHTML(bts, shown, projectId)}
+    <div class="bt-toolbar"><div class="seg-chips" role="group" aria-label="${_t('ux004')}">${chip('key', _t('k0261'), bts.length - nDebug)}${chip('all', _t('k0262'), bts.length)}${nDebug ? chip('debug', _t('k0165'), nDebug) : ''}</div>
+    ${cmpBarHTML(bts, shown, projectId)}</div>
     <div class="panel"><div class="table-wrap"><table class="data"><thead><tr>
-      <th class="cb"><span class="sr">${_t('k0267')}</span></th><th>${_t('k0268')}</th><th>${_t('k0269')}</th><th>${_t('k0270')}</th><th class="r">${_t('k0271')}</th><th class="r">${_t('k0272')}</th><th class="r">${_t('k0273')}</th><th class="r">${_t('k0274')}</th><th class="r">${_t('k0117')}</th>
+      <th class="cb"><span class="sr">${_t('k0267')}</span></th><th>${_t('k0268')}</th><th>${_t('k0270')}</th><th class="r">${_t('k0272')}</th><th class="r">${_t('k0273')}</th><th class="r">${_t('k0274')}</th><th class="r">${_t('k0117')}</th>
     </tr></thead><tbody>${shown.map((b) => `
       <tr data-href="#/p/${projectId}/b/${b.backtestId}" class="${b.role === 'debug' ? 'dim' : ''} ${b.role === 'main' ? 'is-main' : ''}">
         <td class="cb">${cmpBox(b)}</td>
-        <td class="name" title="${esc(b.name)}${b.mainRejected ? `${_t('k0265')}${esc(b.mainRejected.join(_t('k0007')))}` : ''}">${roleSelect(b)}${periodTag(b.period, b.holdoutSeq)}${b.file ? `<span class="period mono">${esc(b.file)}</span>` : ''}${esc(b.name)}${srcBadge(b, projectId)}</td>
-        <td>${statusBadge(b)}</td>
+        <td class="name" title="${esc(b.name)}${b.mainRejected ? `${_t('k0265')}${esc(b.mainRejected.join(_t('k0007')))}` : ''}">${b.role && ROLE_META[b.role] ? roleBadge(b.role) : ''}${periodTag(b.period, b.holdoutSeq)}${b.file ? `<span class="period mono">${esc(b.file)}</span>` : ''}${esc(b.name)}${srcBadge(b, projectId)}${doneBt(b) ? '' : ` ${statusBadge(b)}`}</td>
         <td class="when">${agoT(b.created)}</td>
-        <td class="r ${signClass(b.netProfit)}">${pct(b.netProfit)}</td>
         <td class="r ${signClass(b.compoundingAnnualReturn)}">${pct(b.compoundingAnnualReturn)}</td>
         <td class="r">${num(b.sharpeRatio)}</td>
         <td class="r ${b.drawdown && parseFloat(b.drawdown) ? 'down' : ''}">${pct(b.drawdown, false)}</td>
@@ -839,9 +1069,16 @@ function codeTabHTML() {
   const nWarn = cr && cr.lint ? cr.lint.warnings.length : 0;
   const crLogs = cr && cr.logs && cr.logs.length ? `<pre>${esc(cr.logs.join('\n'))}</pre>` : '';
   const compileBar = cr ? `<div class="compile ${crOk ? 'ok' : 'bad'}">${crOk ? `${_t('k0279')}${nWarn ? `${_t('k0278', { nWarn })}` : ''}` : _t('k0280')}${crLogs}</div>` : '';
+  // 自己改代码：服务端有 files/update 接口时才能保存（保存后照常编译 / 回测）
+  const editing = f && S.codeEdit && S.codeEdit.name === f.name;
+  const tabs = files.map((x) => `<button class="${x.name === f.name ? 'active' : ''}" data-file="${esc(x.name)}">${esc(x.name)}</button>`).join('');
+  if (editing) return `<div class="panel code-panel-wrap">
+    <div class="file-tabs">${tabs}<span class="code-actions"><button type="button" class="btn sm" data-code-cancel>${_t('k0033')}</button><button type="button" class="btn sm primary" data-code-save>${_t('ux073')}</button></span><span class="meta">${_t('ux067')}</span></div>
+    <textarea id="codeEditor" class="code-editor" spellcheck="false" autocomplete="off" aria-label="${esc(f.name)}">${esc(S.codeEdit.draft)}</textarea>
+  </div>`;
   return `<div class="panel code-panel-wrap">
-    <div class="file-tabs">${files.map((x) => `<button class="${x.name === f.name ? 'active' : ''}" data-file="${esc(x.name)}">${esc(x.name)}</button>`).join('')}
-      ${f ? codeActions('project', f.name) : ''}<span class="meta">${_t('k0282')}</span></div>
+    <div class="file-tabs">${tabs}
+      ${f ? `<button type="button" class="btn sm" data-code-edit="${esc(f.name)}">${_t('ux074')}</button>${codeActions('project', f.name)}` : ''}<button type="button" class="btn sm" data-action="compile" title="${_t('ux002')}">${_t('k0046')}</button><span class="meta">${_t('k0282')}</span></div>
     ${compileBar}
     ${f ? codeView(f.content) : _t('k0281')}
   </div>`;
@@ -1082,10 +1319,10 @@ function cmpBarHTML(bts, shown, projectId) {
   S.cmpSel = S.cmpSel.filter((id) => ids.has(id));
   const n = S.cmpSel.length;
   const sg = cmpSuggest(bts);
-  const go = n >= 2 ? `<a class="btn" href="#/p/${projectId}/compare/${S.cmpSel.join(',')}">${_t('k0424', { n })}` : `<button type="button" class="btn" disabled title="${_t('k0426')}">${_t('k0121')}${n ? ` ${_t('k0425', { n })}` : ''}</button>`;
   const hint = n >= CMP_MAX ? `${_t('k0427', { CMP_MAX })}` : n ? (n < 2 ? _t('k0428') : `${_t('k0429', { n, v: CMP_MAX - n })}`) : `${_t('k0430', { CMP_MAX })}`;
+  const go = n >= 2 ? `<a class="btn" href="#/p/${projectId}/compare/${S.cmpSel.join(',')}">${_t('k0424', { n })}` : `<button type="button" class="btn" disabled title="${hint}">${_t('k0121')}${n ? ` ${_t('k0425', { n })}` : ''}</button>`;
   if (!shown.some(doneBt)) return '';
-  return `<div class="cmp-bar"><span class="cmp-hint">${hint}</span>${sg ? `<a class="linkish" href="#/p/${projectId}/compare/${sg.ids.join(',')}">${_t('k0431', { v: esc(sg.label) })}` : ''}${n ? _t('k0432') : ''}${go}</div>`;
+  return `<div class="cmp-bar">${n ? `<span class="cmp-hint">${hint}</span>` : ''}${sg ? `<a class="linkish" href="#/p/${projectId}/compare/${sg.ids.join(',')}">${_t('k0431', { v: esc(sg.label) })}` : ''}${n ? _t('k0432') : ''}${go}</div>`;
 }
 
 const cmpBusy = new Set();
@@ -1203,6 +1440,7 @@ function compareTabHTML(projectId) {
     ${tr(_t('k0457'), gates.map((g) => (g ? g.p : null)), gates.map((g, i) => (g ? `${g.p}/${g.t}` : '—')), 'max', markOn && gates.every((g) => g && g.t === gates[0].t), '', gateTip.find(Boolean) || '')}
     <tr class="static"><th scope="row">${_t('k0463')}</th>${M.rng.map((r, i) => `<td class="r cmp-range">${esc(range(r))}</td>`).join('')}</tr>
     ${M.overlap && !M.same ? `${tr(_t('k0458'), ovRet, ovRet.map((v) => pct(v)), 'max', true, 'sign', _t('k0459'))}${tr(_t('k0460'), ovDD, ovDD.map((v) => (v == null ? '—' : pct(Math.abs(v), false))), 'max', true, 'down', _t('k0461'))}` : ''}
+    <tr class="static cmp-act"><th scope="row"><span class="sr">${_t('ux017')}</span></th>${rows.map((r) => `<td class="r">${r.listed.role === 'main' ? `<span class="role main">${_t('k0157')}</span>` : setMainBtn(r.listed) ? setMainBtn(r.listed).replace('class="btn"', 'class="btn sm"') : ''}</td>`).join('')}</tr>
     </tbody></table></div></div>`;
 
   let chart = '';
@@ -1448,14 +1686,15 @@ function verdictHTML(stats) {
   const bm = dailySeries(S.charts.benchmark.filter((p) => p[1] > 0 && p[0] >= t0 && p[0] <= t1));
   const rf = impliedRf(stats);
   const a = perf(eq, rf); const b = perf(bm, rf);
-  // 策略自己的夏普直接用 LEAN 的数，和下面的 KPI 完全一致
-  const srL = parseFloat(stats && stats['Sharpe Ratio']);
-  if (!a || !b) return ''; // 少于 3 个交易日：perf 返回 null，先判断再改夏普，否则整页渲染报错
-  if (Number.isFinite(srL)) a.sharpe = srL;
+  // 策略和基准的夏普必须同一算法（同一序列频率、同一无风险利率、同一年化）：不再用 LEAN 的夏普替换策略这一边，
+  // 否则买入持有 SPY 也会显示「夏普 0.48 vs 0.41」
+  if (!a || !b) return ''; // 少于 3 个交易日：perf 返回 null
   if ( a.cagr == null || b.cagr == null) return '';
   const p2 = (v) => pct(v, false);
-  const beat = a.cagr >= b.cagr;
   const gap = Math.abs(a.cagr - b.cagr) * 100;
+  // 差距不到 0.05 个百分点（显示出来是 0.0）算打平，不说「跑赢」
+  if (gap < 0.05) return `<div class="verdict mixed" title="${_t('k0499', { toFixed: a.yrs.toFixed(1), toFixed2: (rf * 100).toFixed(1) })}"><div class="vd-h">${esc(_t('vd_tie'))}</div></div>`;
+  const beat = a.cagr > b.cagr;
   const ddBetter = a.dd < b.dd;
   const shBetter = a.sharpe != null && b.sharpe != null && a.sharpe > b.sharpe;
   let head;
@@ -1464,51 +1703,65 @@ function verdictHTML(stats) {
   else if (ddBetter && shBetter) head = `${_t('k0496', { toFixed: gap.toFixed(1) })}`;
   else if (ddBetter) head = `${_t('k0497', { toFixed: gap.toFixed(1) })}`;
   else head = `${_t('k0498', { toFixed: gap.toFixed(1) })}`;
-  const tone = beat && (ddBetter || shBetter) ? 'good' : !beat && !ddBetter ? 'bad' : 'mixed';
-  const row = (k, x, y, better) => `<span class="vd-m"><i>${k}</i><b class="${better ? 'up' : 'down'}">${x}</b><em>vs ${y}</em></span>`;
+  // 统计检验没过时，跑赢只是「看起来」：标题里直说，免得和下面的 ✗ 打架
+  const notSig = beat && S.validation && S.validation.ok && !S.validation.pass;
+  if (notSig) head += _t('ux013');
+  const tone = notSig ? 'mixed' : beat && (ddBetter || shBetter) ? 'good' : !beat && !ddBetter ? 'bad' : 'mixed';
+  // 差距小到显示出来几乎一样（回撤 < 0.05 个百分点、夏普 < 0.05）：不标好坏色
+  const row = (k, x, y, better, tie = false, tip = '') => `<span class="vd-m"${tip ? ` title="${esc(tip)}"` : ''}><i>${k}</i><b class="${tie ? '' : better ? 'up' : 'down'}">${x}</b><em>vs ${y}</em></span>`;
   return `<div class="verdict ${tone}" title="${_t('k0499', { toFixed: a.yrs.toFixed(1), toFixed2: (rf * 100).toFixed(1) })}">
     <div class="vd-h">${esc(head)}</div>
-    <div class="vd-row">${row(_t('k0272'), p2(a.cagr), p2(b.cagr), beat)}${row(_t('k0274'), p2(a.dd), p2(b.dd), ddBetter)}${a.sharpe != null && b.sharpe != null ? row(_t('k0273'), num(a.sharpe), num(b.sharpe), shBetter) : ''}<span class="vd-note">${_t('k0500', { toFixed: a.yrs.toFixed(1) })}</span></div>
+    <div class="vd-row">${row(_t('k0272'), p2(a.cagr), p2(b.cagr), beat)}${row(_t('k0274'), p2(a.dd), p2(b.dd), ddBetter, Math.abs(a.dd - b.dd) * 100 < 0.05)}${a.sharpe != null && b.sharpe != null ? row(_t('k0273'), num(a.sharpe), num(b.sharpe), shBetter, Math.abs(a.sharpe - b.sharpe) < 0.05, _t('ux083')) : ''}<span class="vd-note">${_t('k0500', { toFixed: a.yrs.toFixed(1) })}</span></div>
   </div>`;
 }
 function trailingHTML(stats) {
   if (!S.charts || !S.charts.equity.length) return '';
   const t = trailingStats(S.charts.equity, stats);
   const short = _t('k0501');
+  // colored：true = 收益（小数，|x| < 0.05% 不上色）；数字 = 自定阈值（夏普用 0.05）
   const cell = (label, v, fmt, tip, colored = true) => {
     const ok = v != null && Number.isFinite(v);
-    return `<div class="tr-cell" title="${esc(tip)}"><div class="v ${ok && colored ? (v > 0 ? 'up' : v < 0 ? 'down' : '') : ''}">${ok ? fmt(v) : '—'}</div><div class="k">${label}</div></div>`;
+    return `<div class="tr-cell" title="${esc(tip)}"><div class="v ${ok && colored ? signClass(v, colored === true ? 0.0005 : colored) : ''}">${ok ? fmt(v) : '—'}</div><div class="k">${label}</div></div>`;
   };
   const p2 = (v) => pct(v, false);
   const ps = (v) => pct(v, true);
   const r5 = t.y5range ? `${_t('k0502', { y5range: t.y5range })}` : '';
   return `<div class="trailing" aria-label="${_t('k0514')}">
     ${cell(_t('k0503'), t.m3, ps, t.m3 == null ? short : _t('k0504'))}
-    ${cell(_t('k0505'), t.y1sharpe, (v) => num(v), t.y1sharpe == null ? short : _t('k0506'))}
-    ${cell(_t('k0507'), t.y5psr, p2, t.y5psr == null ? short : _t('k0508'), false)}
+    ${cell(_t('k0505'), t.y1sharpe, (v) => num(v), t.y1sharpe == null ? short : `${_t('k0506')}. ${_t('ux062')}`, 0.05)}
+    ${cell(_t('k0507'), t.y5psr, p2, t.y5psr == null ? short : `${_t('k0508')} ${_t('ux062')}`, false)}
     ${t.y5range ? `<div class="tr-range">${_t('k0509', { y5range: t.y5range })}</div>` : ''}${cell(_t('k0510'), t.y5dd, p2, t.y5dd == null ? short : `${_t('k0511', { r5 })}`, false)}
     ${cell(_t('k0512'), t.y5cagr, ps, t.y5cagr == null ? short : `${_t('k0513', { r5 })}`)}
     <div class="tr-cell" title="${_t('k0515')}"><div class="v">${t.capacity ? esc(t.capacity) : '—'}</div><div class="k">${_t('k0516')}</div></div>
   </div>`;
 }
 
+// 回测详情的操作：一个「下一步」主按钮 + 至多一个次按钮，其余收进 ⋯
+function btActions(b) {
+  const done = !isRunning(b) && !isFailed(b) && /Completed/.test(b.status || '');
+  const failedChecks = S.validation && S.validation.ok && !S.validation.pass;
+  const paperBtn = done ? _t('k0518') : '';
+  const diag = askBtn('analyst', _t('k0521'), _t('k0522'), true);
+  const interpret = askBtn('analyst', _t('k0523'), _t('k0524'), !(done && b.role === 'main'));
+  const improve = menuItem(`data-ask="engineer" data-text="${esc(_t('k0520'))}"`, _t('k0519'));
+  if (!done) return `${moreMenu('btMore', [improve])}${interpret}`;
+  if (b.role === 'main') return `${moreMenu('btMore', [improve, menuItem(`data-ask="analyst" data-text="${esc(_t('k0524'))}"`, _t('k0523'))])}${failedChecks ? `${paperBtn}${diag}` : paperBtn.replace('class="btn"', 'class="btn primary"')}`;
+  const more = [improve, paperBtn ? menuItem('data-action="paper-new"', _t('k0116')) : '', failedChecks ? menuItem(`data-ask="analyst" data-text="${esc(_t('k0524'))}"`, _t('k0523')) : ''];
+  return `${moreMenu('btMore', more)}${setMainBtn(b)}${failedChecks ? diag : interpret}`;
+}
 function backtestHTML() {
   const { projectId, backtestId, tab } = S.route;
   const b = S.backtest;
   if (!b) return `<div class="page"><div class="skeleton" style="height:28px;width:40%;margin-bottom:22px"></div><div class="skeleton" style="height:84px"></div><div class="skeleton" style="height:300px;margin-top:18px"></div></div>`;
-  if (b.loadError) return `<div class="page">${errorBox(_t('k0258'), b.loadError)}<p class="empty-line">${_t('k0517', { projectId })}</p></div>`;
+  if (b.loadError) return `<div class="page">${errorBox(_t('k0258'), b.loadError)}</div>`;
   const stats = b.statistics || {};
   const head = `<div class="page-head">
       <div>
-        <div class="eyebrow">${_t('k0525', { v: esc(backtestId.slice(0, 10)), v2: statusBadge(b), v3: roleBadge(b.role), v4: mainByUserTag(b), v5: periodTag(b.period, b.holdoutSeq), v6: fpWarnBadge(b), v7: agoT(b.created) })}</div>
+        <div class="eyebrow">${_t('k0525', { v: esc(backtestId.slice(0, 10)), v2: statusBadge(b), v3: !isRunning(b) && !isFailed(b) ? roleSelect(b) : roleBadge(b.role), v4: mainByUserTag(b), v5: periodTag(b.period, b.holdoutSeq), v6: fpWarnBadge(b), v7: agoT(b.created) })}</div>
         <h1>${esc(b.name || _t('k0111'))}</h1>
         ${b.note ? `<p class="sub">${esc(b.note)}</p>` : ''}
       </div>
-      <div class="actions">
-        ${!isRunning(b) && !isFailed(b) && /Completed/.test(b.status || '') ? setMainBtn(b) : ''}
-        ${!isRunning(b) && !isFailed(b) && /Completed/.test(b.status || '') ? _t('k0518') : ''}
-        ${askBtn('engineer', _t('k0519'), _t('k0520'))}
-        ${S.validation && S.validation.ok && !S.validation.pass ? askBtn('analyst', _t('k0521'), _t('k0522'), true) : askBtn('analyst', _t('k0523'), _t('k0524'), true)}
+      <div class="actions">${btActions(b)}
       </div>
     </div>`;
 
@@ -1517,7 +1770,8 @@ function backtestHTML() {
     return `<div class="page">${head}<div class="panel" style="padding:22px 20px">
       <div style="display:flex;justify-content:space-between;margin-bottom:10px"><span>${/queue/i.test(b.status) ? _t('k0526') : `${esc(b.phase || _t('k0527'))}…`}</span><span class="mono">${p}%</span></div>
       <div class="bar"><div style="width:${p}%"></div></div>
-      <p class="sub" style="margin-top:12px">${_t('k0528')}</p></div></div>`;
+      <p class="sub" style="margin-top:12px">${_t('k0528')} <a href="#/p/${projectId}/code">${_t('ux019')} →</a></p>
+      ${Array.isArray(b.logTail) && b.logTail.length ? `<details class="pp-details live-log" open><summary>${_t('ux018')}</summary><pre class="logs" style="max-height:200px">${esc(b.logTail.join('\n'))}</pre></details>` : ''}</div></div>`;
   }
   const errBox = isFailed(b) ? `<div class="error-box" style="margin-bottom:18px">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap"><b>${_t('k0531')}</b>${askBtn('engineer', _t('k0529'), _t('k0530'), true)}</div>
@@ -1538,7 +1792,8 @@ function backtestHTML() {
   else if (tab === 'logs') body = logsTabHTML();
   else if (tab === 'code') body = S.code == null ? '<div class="skeleton" style="height:300px"></div>' : S.code.error ? errorBox(_t('k0534'), S.code.error) : S.code.length ? `<div class="panel">${S.code.map((f, i) => `<div class="file-tabs"><button class="active">${esc(f.name)}</button>${codeActions('bt', f.name)}${i === 0 ? _t('k0535') : ''}<span class="meta">${_t('k0536')}</span></div>${codeView(f.content)}`).join('')}</div>` : _t('k0537');
   else body = overviewHTML(b, stats, invalid);
-  return `<div class="page">${head}${errBox}${isFailed(b) ? '' : verdictHTML(stats)}${kpis}${tab === 'overview' || !tab ? validationHTML(b) : ''}${tabs}${body}</div>`;
+  const dataNote = b.dataChanged === true ? `<p class="data-note bt-data-changed" role="note"${(b.dataChangedTickers || []).length ? ` title="${esc(b.dataChangedTickers.join(', '))}"` : ''}>${_t('ux063')}</p>` : '';
+  return `<div class="page">${head}${errBox}${dataNote}${isFailed(b) ? '' : verdictHTML(stats)}${tab === 'overview' || !tab ? validationHTML(b) : ''}${kpis}${tabs}${body}</div>`;
 }
 
 // 每项检验在测什么（一句话，和 lib/stats.mjs 的算法一致）。key = 检验 id
@@ -1592,7 +1847,7 @@ function overviewHTML(b, stats, invalid) {
     return `<div class="stat-row" title="${esc(tip || k)}"><span>${esc(statName(k))}</span><span class="${/Net Profit|Return|Alpha/.test(k) ? signClass(v) : ''}">${esc(v)}</span></div>`;
   }).join('')}</div>`;
   const rt = Object.entries(b.runtimeStatistics || {});
-  const RT_ZH = { Equity: _t('k0558'), Fees: _t('k0559'), Holdings: _t('k0560'), 'Net Profit': _t('k0271'), 'Probabilistic Sharpe Ratio': _t('k0561'), Return: _t('k0562'), Unrealized: _t('k0563'), Volume: _t('k0564') };
+  const RT_ZH = { Equity: _t('k0558'), Fees: _t('k0559'), Holdings: _t('k0560'), 'Net Profit': _t('rt_net_profit'), 'Probabilistic Sharpe Ratio': _t('k0561'), Return: _t('k0562'), Unrealized: _t('k0563'), Volume: _t('k0564') };
   const noTrades = noClosedTrades(stats) ? _t('k0565') : '';
   const warn = invalid ? `<div class="order-warn">${_t('k0566', { invalid, projectId: S.route.projectId, backtestId: S.route.backtestId })}</div>` : '';
   return `${warn}
@@ -1774,20 +2029,19 @@ function researchTabHTML(projectId) {
   const list = S.research;
   if (list == null) return '<div class="skeleton" style="height:160px"></div>';
   if (list.error) return errorBox(_t('k0743'), list.error);
-  const intro = `<p class="r-lead">${_t('k0744')}</p>`;
-  const btns = `<div class="r-btns">${askBtn('researcher', _t('k0745'), IDEA_ASK)}<button class="btn" data-action="research" title="${_t('k0746')}">${_t('k0747')}</button></div>`;
-  if (!list.length) {
-    return `${intro}<div class="panel empty"><div class="big">${_t('k0748')}</div><p>${_t('k0749')}</p>${btns}</div>`;
-  }
-  return `${intro}${btns}<div class="panel"><div class="table-wrap"><table class="data"><thead><tr><th>${_t('k0127')}</th><th>${_t('k0269')}</th><th>${_t('k0755')}</th><th>${_t('k0756')}</th><th>${_t('k0757')}</th><th>${_t('k0758')}</th></tr></thead><tbody>
-    ${list.map((j) => {
+  if (!list.length) return `<p class="psec-empty">${_t('ux036')}</p>`;
+  // 一行一次检验：名字 + 想法原文在左，结论在右；整行可点。「想法检验」标签和「完成」状态在这一节里是废话，不再显示
+  return `<div class="rl" role="list">${list.map((j) => {
     const isIdea = j.mode === 'idea';
     const v = isIdea ? null : verdictZh(j.verdict);
     const top = j.topFactors && j.topFactors[0];
-    const res = isIdea && j.verdict ? ideaTag(j.verdict) : v ? `<span class="vtag ${v.cls}" title="${esc(v.text)}">${esc(v.short)}</span>` : top ? `<span class="meta">${_t('k0750', { v: esc(top.factor), v2: num(top.mean_ic, 3) })}</span>` : j.status === 'running' ? `<span class="meta">${esc(j.current || '')}…</span>` : j.error ? _t('k0751') : '—';
-    const what = isIdea ? `<span class="when" title="${esc(j.idea || '')}">${esc(String(j.idea || '').slice(0, 40))}${String(j.idea || '').length > 40 ? '…' : ''}</span>` : `${esc(FEAT_ZH[j.features] || j.features)}${j.neutralize === 'sector' ? _t('k0752') : ''}`;
-    return `<tr data-href="#/p/${projectId}/r/${esc(j.jobId)}"><td class="name">${esc(j.title)}<span class="mode ${isIdea ? 'idea' : ''}">${isIdea ? _t('k0115') : j.mode === 'factors' ? _t('k0753') : _t('k0754')}</span></td><td>${rBadge(j)}</td><td>${esc(uniName(j.target))}</td><td>${what}</td><td>${res}</td><td class="when">${agoT(j.created)}</td></tr>`;
-  }).join('')}</tbody></table></div></div>`;
+    const res = isIdea && j.verdict ? ideaTag(j.verdict) : v ? `<span class="vtag ${v.cls}" title="${esc(v.text)}">${esc(v.short)}</span>` : top ? `<span class="meta">${_t('k0750', { v: esc(top.factor), v2: num(top.mean_ic, 3) })}</span>` : j.status === 'running' || j.status === 'failed' || j.error ? rBadge(j) : '—';
+    const what = isIdea ? esc(j.idea || '') : `${esc(FEAT_ZH[j.features] || j.features)}${j.neutralize === 'sector' ? _t('k0752') : ''}`;
+    return `<a role="listitem" class="rl-row" href="#/p/${projectId}/r/${esc(j.jobId)}">
+      <span class="rl-main"><span class="rl-title">${esc(j.title)}${isIdea ? '' : `<span class="mode">${j.mode === 'factors' ? _t('k0753') : _t('k0754')}</span>`}</span><span class="rl-sub" title="${esc(j.idea || '')}">${what}</span></span>
+      <span class="rl-meta">${esc(uniName(j.target))}<span>${agoT(j.created)}</span></span>
+      <span class="rl-res">${res}</span>${CHEVRON_SVG}</a>`;
+  }).join('')}</div>`;
 }
 
 async function loadResearchView(silent = false) {
@@ -1941,26 +2195,13 @@ function ideaHTML(j) {
 // 项目流程条：想法检验 → 回测 → 统计检验 → 模拟实盘
 // 流程即标签：① 想法检验 → ② 回测与统计检验 → ③ 模拟实盘；代码放在右侧
 function flowTabsHTML(projectId, active) {
-  const stg = Array.isArray(S.backtests) && Array.isArray(S.research) ? projStage({ projectId }, { bts: S.backtests, rs: S.research, pap: Array.isArray(S.papers) ? S.papers : [] }) : null;
-  const curTab = stg ? (stg.step <= 1 ? 'research' : stg.step <= 3 ? 'backtests' : 'paper') : null;
-  const rs = Array.isArray(S.research) ? S.research : [];
-  const all = Array.isArray(S.backtests) ? S.backtests : [];
-  const bts = all.filter((b) => b.role !== 'debug');
-  const ideas = rs.filter((j) => j.mode === 'idea');
-  const good = ideas.filter((j) => j.verdict === '有信号' || j.verdict === '信号弱').length;
-  const done = bts.filter((b) => /Completed/i.test(b.status || '')).length;
-  const main = bts.find((b) => b.role === 'main');
-  const pap = Array.isArray(S.papers) ? S.papers : [];
-  const live = pap.filter((s) => s.status === 'active').length;
-  const step = (tab, n, title, sub, state) => `<a role="tab" aria-selected="${tab === active}" class="ft-step ${state} ${tab === active ? 'active' : ''} ${tab === curTab ? 'current' : ''}" href="#/p/${projectId}/${tab}"><i>${state === 'done' ? '✓' : n}</i><span><b>${title}</b><em>${sub}</em></span></a>`;
-  const rsSub = ideas.length ? `${_t('k0847', { n: ideas.length, good })}` : rs.length ? `${_t('k0848', { n: rs.length })}` : _t('k0849');
-  const btSub = main ? `${_t('k0850', { done })}` : done ? `${_t('k0851', { done })}` : _t('k0852');
-  return `<nav class="flow-tabs" role="tablist" aria-label="${_t('k0857')}">
-    ${step('research', 1, _t('k0115'), rsSub, ideas.length || rs.length ? 'done' : 'todo')}
-    ${step('backtests', 2, _t('k0853'), btSub, main ? 'done' : done ? 'part' : 'todo')}
-    ${step('paper', 3, _t('k0116'), live ? `${_t('k0854', { live })}` : pap.length ? `${_t('k0855', { n: pap.length })}` : _t('k0856'), live ? 'done' : 'todo')}
-    <a role="tab" aria-selected="${active === 'rules'}" class="ft-code ${active === 'rules' ? 'active' : ''}" href="#/p/${projectId}/rules"><svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M3.5 2.5h9v11h-9zM5.5 5.5h5M5.5 8h5M5.5 10.5h3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>${_t('k0858')}
-    <a role="tab" aria-selected="${active === 'code'}" class="ft-code ${active === 'code' ? 'active' : ''}" href="#/p/${projectId}/code"><svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="m5.5 4.5-3.5 3.5 3.5 3.5M10.5 4.5l3.5 3.5-3.5 3.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>${_t('k0114')}${Array.isArray(S.files) ? `<span class="count">${S.files.length}</span>` : ''}</a>
+  const ov = isOverview(active) || active === 'compare';
+  const t = (sel, href, label, icon = '', extra = '') => `<a role="tab" aria-selected="${sel}" class="ft-code ${sel ? 'active' : ''}" href="#/p/${projectId}${href}">${icon}${label}${extra}</a>`;
+  return `<nav class="flow-tabs proj-tabs" role="tablist" aria-label="${_t('k0857')}">
+    ${t(ov, '', _t('ux035'))}
+    ${t(active === 'rules', '/rules', _t('k0858'))}
+    ${t(active === 'reports', '/reports', _t('dk191'))}
+    ${t(active === 'code', '/code', _t('k0114'), '', Array.isArray(S.files) ? `<span class="count">${S.files.length}</span>` : '')}
   </nav>`;
 }
 
@@ -1991,7 +2232,7 @@ function researchHTML() {
   const { projectId, jobId } = S.route;
   const j = S.rjob;
   if (!j) return '<div class="page"><div class="skeleton" style="height:28px;width:40%;margin-bottom:22px"></div><div class="skeleton" style="height:120px"></div></div>';
-  if (j.loadError) return `<div class="page">${errorBox(_t('k0862'), j.loadError)}<p class="empty-line">${_t('k0863', { projectId })}</p></div>`;
+  if (j.loadError) return `<div class="page">${errorBox(_t('k0862'), j.loadError)}</div>`;
   if (j.mode === 'idea') return ideaHTML(j);
   const v = verdictZh(j.verdict);
   const factorsDone = j.phases.find((p) => p.id === 'factors')?.status === 'complete';
@@ -2070,9 +2311,9 @@ function universesHTML() {
 
 /* ================= home ================= */
 let ROUTES; _regT(() => { ROUTES = [
-  ['auto', _t('k0924'), _t('k0925')],
-  ['fast', _t('k0926'), _t('k0927')],
-  ['deep', _t('k0928'), _t('k0929')],
+  ['auto', _t('k0924'), _t('k0925'), _t('ux078')], // [键, 名字, 详细说明（悬停）, 一句白话（显示在旁边）]
+  ['fast', _t('k0926'), _t('k0927'), _t('ux079')],
+  ['deep', _t('k0928'), _t('k0929'), _t('ux080')],
 ]; });
 // 首页示例：点一下填进输入框，可以改了再交
 let EXAMPLES; _regT(() => { EXAMPLES = [
@@ -2101,28 +2342,39 @@ function projStage(p, hh) {
   const live = h.pap.find((s) => s.status === 'active');
   const best = main || done.slice().sort((a, b) => (+b.sharpeRatio || -9) - (+a.sharpeRatio || -9))[0] || null;
   let step; let next;
-  if (live) { step = 4; next = { t: _t('k0941'), href: `${base}/s/${live.sessionId}` }; }
+  const liveBad = h.pap.find((x) => x.status === 'active' && x.lastRun && !x.lastRun.ok && !x.lastRun.skipped);
+  if (liveBad) { step = 4; next = { t: _t('ux024'), href: `${base}/s/${liveBad.sessionId}`, bad: true }; }
+  else if (live) { step = 4; next = { t: _t('k0941'), href: `${base}/s/${live.sessionId}` }; }
   else if (main) { step = 3; next = { t: _t('k0942'), href: `${base}/b/${main.backtestId}` }; }
   else if (done.length) { step = 2; next = { t: _t('k0943'), href: `${base}/b/${best.backtestId}` }; }
   else if (signal) { step = 1; next = { t: _t('k0944'), href: `${base}/r/${signal.jobId}` }; }
-  else if (ideas.length) { step = 1; next = { t: _t('k0233'), href: `${base}/research` }; }
-  else { step = 0; next = { t: _t('k0141'), href: `${base}/research`, ask: 'researcher' }; }
-  return { step, next, best, running: h.bts.some(isRunning) || h.rs.some((j) => j.status === 'running') };
+  else if (ideas.length) { step = 1; next = { t: _t('k0233'), href: `${base}/research`, ask: 'researcher' }; }
+  else { step = 0; next = { t: _t('ux082'), href: base }; } // 什么都还没做（比如刚从模板建好）：模板代码直接能回测
+  return { step, next, best, paperBad: Boolean(liveBad), running: h.bts.some(isRunning) || h.rs.some((j) => j.status === 'running') };
 }
 let STEP_ZH; _regT(() => { STEP_ZH = [_t('k0945'), _t('k0946'), _t('k0111'), _t('k0157'), _t('k0947')]; });
-function stageMarks(step) {
-  return `<span class="stage" title="${STEP_ZH[step]}">${[1, 2, 3, 4].map((i) => `<i class="${i <= step ? 'on' : ''}"></i>`).join('')}<em>${step}/4 ${STEP_ZH[step]}</em></span>`;
+// 当前在哪一步：和项目页状态卡同一套名字。想法没有信号算卡在第一步
+function stageMarks(st) {
+  const blocked = st.step === 1 && st.next && st.next.ask;
+  const cur = st.step === 4 ? 4 : blocked ? 1 : st.step + 1;
+  const bad = blocked || st.paperBad;
+  const label = st.step === 0 ? _t('ux081') : _t(`pv_s${cur}`);
+  return `<span class="stage ${bad ? 'bad' : ''}">${[1, 2, 3, 4].map((i) => `<i class="${i < cur || (st.step === 4 && !bad) ? 'on' : i === cur && st.step ? 'cur' : ''}"></i>`).join('')}<em>${label}</em></span>`;
 }
 function projRow(p) {
   const st = projStage(p);
   const b = st ? st.best : undefined;
   const cell = (v, cls = '') => `<td class="r ${cls}">${v}</td>`;
-  const nums = b === undefined ? `<td class="r" colspan="3"><span class="skeleton" style="display:inline-block;width:120px;height:12px"></span></td>`
-    : !b ? `<td class="r faint" colspan="3">—</td>`
+  // 不用 colspan：窄屏按列号隐藏夏普、回撤时，合并单元格会把整张表撑歪
+  const nums = b === undefined ? `<td class="r"><span class="skeleton" style="display:inline-block;width:48px;height:12px"></span></td><td class="r"></td><td class="r"></td>`
+    : !b ? `<td class="r faint">—</td><td class="r"></td><td class="r"></td>`
       : cell(pct(b.compoundingAnnualReturn), signClass(b.compoundingAnnualReturn)) + cell(num(b.sharpeRatio)) + cell(pct(b.drawdown, false));
-  return `<tr data-href="#/p/${p.projectId}"><td class="name"><b>${esc(p.name)}</b><span class="when">${agoT(p.modified)}${st && st.running ? _t('k0948') : ''}</span></td>
-    <td>${st ? stageMarks(st.step) : ''}</td>${nums}
-    <td class="next">${st ? `<a href="${esc(st.next.href)}">${st.next.t}<span aria-hidden="true">→</span></a>` : ''}</td></tr>`;
+  const h = (S.home || {})[p.projectId];
+  const paperBad = h && Array.isArray(h.pap) && h.pap.some((x) => x.status === 'active' && x.lastRun && !x.lastRun.ok && !x.lastRun.skipped);
+  const a = attnOf(p); const hot = a && (a.paper || a.bt || a.decide);
+  return `<tr data-href="#/p/${p.projectId}" class="${hot ? 'hot' : ''}"><td class="name"><b>${esc(pName(p))}</b><span class="when">${agoT(p.modified)}${st && st.running ? _t('k0948') : ''}${paperBad ? ` · <span class="down">${_t('ux012')}</span>` : ''}</span></td>
+    <td>${st ? stageMarks(st) : ''}</td>${nums}
+    <td class="next">${st ? `<a href="${esc(st.next.href)}" class="${st.next.bad ? 'down' : ''}">${st.next.t}<span aria-hidden="true">→</span></a>` : ''}</td></tr>`;
 }
 
 /* ================= 想法记录 ================= */
@@ -2139,7 +2391,7 @@ function journalFiltered() {
   const J = S.journal; const E = (J.data && J.data.entries) || [];
   const q = (J.q || '').trim().toLowerCase();
   return E.filter((e) => (!J.project || String(e.projectId) === J.project) && (!J.stage || e.stage === J.stage) && (!J.outcome || e.outcome === J.outcome)
-    && (!q || `${e.what} ${e.detail} ${e.projectName} ${e.stage} ${e.outcome}`.toLowerCase().includes(q)));
+    && (!q || `${e.what} ${e.detail} ${e.projectName} ${pNameById(e.projectId)} ${e.stage} ${e.outcome}`.toLowerCase().includes(q)));
 }
 function journalRowsHTML(rows) {
   if (!rows.length) return _t('k0950');
@@ -2147,7 +2399,7 @@ function journalRowsHTML(rows) {
     const k = e.key ? `<span class="jr-kl">${esc(e.key.label)}</span> ${num(e.key.value)}` : '—';
     const attrs = e.link ? ` data-href="${esc(e.link)}"` : ' class="static"';
     return `<tr${attrs}><td class="mono">${esc(String(e.date || '').slice(0, 10)) || '—'}</td>
-      <td class="jr-proj" title="${esc(e.projectName)}">${e.projectId != null ? `<a href="#/p/${e.projectId}">${esc(e.projectName)}</a>` : esc(e.projectName)}</td>
+      <td class="jr-proj" title="${esc(pNameById(e.projectId, e.projectName))}">${e.projectId != null ? `<a href="#/p/${e.projectId}">${esc(pNameById(e.projectId, e.projectName))}</a>` : esc(e.projectName)}</td>
       <td class="jr-what" title="${esc(e.what)}">${esc(e.what)}${e.detail ? `<span class="when">${esc(e.detail)}</span>` : ''}</td>
       <td>${esc(e.stage)}</td><td>${esc(e.outcome)}</td><td class="r">${k}</td></tr>`;
   }).join('');
@@ -2171,7 +2423,7 @@ function journalHTML() {
     ${cell(_t('k0176'), esc(S0.holdoutLooksTotal), holdSub)}
     ${cell(_t('k0962'), esc(tr.total ?? '—'), tr.sameHistory != null ? `${_t('k0963', { v: esc(tr.sameHistory) })}<br>${_t('k0964')}` : _t('k0965'))}
   </div><p class="pg-note jr-reach">${_t('k0966')}${stages.map((x) => `${esc(x)} <b class="mono">${esc(st[x] || 0)}</b>`).join(' · ')}</p>`;
-  const projs = [...new Map(entries.map((e) => [e.projectId, e.projectName])).entries()].filter(([id]) => id != null);
+  const projs = [...new Map(entries.map((e) => [e.projectId, pNameById(e.projectId, e.projectName)])).entries()].filter(([id]) => id != null);
   const outs = [...new Set(entries.map((e) => e.outcome))];
   const opt = (v, cur, label) => `<option value="${esc(v)}"${String(cur) === String(v) ? ' selected' : ''}>${esc(label ?? v)}</option>`;
   const rows = journalFiltered();
@@ -2215,14 +2467,36 @@ function dataHTML() {
     ${datasetsHTML()}
   </div>`;
 }
+// 首页「需要处理」：离开一段时间回来，先看到哪里出了问题、哪里在等你决定，点一下直达
+const WEEK = 7 * 864e5;
+function attnOf(p) {
+  const h = (S.home || {})[p.projectId];
+  if (!h) return null;
+  const paper = (h.pap || []).find((x) => x.status === 'active' && x.lastRun && !x.lastRun.ok && !x.lastRun.skipped);
+  const bt = (h.bts || []).find((b) => b.role !== 'debug' && isFailed(b) && b.created && Date.now() - new Date(b.created).getTime() < WEEK && !(h.bts || []).some((x) => x !== b && !isFailed(x) && x.created > b.created));
+  const st = projStage(p);
+  return { paper, bt, decide: st && st.step === 2 && !st.running ? st : null };
+}
+function attnScore(p) { const a = attnOf(p); return !a ? 0 : a.paper ? 3 : a.bt ? 2 : a.decide ? 1 : 0; }
+// 首页标题下的一句话：哪些事卡在你这里（按严重程度排）；返回 { n, line }
+function attnSummary() {
+  if (!S.projects || !S.home) return null;
+  const list = S.projects.map((p) => attnOf(p)).filter((a) => a && (a.paper || a.bt || a.decide));
+  const parts = [['paper', 'ux021'], ['bt', 'ux022'], ['decide', 'ux023']]
+    .map(([k, key]) => [list.filter((a) => a[k]).length, key]).filter(([n]) => n).map(([n, key]) => _t(key, { n }));
+  return { n: list.length, bad: list.some((a) => a.paper || a.bt), line: parts.join(_t('k0007')) };
+}
+// 首页视线：① 标题直接说「有几件事卡在你这里」→ ② 项目表，需要你处理的排最前、下一步用强调色 → ③ 写下一个想法 → ④ 直接问智能体。
+// 回访用户的顺序固定不变（不随状态跳动）；第一次用、还没有项目时，输入框就是全部重点，放最前。
 function homeHTML() {
   const h = new Date().getHours();
   const greet = h < 5 ? _t('k0999') : h < 11 ? _t('k1000') : h < 14 ? _t('k1001') : h < 18 ? _t('k1002') : _t('k1003');
-  const date = new Date().toLocaleDateString(LOC(), { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
-  const st = S.status || {};
   const setup = healthHTML();
-  const projs = S.projects ? S.projects.slice(0, 8) : null;
+  const projs = S.projects ? S.projects.slice().sort((a, b) => attnScore(b) - attnScore(a)).slice(0, 8) : null;
   const firstRun = projs && !projs.length && !S.projectsError;
+  const attn = attnSummary();
+  const nHot = projs ? projs.filter((p) => attnScore(p) > 0).length : 0;
+  const rows = projs ? projs.map((p, i) => (i === nHot && nHot ? `<tr class="static grp"><td colspan="6">${_t('hm_other')}</td></tr>` : '') + projRow(p)).join('') : '<tr class="static"><td colspan="6"><div class="skeleton" style="height:40px"></div></td></tr>';
   const projSec = S.projectsError && !(projs && projs.length) ? errorBox(_t('k1004'), S.projectsError)
     : firstRun ? `<ol class="first-run" aria-label="${_t('k1005')}">
         <li>${_t('k1006')}</li>
@@ -2231,34 +2505,44 @@ function homeHTML() {
         <li>${_t('k1009')}</li>
       </ol>
       <p class="empty-line">${_t('k1010')}<button type="button" class="linkish" data-new-project>${_t('k1011')}</button>${_t('k1012')}</p>`
-      : `<div class="table-wrap"><table class="data home-proj"><thead><tr><th>${_t('k0268')}</th><th>${_t('k0974')}</th><th class="r">${_t('k0272')}</th><th class="r">${_t('k0273')}</th><th class="r">${_t('k1014')}</th><th class="r">${_t('k0173')}</th></tr></thead><tbody>${projs ? projs.map(projRow).join('') : '<tr class="static"><td colspan="6"><div class="skeleton" style="height:40px"></div></td></tr>'}</tbody></table></div>
-      ${S.projects && S.projects.length > 8 ? `<p class="data-note">${_t('k1013')}</p>` : ''}
-      <ol class="flow-legend"><li>${_t('k1015')}</li><li>${_t('k1016')}</li><li>${_t('k1017')}</li></ol>`;
-  return `<div class="page">
-    <div class="hero">
-      <div class="eyebrow">${esc(date)}</div>
-      <h1>${_t('k1019')}</h1>
-      <p class="sub">${_t('k1020')}</p>
-    </div>
-    <form class="idea" id="ideaForm">
+      : `<div class="table-wrap"><table class="data home-proj"><thead><tr><th>${_t('k0268')}</th><th>${_t('k0974')}</th><th class="r">${_t('k0272')}</th><th class="r">${_t('k0273')}</th><th class="r">${_t('k1014')}</th><th class="r">${_t('k0173')}</th></tr></thead><tbody>${rows}</tbody></table></div>
+      ${S.projects && S.projects.length > 8 ? `<p class="data-note">${_t('k1013')}</p>` : ''}`;
+  const composer = `<form class="idea" id="ideaForm">
       <textarea id="ideaInput" rows="3" aria-label="${_t('k1021')}" aria-describedby="ideaHint" placeholder="${_t('k1022')}"></textarea>
       <div class="idea-foot">
         <div class="route-pick" role="radiogroup" aria-label="${_t('k1023')}">${ROUTES.map(([k, zh, tip]) => `<button type="button" role="radio" aria-checked="${S.route2 === k}" class="${S.route2 === k ? 'active' : ''}" data-route2="${k}" title="${esc(tip)}">${zh}</button>`).join('')}
-          <span class="route-tip">${esc((ROUTES.find((r) => r[0] === S.route2) || ROUTES[0])[2])}</span></div>
+          ${((rt) => `<span class="route-tip" title="${esc(rt[2])}">${esc(rt[3])}</span>`)(ROUTES.find((r) => r[0] === S.route2) || ROUTES[0])}</div>
         <button class="btn primary" type="submit" id="ideaSubmit">${_t('k1024', { MOD_KEY })}</button>
       </div>
     </form>
     ${ideaErrHTML()}
-    <div class="idea-ex" id="ideaHint"><span>${_t('k1025')}</span>${EXAMPLES.map(([t, text]) => `<button type="button" data-example="${esc(text)}" title="${esc(text)}">${esc(t)}</button>`).join('')}</div>
+    ${ideaMissHTML()}
+    <div class="idea-ex" id="ideaHint"><span>${_t('k1025')}</span>${EXAMPLES.map(([t, text]) => `<button type="button" data-example="${esc(text)}" title="${esc(text)}">${esc(t)}</button>`).join('')}</div>`;
+  const quick = `<section class="home-sec">
+      <div class="sec-head"><h2>${_t('k1026')}</h2></div>
+      <div class="quick-list">${QUICK.map((q) => { const a = agentOf(q.agent); return `<button type="button" data-prefill="${q.agent}" data-text="${esc(q.text)}" title="${esc(_t('ux042'))}"><span>${esc(q.text)}</span><em>${esc(a.name)}</em></button>`; }).join('')}</div>
+    </section>`;
+  if (firstRun || S.projectsError) return `<div class="page">
+    <div class="hero"><h1>${_t('k1019')}</h1><p class="sub">${_t('k1020')}</p></div>
+    ${composer}
     ${setup}
-    <section class="home-sec">
-      <div class="sec-head"><h2>${firstRun ? _t('k1018') : _t('k0973')}</h2><span class="meta">${S.projects && S.projects.length ? S.projects.length : ''}</span></div>
+    <section class="home-sec"><div class="sec-head"><h2>${firstRun ? _t('k1018') : _t('h015')}</h2></div>${projSec}</section>
+    ${quick}
+  </div>`;
+  const title = !attn ? greet : attn.n ? _t('hm_t1', { n: attn.n }) : _t('hm_t0');
+  const sub = !attn ? '' : attn.n ? attn.line : _t('hm_d0');
+  return `<div class="page">
+    <div class="hero home-status ${attn && attn.n ? 'has-attn' : ''} ${attn && attn.bad ? 'bad' : ''}"><h1>${title}</h1>${sub ? `<p class="sub">${esc(sub)}</p>` : ''}</div>
+    ${setup}
+    <section class="home-sec home-proj-sec">
+      <div class="sec-head"><h2>${_t('h015')}</h2><span class="meta">${S.projects && S.projects.length ? S.projects.length : ''}</span></div>
       ${projSec}
     </section>
-    <section class="home-sec">
-      <div class="sec-head"><h2>${_t('k1026')}</h2><span class="meta">${_t('k1027', { MOD_KEY })}</span></div>
-      <div class="quick-list">${QUICK.map((q) => { const a = agentOf(q.agent); return `<button type="button" data-ask="${q.agent}" data-text="${esc(q.text)}"><span>${esc(q.text)}</span><em>${esc(a.name)}</em></button>`; }).join('')}</div>
+    <section class="home-sec home-new">
+      <div class="sec-head"><h2>${_t('k1019')}</h2></div>
+      ${composer}
     </section>
+    ${quick}
   </div>`;
 }
 
@@ -2276,12 +2560,12 @@ function paperBadge(s) {
 }
 const modeTag = (m) => `<span class="pmode ${m === 'alpaca' ? 'alpaca' : 'sim'}">${esc(PMODE[m] ? PMODE[m][0] : m)}</span>`;
 
-function paperTabHTML(projectId) {
-  const intro = `<div class="r-intro">${_t('k1037')}</div>`;
+function paperTabHTML(projectId, stg) {
+  const intro = '';
   const list = S.papers;
   if (list && list.error) return `${intro}${errorBox(_t('k1038'), list.error)}`;
   if (!Array.isArray(list)) return `${intro}<div class="skeleton" style="height:120px"></div>`;
-  if (!list.length) return `${intro}<div class="panel empty"><div class="big">${_t('k1039')}</div><p>${_t('k1040')}</p></div>`;
+  if (!list.length) return `<p class="psec-empty">${_t('ux036')}${stg && stg.step === 3 ? '' : ''}</p>`;
   const now = new Date();
   return `${intro}<div class="panel"><div class="table-wrap"><table class="data"><thead><tr><th>${_t('k0947')}</th><th>${_t('k0269')}</th><th>${_t('k1045')}</th><th class="r">${_t('k1046')}</th><th class="r">${_t('k1047')}</th><th class="r">${_t('k0274')}</th><th>${_t('k1048')}</th><th>${_t('k1049')}</th></tr></thead><tbody>
     ${list.map((x) => {
@@ -2342,19 +2626,19 @@ const prevWeekdayISO = (iso) => { let d = addDaysISO(iso, -1); while ([0, 6].inc
 // 美股休市日历（public/calendar.js，和服务端共用同一份规则）；万一没加载到，就退回只看周末
 const CAL = window.HelmCalendar || null;
 const isTradingISO = (iso) => (CAL ? CAL.isTradingDay(iso) : ![0, 6].includes(new Date(`${iso}T12:00:00Z`).getUTCDay()));
-// 和 lib/paper.mjs 的 expectedTradingDate 一样：美东交易日 17:15 之后是当天，否则是上一个交易日（跳过周末和休市日）
+// 和 lib/paper.mjs 的 expectedTradingDate 一样：美东的昨天及以前最近的交易日（LEAN 回测最多只跑到美东的昨天）
 function expectedDataDateET(now) {
   const e = etParts(now);
-  if (isTradingISO(e.date) && e.hm >= '17:15') return e.date;
   return CAL ? CAL.prevTradingDay(e.date) : prevWeekdayISO(e.date);
 }
-// 美东某天 17:15 对应的时刻（夏令时 / 冬令时各试一次）
-function et1715(iso) {
-  const [y, m, d] = iso.split('-').map(Number);
-  for (const off of [4, 5]) { const t = new Date(Date.UTC(y, m - 1, d, 17 + off, 15)); const e = etParts(t); if (e.date === iso && e.hm === '17:15') return t; }
-  return new Date(Date.UTC(y, m - 1, d, 22, 15));
+// 交易日 iso 结束、可以跑的时刻：美东 iso 的第二天 00:00（夏令时 / 冬令时各试一次）
+function etAfterDay(iso) {
+  const next = addDaysISO(iso, 1);
+  const [y, m, d] = next.split('-').map(Number);
+  for (const off of [4, 5]) { const t = new Date(Date.UTC(y, m - 1, d, off, 0)); const e = etParts(t); if (e.date === next && e.hm === '00:00') return t; }
+  return new Date(Date.UTC(y, m - 1, d, 5, 0));
 }
-// 下次自动运行的估计：Helm 每 10 分钟检查一次；这一天的数据还没跑成功就立刻跑（刚试过的 3 小时后再试）；跑完了就等下一个交易日 17:15（美东，跳过休市日）
+// 下次自动运行的估计：Helm 每 10 分钟检查一次；这一天的数据还没跑成功就立刻跑（刚试过的 3 小时后再试）；跑完了就等下一个交易日结束（美东午夜，跳过休市日）
 function paperNextRun(s, now = new Date()) {
   if (!s || s.status !== 'active') return { kind: 'stopped' };
   const want = expectedDataDateET(now);
@@ -2364,12 +2648,12 @@ function paperNextRun(s, now = new Date()) {
     if (last && last + 3 * 3600e3 > now.getTime()) return { kind: 'retry', at: new Date(last + 3 * 3600e3) };
     return { kind: 'soon', at: now };
   }
-  let day = etParts(now).date;
+  let day = addDaysISO(lr.dataDate > want ? lr.dataDate : want, 1); // 已经跑过的那天之后的第一个交易日
   let closed = null; // 中间跳过的休市日（不含周末），页面上说明为什么不是明天
-  for (let i = 0; i < 10; i++) {
-    const t = et1715(day);
+  for (let i = 0; i < 12; i++) {
+    const t = etAfterDay(day);
     if (isTradingISO(day) && t > now) return { kind: 'sched', at: t, closed };
-    const why = CAL && t > now ? CAL.holidayName(day, HELM_I18N.lang()) : null;
+    const why = CAL ? CAL.holidayName(day, HELM_I18N.lang()) : null;
     if (why && !closed) closed = { date: day, name: why };
     day = addDaysISO(day, 1);
   }
@@ -2422,14 +2706,14 @@ function paperGlanceHTML(s, P) {
     fwd ? (fwd.bench != null ? `${_t('k1060', { v: signClass(fwd.bench), v2: pc(fwd.bench, 2), v3: pc(fwd.ret - fwd.bench, 2) })}<br>${esc(fwd.from)} → ${esc(fwd.to)}` : `${_t('k1061', { v: esc(fwd.from), v2: esc(fwd.to) })}`) : _t('k1062'),
     _t('k1063'));
   const lastV = run.kind === 'none' ? '—' : run.kind === 'first' ? _t('k1064') : `${resHTML(run.kind)}`;
-  const lastSub = run.kind === 'ok' ? `${_t('k1065', { v: esc(ymd2(run.at)), v2: esc(run.dataDate) })}` : run.kind === 'skip' || run.kind === 'fail' ? `${esc(ymd2(run.at))}<br>${esc(zhErr(run.why).slice(0, 160))}` : '';
+  const lastSub = run.kind === 'ok' ? `${_t('k1065', { v: esc(ymd2(run.at)), v2: esc(run.dataDate) })}` : run.kind === 'fail' ? `${esc(ymd2(run.at))} · ${_t('ux014')}` : run.kind === 'skip' ? `${esc(ymd2(run.at))}<br>${esc(zhErr(run.why).slice(0, 160))}` : '';
   const last = cell(_t('k1048'), lastV, lastSub);
   let nxV; let nxSub;
   if (nx.kind === 'stopped') { nxV = _t('k1066'); nxSub = _t('k1067'); } else if (nx.kind === 'soon') { nxV = _t('k1068'); nxSub = _t('k1069'); } else if (nx.kind === 'retry') { nxV = `<span class="mono">${esc(localWhen(nx.at))}</span>`; nxSub = `${_t('k1070', { v: esc(tzName(nx.at)) })}`; } else if (nx.at) { nxV = `<span class="mono">${esc(localWhen(nx.at))}</span>`; nxSub = `${_t('k1072', { v: esc(tzName(nx.at)) })}${nx.closed ? `<br>${_t('k1071', { v: esc(nx.closed.date.slice(5)), v2: esc(nx.closed.name) })}` : ''}`; } else { nxV = '—'; nxSub = ''; }
   const next = cell(`${_t('k1074')}${nx.kind === 'stopped' ? '' : _t('k1073')}`, nxV, nxSub);
   const foreign = s.mode === 'alpaca' ? paperForeign(s, P) : null;
   const note = foreign && foreign.list.length ? `<p class="pg-note">${_t('k1076')}${foreign.list.map((p) => `<span class="mono">${_t('k1075', { v: esc(p.symbol), v2: num(p.qty, 0) })}</span>`).join(_t('k0015'))}${_t('k1077')}</p>` : '';
-  return `<div class="panel section"><div class="panel-head"><h2>${_t('k1078')}</h2><span class="meta">${_t('k1079')}</span></div><div class="pg-grid">${frozen}${ret}${last}${next}</div>${paperVerdictHTML(s)}${note}${paperRunsHTML(s, P, run)}</div>`;
+  return `<div class="panel section"><div class="panel-head"><h2>${_t('k1078')}</h2><span class="meta">${_t('k1079')}</span></div><div class="pg-grid">${frozen}${m && m.days ? '' : ret}${last}${next}</div>${paperVerdictHTML(s)}${note}${paperRunsHTML(s, P, run)}</div>`;
 }
 /* ---- 是否在预期内：冻结后的收益 vs 来源回测按块自助法得到的范围 ---- */
 let PD_WHY; _regT(() => { PD_WHY = _t('k1080'); });
@@ -2496,6 +2780,7 @@ function paperRunsHTML(s, P, run) {
     else rows.unshift({ at: run.at, dataDate: null, kind: 'fail', why: run.why });
   }
   if (!rows.length) return _t('k1097');
+  if (run.kind === 'fail' && rows[0] && rows[0].kind === 'fail') rows[0] = { ...rows[0], why: _t('ux014') + (String(rows[0].why).startsWith(run.why) ? String(rows[0].why).slice(run.why.length) : '') };
   const shown = rows.slice(0, 10);
   return `<div class="table-wrap" style="margin-top:14px"><table class="data runs-tbl"><thead><tr><th>${_t('k1098')}</th><th>${_t('k1099')}</th><th>${_t('k0975')}</th><th>${_t('k1100')}</th></tr></thead><tbody>
     ${shown.map((r) => `<tr class="static"><td class="mono">${esc(ymd2(r.at))}</td><td class="mono">${esc(r.dataDate || '—')}</td><td>${resHTML(r.kind)}</td><td class="why">${r.why ? esc(zhErr(r.why).slice(0, 300)) : '—'}</td></tr>`).join('')}
@@ -2535,22 +2820,24 @@ function paperDriftHTML(s, P) {
     <p class="data-note" style="padding:0 16px 12px">${esc(D.note || '')}</p></div>`;
 }
 
+// KPI 里的资金：放得下又不过粗（$1.02M），完整金额在悬停提示里
+const moneyM = (v) => (v == null || !Number.isFinite(+v) ? '—' : Math.abs(+v) >= 1e6 ? `$${(+v / 1e6).toFixed(2)}M` : money0(v));
 function paperHTML() {
   const P = S.paper;
   const { projectId } = S.route;
   if (!P) return `<div class="page"><div class="skeleton" style="height:28px;width:40%;margin-bottom:22px"></div><div class="skeleton" style="height:84px"></div><div class="skeleton" style="height:260px;margin-top:18px"></div></div>`;
-  if (P.loadError) return `<div class="page">${errorBox(_t('k1038'), P.loadError)}<p class="empty-line">${_t('k1134', { projectId })}</p></div>`;
+  if (P.loadError) return `<div class="page">${errorBox(_t('k1038'), P.loadError)}</div>`;
   const s = P.session; const L = P.latest; const m = L && L.summary;
   const active = s.status === 'active';
-  const head = `${_t('k1145', { projectId })}
-    <div class="page-head">
+  const head = `<div class="page-head">
       <div>
         <div class="eyebrow">${_t('k1146', { v: esc(s.sessionId), v2: paperBadge(s), v3: modeTag(s.mode), v4: agoT(s.created) })}</div>
         <h1>${esc(s.name)}</h1>
         <p class="sub">${_t('k1147', { projectId, v: esc(s.sourceBacktestId) })}${esc(s.sourceName || s.sourceBacktestId)}${_t('k1148')} ${esc(s.frozenAt || _t('k1135'))} ${_t('k1149')}${s.mode === 'sim' ? ` ${_t('k1136', { v: money0(s.capital) })}` : ''}</p>
       </div>
       <div class="actions">
-        ${active ? `<button class="btn" data-action="paper-run" ${P.running ? 'disabled' : ''} title="${_t('k1139')}">${P.running ? _t('k1137') : _t('k1138')}</button><button class="btn" data-action="paper-stop">${_t('k1140')}</button>` : ''}
+        ${active ? `<button class="btn quiet" data-action="paper-stop" title="${_t('ux005')}">${_t('k1140')}</button>` : ''}
+        ${active ? `<button class="btn" data-action="paper-run" ${P.running ? 'disabled' : ''} title="${_t('k1139')}">${P.running ? _t('k1137') : _t('k1138')}</button>` : ''}
         ${m ? askBtn('analyst', _t('k1141'), `${_t('k1143', { sessionId: s.sessionId, projectId })}${s.mode === 'alpaca' ? _t('k1142') : ''}${_t('k1144')}`) : ''}
       </div>
     </div>`;
@@ -2563,9 +2850,9 @@ function paperHTML() {
       <div class="kpi"><div class="k">${_t('k0303')}</div><div class="v ${m.benchmarkReturn != null ? signClass(m.return - m.benchmarkReturn) : ''}">${m.benchmarkReturn != null ? pc(m.return - m.benchmarkReturn, 2) : '—'}</div></div>
       <div class="kpi"><div class="k">${_t('k0274')}</div><div class="v ${m.maxDrawdown ? 'down' : ''}">${pc(m.maxDrawdown, 2)}</div></div>
       <div class="kpi"><div class="k">${_t('k1162')}</div><div class="v">${esc(m.days)}</div></div>
-      <div class="kpi"><div class="k" ${s.mode === 'alpaca' && m.alpacaOwnEquity != null ? _t('k1156') : ''}>${s.mode === 'alpaca' ? (m.alpacaOwnEquity != null ? _t('k1157') : _t('k1158')) : _t('k1159')}</div><div class="v" title="${esc(money0(s.mode === 'alpaca' ? (m.alpacaOwnEquity != null ? m.alpacaOwnEquity : m.alpacaEquity) : m.equity))}">${money(s.mode === 'alpaca' ? (m.alpacaOwnEquity != null ? m.alpacaOwnEquity : m.alpacaEquity) : m.equity, true)}</div></div>
+      <div class="kpi"><div class="k" ${s.mode === 'alpaca' && m.alpacaOwnEquity != null ? _t('k1156') : ''}>${s.mode === 'alpaca' ? (m.alpacaOwnEquity != null ? _t('k1157') : _t('k1158')) : _t('k1159')}</div><div class="v" title="${esc(money0(s.mode === 'alpaca' ? (m.alpacaOwnEquity != null ? m.alpacaOwnEquity : m.alpacaEquity) : m.equity))}">${moneyM(s.mode === 'alpaca' ? (m.alpacaOwnEquity != null ? m.alpacaOwnEquity : m.alpacaEquity) : m.equity)}</div></div>
     </div>
-    <p class="sub" style="margin:10px 0 0">${_t('k1163', { v: esc(m.dataDate) })}${m.days < 60 ? _t('k1160') : ''}${m.invalidOrders ? ` <span class="warn-t">${_t('k1161', { invalidOrders: m.invalidOrders })}</span>` : ''}</p>` : '';
+    <p class="sub" style="margin:10px 0 0">${_t('k1163', { v: esc(m.dataDate) })}${m.days < 60 ? ` ${_t('k1160')}` : ''}${m.invalidOrders ? ` <span class="warn-t">${_t('k1161', { invalidOrders: m.invalidOrders })}</span>` : ''}</p>` : '';
   const chart = L && !(m && !m.days) ? `<div class="panel section"><div class="panel-head"><h2>${_t('k1166')}</h2><span class="meta">${s.mode === 'alpaca' ? _t('k1164') : _t('k1165')}</span></div><div class="chart-wrap" id="pxChart"></div></div>` : '';
   const H = L ? Object.entries(L.holdings || {}) : [];
   const holdings = L ? `<div class="panel section"><div class="panel-head"><h2>${_t('k1171')}</h2><span class="meta">${_t('k1172', { v: esc(L.dataDate) })}</span></div>
@@ -2586,10 +2873,13 @@ function paperHTML() {
       </tbody></table></div>` : _t('k1180')}</div>`;
   }
   const log = P.log && P.log.length ? `<div class="panel section"><div class="panel-head"><h2>${_t('k1186')}</h2><span class="meta">${_t('k1187')}</span></div><div class="table-wrap"><table class="data"><thead><tr><th>${_t('k1099')}</th><th>${_t('k1098')}</th><th>${_t('k1188')}</th><th>${_t('k0163')}</th>${s.mode === 'alpaca' ? _t('k1183') : ''}<th>${_t('k1189')}</th></tr></thead><tbody>
-      ${P.log.slice().reverse().slice(0, 60).map((x) => (x.failed ? `<tr><td class="mono">${esc(x.dataDate || '—')}</td><td class="when">${agoT(x.runAt)}</td><td colspan="${s.mode === 'alpaca' ? 4 : 2}">${resHTML('fail')}</td><td class="sub">${esc(zhErr(x.error || '').slice(0, 200))}</td></tr>` : `<tr><td class="mono">${esc(x.dataDate)}</td><td class="when">${agoT(x.runAt)}</td><td class="mono">${money0(x.equity)}</td><td class="mono">${money0(x.benchmarkEquity)}</td>${s.mode === 'alpaca' ? `<td class="mono">${money0(x.alpaca && x.alpaca.account && x.alpaca.account.equity)}</td><td>${x.alpaca ? `${(x.alpaca.submitted || []).length} ${_t('k1185')}${(x.alpaca.errors || []).length ? `${_t('k1184', { n: x.alpaca.errors.length })}` : ''}` : '—'}</td>` : ''}<td class="sub">${esc([...(x.fetchErrors || []).map((e) => `${_t('k1092', { e })}`), ...((x.alpaca && x.alpaca.errors) || []).map((e) => `${e.symbol} ${e.error}`), (x.alpaca && x.alpaca.note) || ''].filter(Boolean).join(_t('k0007')).slice(0, 200))}</td></tr>`)).join('')}
+      ${P.log.slice().reverse().slice(0, 60).map((x) => (x.failed ? `<tr><td class="mono">${esc(x.dataDate || '—')}</td><td class="when">${agoT(x.runAt)}</td><td colspan="${s.mode === 'alpaca' ? 4 : 2}">${resHTML('fail')}</td><td class="sub">—</td></tr>` : `<tr><td class="mono">${esc(x.dataDate)}</td><td class="when">${agoT(x.runAt)}</td><td class="mono">${money0(x.equity)}</td><td class="mono">${money0(x.benchmarkEquity)}</td>${s.mode === 'alpaca' ? `<td class="mono">${money0(x.alpaca && x.alpaca.account && x.alpaca.account.equity)}</td><td>${x.alpaca ? `${(x.alpaca.submitted || []).length} ${_t('k1185')}${(x.alpaca.errors || []).length ? `${_t('k1184', { n: x.alpaca.errors.length })}` : ''}` : '—'}</td>` : ''}<td class="sub">${esc([...(x.fetchErrors || []).map((e) => `${_t('k1092', { e })}`), ...((x.alpaca && x.alpaca.errors) || []).map((e) => `${e.symbol} ${e.error}`), (x.alpaca && x.alpaca.note) || ''].filter(Boolean).join(_t('k0007')).slice(0, 200))}</td></tr>`)).join('')}
     </tbody></table></div></div>` : '';
   const drift = L ? paperDriftHTML(s, P) : '';
-  return `<div class="page">${head}${err}${running}${kpis}${paperGlanceHTML(s, P)}${chart}${holdings}${drift}${paperOthersHTML(s, P)}${orders}${log}</div>`;
+  // 先看状态、收益曲线和持仓；成交偏差、账户里的其它持仓、订单和每日记录收进一个「详细记录」
+  const nLog = P.log ? P.log.length : 0;
+  const more = drift || orders || log ? `<details class="pp-details"><summary>${_t('ux015')}<span class="meta">${_t('ux016', { n: nLog })}</span></summary>${drift}${paperOthersHTML(s, P)}${orders}${log}</details>` : '';
+  return `<div class="page">${head}${err}${running}${kpis}${paperGlanceHTML(s, P)}${chart}${holdings}${more}</div>`;
 }
 
 // Alpaca：账户里不是这个模拟买的持仓（最近一次运行看到的；还没运行过就用开始时的列表）
@@ -2609,6 +2899,9 @@ async function openPaperModal() {
   const d = $('#paperModal');
   const b = S.backtest;
   if (!d || !b) return;
+  // 统计检验没过：先说清楚（首页说的流程是检验通过后才模拟实盘），用户坚持再开
+  const v = S.validation;
+  if (v && v.ok && !v.pass && !(await askConfirm({ title: _t('ux064'), message: _t('ux065', { okN: (v.gates || []).filter((g) => g.ok).length, n: (v.gates || []).length }), ok: _t('ux066') }))) return;
   $('#ppSource').textContent = b.name || b.backtestId;
   $('#ppName').value = '';
   $('#ppSim').checked = true;
@@ -2641,30 +2934,14 @@ function renderPaperModal() {
   $('#ppAlpacaWarn').hidden = mode !== 'alpaca';
   $('#ppAlpacaState').innerHTML = a.connected
     ? `${_t('k1201')}${esc(a.keyIdMasked || '')}${_t('k1202')} ${money0(a.account && a.account.equity)}${a.account && a.account.tradingBlocked ? _t('k1200') : ''} · <button type="button" class="linkish" id="ppDisconnect">${_t('k1203')}</button>`
-    : `${a.error ? `${_t('k1204', { v: esc(a.error) })} ` : _t('k1205')}<button type="button" class="linkish" id="ppShowConnect">${_t('k1206')}</button>`;
-  $('#ppConnect').hidden = Boolean(a.connected) || !S.alpacaFormOpen;
-  const sc = $('#ppShowConnect'); if (sc) sc.onclick = () => { S.alpacaFormOpen = true; renderPaperModal(); $('#ppKey').focus(); };
+    : `${a.error ? `${_t('k1204', { v: esc(a.error) })} ` : _t('k1205')}<button type="button" class="linkish" id="ppShowConnect">${_t('ux058')}</button> · <a href="${ALPACA_KEYS_URL}" target="_blank" rel="noopener noreferrer">${_t('ux059')}</a>`;
+  const sc = $('#ppShowConnect'); if (sc) sc.onclick = () => openSettings('alpaca');
   const dc = $('#ppDisconnect'); if (dc) dc.onclick = async () => {
     if (!(await askConfirm({ title: _t('k1207'), message: _t('k1208'), ok: _t('k1203'), danger: true }))) return;
     const r = await safePost('/api/actions/alpaca-disconnect');
     if (!r.success) toast(`${_t('k1209')}${(r.errors || []).join('; ')}`);
     refreshAlpaca();
   };
-}
-async function connectAlpaca() {
-  const keyId = $('#ppKey').value.trim(); const secret = $('#ppSecret').value.trim();
-  if (!keyId || !secret) { toast(_t('k1210')); return; }
-  $('#ppConnectBtn').disabled = true;
-  const r = await safePost('/api/actions/alpaca-connect', { keyId, secret });
-  $('#ppConnectBtn').disabled = false;
-  $('#ppSecret').value = '';
-  if (!r.success) { toast(`${_t('k1211')}${(r.errors || []).join('; ')}`); return; }
-  $('#ppKey').value = '';
-  S.alpacaFormOpen = false;
-  S.alpaca = r.status;
-  $('#ppAlpaca').checked = true;
-  renderPaperModal();
-  toast(_t('k1212'));
 }
 async function submitPaper() {
   const mode = $('#ppAlpaca').checked ? 'alpaca' : 'sim';
@@ -2679,17 +2956,112 @@ async function submitPaper() {
   location.hash = `#/p/${projectId}/s/${r.session.sessionId}`;
 }
 
+/* ================= 设置：AI 连接 / Alpaca 模拟账户 / 外观和语言（左下角「设置」，设置向导里也能打开） ================= */
+const ALPACA_KEYS_URL = 'https://app.alpaca.markets/paper/dashboard/overview';
+let settingsDlg = null;
+const capWord = (s) => String(s || '').charAt(0).toUpperCase() + String(s || '').slice(1);
+// 实际在用的 AI：自动模式下显示检测到的账号类型（Claude Max、API key…），而不是笼统的「自动」
+function aiDetected() {
+  const a = S.ai && S.ai.ai; const l = S.ai && S.ai.login;
+  if (!a) return '';
+  if (a.mode === 'custom') return a.model || a.baseUrl || aiModeName('custom');
+  if (a.mode === 'apiKey') return aiModeName('apiKey');
+  if (l && l.ok && l.subscription) return `Claude ${capWord(l.subscription)}`;
+  if (l && l.ok && /api.?key/i.test(l.method || '')) return aiModeName('apiKey');
+  if (l && l.ok && l.method) return _t('ux051');
+  return aiModeName(a.mode);
+}
+function setAiHTML() {
+  if (!S.ai || !S.ai.ai) return `<p class="modal-hint">${_t('ob012')}</p>`;
+  const { ai: a, login: l } = S.ai;
+  const ok = !l || l.ok;
+  const when = S.aiCheckedAt ? ` · ${esc(new Date(S.aiCheckedAt).toLocaleTimeString(LOC(), { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }))}` : '';
+  const used = `${esc(aiDetected())}${a.hasKey ? ` · <span class="mono">${esc(a.keyHint || '')}</span>` : ''}${a.baseUrl ? ` · <span class="mono">${esc(a.baseUrl)}</span>` : ''}`;
+  return `<dl class="set-kv"><dt>${_t('ux052')}</dt><dd>${esc(aiModeName(a.mode))}</dd><dt>${_t('ux053')}</dt><dd>${used}</dd>
+    <dt>${_t('ux054')}</dt><dd>${ok ? `<span class="up">${_t('k1569')}</span>` : `<span class="down">${esc(zhErr((l && l.error) || ''))}</span>`}${when}</dd></dl>
+    <div class="set-btns"><button type="button" class="btn sm" data-set-ai-test>${_t('h108')}</button><button type="button" class="btn sm" data-set-ai-change>${_t('ob035')}</button></div>`;
+}
+function setAlpHTML() {
+  const a = S.alpaca;
+  if (!a) return `<p class="modal-hint">${_t('k1195')}</p>`;
+  if (a.connected) return `<p class="set-line">${_t('k1201')}${esc(a.keyIdMasked || '')}${_t('k1202')} ${money0(a.account && a.account.equity)}${a.account && a.account.tradingBlocked ? _t('k1200') : ''}</p>
+    <div class="set-btns"><button type="button" class="btn sm" data-set-alp-dc>${_t('k1203')}</button></div>`;
+  return `${a.error ? `<p class="set-line">${_t('k1204', { v: esc(a.error) }).replace(/\s*·\s*$/, '')}</p>` : ''}
+    <p class="modal-hint">${_t('ux055')}</p>
+    <p class="modal-hint">${_t('h083')} <a href="${ALPACA_KEYS_URL}" target="_blank" rel="noopener noreferrer">app.alpaca.markets</a> ${_t('h084')} <b>Paper</b> ${_t('h085')}</p>
+    <label class="field"><span>API Key ID</span><input id="setAlpKey" autocomplete="off" spellcheck="false" placeholder="PK…"></label>
+    <label class="field"><span>Secret Key</span><input id="setAlpSecret" type="password" autocomplete="new-password" spellcheck="false"></label>
+    <div class="set-btns"><button type="button" class="btn sm primary" data-set-alp-connect>${_t('h086')}</button></div>`;
+}
+function settingsBodyHTML() {
+  return `<h2 id="setH">${_t('ux049')}</h2>
+    <section class="set-sec" id="setAi" aria-labelledby="setAiH"><h3 id="setAiH">${_t('h092')}</h3><div class="set-in">${setAiHTML()}</div></section>
+    <section class="set-sec" id="setAlp" aria-labelledby="setAlpH"><h3 id="setAlpH">${_t('h081')}</h3><div class="set-in">${setAlpHTML()}</div></section>
+    <section class="set-sec" id="setLook" aria-labelledby="setLookH"><h3 id="setLookH">${_t('ux056')}</h3><div class="set-in side-foot">${lookRowsHTML()}</div></section>
+    <div class="modal-actions"><button type="button" class="btn" data-onb-open>${_t('ob080')}</button><button type="button" class="btn primary" data-set-close>${_t('ux057')}</button></div>`;
+}
+// part：'ai' | 'alp' 只重画那一块（Alpaca 表单里正在输入的内容不被冲掉）；不传 = 整个重画（换了语言）
+function renderSettings(part) {
+  if (!settingsDlg) return;
+  const d = settingsDlg.d;
+  if (part === 'ai') { const el = d.querySelector('#setAi .set-in'); if (el) el.innerHTML = setAiHTML(); return; }
+  if (part === 'alp') { const el = d.querySelector('#setAlp .set-in'); if (el) el.innerHTML = setAlpHTML(); return; }
+  const body = d.querySelector('.set-body'); if (body) body.innerHTML = settingsBodyHTML();
+}
+async function loadAlpacaStatus() {
+  S.alpaca = await post('/api/alpaca/status').catch((e) => ({ connected: false, error: e.message }));
+  renderSettings('alp');
+  if ($('#paperModal').open) renderPaperModal();
+}
+async function onSettingsClick(e, close) {
+  if (e.target.closest('[data-set-close]') || e.target.closest('[data-onb-open]')) { close(); return; }
+  if (e.target.closest('[data-set-ai-change]')) { openAiModal(); return; }
+  const t = e.target.closest('[data-set-ai-test]');
+  if (t) { t.disabled = true; await testAiUI(); S.aiCheckedAt = Date.now(); renderSettings('ai'); return; }
+  const c = e.target.closest('[data-set-alp-connect]');
+  if (c) {
+    const keyId = $('#setAlpKey').value.trim(); const secret = $('#setAlpSecret').value.trim();
+    if (!keyId || !secret) { toast(_t('k1210')); return; }
+    c.disabled = true;
+    const r = await safePost('/api/actions/alpaca-connect', { keyId, secret });
+    c.disabled = false;
+    if (!r.success) { $('#setAlpSecret').value = ''; toast(`${_t('k1211')}${(r.errors || []).join('; ')}`); return; }
+    S.alpaca = r.status;
+    renderSettings('alp');
+    if ($('#paperModal').open) renderPaperModal();
+    toast(_t('k1212'));
+    return;
+  }
+  if (e.target.closest('[data-set-alp-dc]')) {
+    if (!(await askConfirm({ title: _t('k1207'), message: _t('k1208'), ok: _t('k1203'), danger: true }))) return;
+    const r = await safePost('/api/actions/alpaca-disconnect');
+    if (!r.success) toast(`${_t('k1209')}${(r.errors || []).join('; ')}`);
+    loadAlpacaStatus();
+  }
+}
+// section：'alpaca' 时打开后滚到 Alpaca 那一块
+function openSettings(section) {
+  if (!settingsDlg) {
+    settingsDlg = openModal({ cls: 'settings-dlg', labelId: 'setH', html: `<div class="cd-body set-body">${settingsBodyHTML()}</div>`, onClick: onSettingsClick, onClose: () => { settingsDlg = null; } });
+    loadAi(true).then(() => { S.aiCheckedAt = Date.now(); renderSettings('ai'); });
+    loadAlpacaStatus();
+  }
+  const sec = section === 'alpaca' ? settingsDlg.d.querySelector('#setAlp') : null;
+  if (sec) { sec.scrollIntoView({ block: 'start' }); setTimeout(() => { const k = settingsDlg && settingsDlg.d.querySelector('#setAlpKey'); if (k) k.focus(); }, 300); }
+  else settingsDlg.d.querySelector('[data-set-close]').focus();
+}
+
 function renderMain() {
   const v = S.route.view;
   const main = $('#main');
   const top = main.scrollTop;
   let html = v === 'project' ? projectHTML() : v === 'backtest' ? backtestHTML() : v === 'research' ? researchHTML() : v === 'paper' ? paperHTML() : S.route.page === 'pipeline' ? pipelineHTML() : S.route.page === 'agents' ? agentsHTML() : S.route.journal ? journalHTML() : S.route.data ? dataHTML() : homeHTML();
-  // 详情页顶部的流程位置：想法检验 → 回测与检验 → 模拟实盘
+  // 详情页顶部：一个返回按钮回到上一级（像 iOS / macOS 的导航栏），不再叠一条流程条
   if (v === 'backtest' || v === 'research' || v === 'paper') {
-    const cur = v === 'research' ? 0 : v === 'backtest' ? 1 : 2;
-    const base = `#/p/${S.route.projectId}`;
-    const spine = `<nav class="mini-spine" aria-label="${_t('k1218')}">${[['research', _t('k0115')], ['backtests', _t('k0853')], ['paper', _t('k0116')]].map(([t, zh], i) => `<a href="${base}/${t}" class="${i < cur ? 'done' : i === cur ? 'current' : ''}"><i>${i < cur ? '✓' : i + 1}</i>${zh}</a>`).join('<span class="ms-sep"></span>')}</nav>`;
-    html = html.replace('<div class="page">', `<div class="page">${spine}`);
+    const parent = v === 'research' ? 'research' : v === 'backtest' ? 'backtests' : 'paper';
+    const label = _t('ux035');
+    const back = `<a class="back-bar" href="#/p/${S.route.projectId}/${parent}"><svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true"><path d="M10 3 5 8l5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>${label}</a>`;
+    html = html.replace('<div class="page">', `<div class="page">${back}`);
   }
   // 后台刷新会重画整页：保住正在输入的想法、焦点和展开的折叠块
   const idea = $('#ideaInput');
@@ -2699,6 +3071,8 @@ function renderMain() {
   const openDetails = [...main.querySelectorAll('details[open]')].map((d) => d.className).filter(Boolean);
   main.innerHTML = html;
   main.scrollTop = top;
+  applyScrollWant();
+  if (S.secJump && v === 'project') { const el = document.getElementById(`sec-${S.secJump}`); if (el) { S.secJump = null; if (el.tagName === 'DETAILS') el.open = true; el.scrollIntoView({ block: 'start' }); } else if (Array.isArray(S.papers) && Array.isArray(S.research)) S.secJump = null; }
   // 可点击的表格行也能用键盘到达
   main.querySelectorAll('tr[data-href]').forEach((tr) => { tr.tabIndex = 0; tr.setAttribute('role', 'link'); });
   for (const cls of openDetails) { const d = main.querySelector(`details[class="${CSS.escape(cls)}"]`); if (d) d.open = true; }
@@ -2927,8 +3301,8 @@ function pipeCardHTML(c) {
     : w ? `<div class="pc-doing">${agentGlyph(w.agent, 'live')}<span>${_t('k1235', { v: esc(agentOf(w.agent).name), v2: esc(w.title) })}</span></div>` : '';
   const last = c.last ? `<div class="pc-last"><span class="pc-stage">${esc(c.last.stage)}</span>${esc(c.last.outcome)}${c.key ? ` · ${esc(c.key.label)} <b class="mono">${num(c.key.value)}</b>` : ''}</div>` : _t('k1236');
   return `<article class="pipe-card ${sel ? 'sel' : ''} ${c.status === 'active' ? 'is-active' : ''}">
-    <a class="pc-link" href="#/pipeline${sel ? '' : `/${c.projectId}`}" aria-label="${sel ? _t('k1237') : _t('k0129')} ${_t('k1238', { v: esc(c.name) })}"></a>
-    <div class="pc-name" title="${esc(c.name)}">${esc(c.name)}</div>
+    <a class="pc-link" href="#/pipeline${sel ? '' : `/${c.projectId}`}" aria-label="${sel ? _t('k1237') : _t('k0129')} ${_t('k1238', { v: esc(pNameById(c.projectId, c.name)) })}"></a>
+    <div class="pc-name" title="${esc(pNameById(c.projectId, c.name))}">${esc(pNameById(c.projectId, c.name))}</div>
     <div class="pc-segs" aria-hidden="true">${segs}</div>
     <div class="pc-meta">${pill(PIPE_STATUS[c.status] || PIPE_STATUS.idle)}<span class="pc-when">${c.updatedAt ? agoT(c.updatedAt) : ''}</span></div>
     ${last}
@@ -2978,8 +3352,8 @@ function pipeDetailHTML(d) {
   if (!c) return '';
   const nextAsk = `${_t('k1250', { projectId: c.projectId, name: c.name })}`;
   const stages = c.stages.map((s, i) => `<li class="${i < c.stageIdx ? 'done' : i === c.stageIdx ? 'cur' : ''}"><span class="seg ${s.gate && i <= c.stageIdx ? GATE_CLS[s.gate.state] || '' : ''}"></span><b>${esc(s.zh)}</b><span>${s.gate && i <= c.stageIdx ? esc(s.gate.label) : _t('k1251')}</span>${agentGlyph(d.stages[i].owner)}</li>`).join('');
-  return `<section class="pipe-detail" aria-label="${_t('k1238', { v: esc(c.name) })}">
-    <div class="pd-head"><div><div class="eyebrow">${_t('k0167', { projectId: c.projectId })}</div><h2>${esc(c.name)}</h2>${c.description ? `<p class="sub clamp">${esc(c.description)}</p>` : ''}</div>
+  return `<section class="pipe-detail" aria-label="${_t('k1238', { v: esc(pNameById(c.projectId, c.name)) })}">
+    <div class="pd-head"><div><div class="eyebrow">${_t('k0167', { projectId: c.projectId })}</div><h2>${esc(pNameById(c.projectId, c.name))}</h2>${c.description ? `<p class="sub clamp">${esc(c.description)}</p>` : ''}</div>
       <div class="actions">${_t('k1253', { projectId: c.projectId })}${c.status !== 'active' && c.status !== 'stopped' ? `<button type="button" class="btn primary" data-ask="mia" data-text="${esc(nextAsk)}">${_t('k1252')}</button>` : ''}${_t('k1254')}</div></div>
     <ol class="pd-stages">${stages}</ol>
     <h3 class="pd-sub">${_t('k1255')}</h3>
@@ -2990,8 +3364,7 @@ function pipeDetailHTML(d) {
 function pipelineHTML() {
   const P = S.pipe || {};
   const head = `<div class="page-head"><div><div class="eyebrow"><span>${_t('k1256')}</span></div><h1>${_t('k0125')}</h1>
-    <p class="sub">${_t('k1257')}</p></div>
-    <div class="actions"><a class="btn" href="#/agents">Agents</a></div></div>`;
+    <p class="sub">${_t('k1257')}</p></div></div>`;
   if (P.error && !P.data) return `<div class="page wide">${head}${errorBox(_t('k1258'), P.error)}</div>`;
   if (!P.data) return `<div class="page wide">${head}<div class="skeleton" style="height:48px"></div><div class="skeleton" style="height:320px;margin-top:16px"></div></div>`;
   const d = P.data;
@@ -3135,8 +3508,7 @@ function agentDetailHTML() {
 function agentsHTML() {
   const v = S.route.agentsView || 'list';
   const head = `<div class="page-head"><div><div class="eyebrow"><span>${_t('k1325')}</span></div><h1>Agents</h1>
-    <p class="sub">${_t('k1326')}</p></div>
-    <div class="actions"><a class="btn" href="#/pipeline">${_t('k0125')}</a></div></div>`;
+    <p class="sub">${_t('k1326')}</p></div></div>`;
   if (!S.ag || (!S.ag.tasks && !S.ag.error)) return `<div class="page">${head}<div class="skeleton" style="height:260px"></div></div>`;
   const body = v === 'list' ? agentsListHTML() : v === 'tasks' ? tasksTabHTML() : v === 'changes' ? changesTabHTML() : agentDetailHTML();
   return `<div class="page">${head}${agentsTabs(v)}${S.ag.error ? errorBox(_t('k1327'), S.ag.error) : ''}${body}</div>`;
@@ -3155,7 +3527,9 @@ function wirePipelineAgents() {
     const nt = e.target.closest('[data-new-task]');
     if (nt) { e.preventDefault(); e.stopPropagation(); newTaskFor(nt.dataset.newTask); return; }
     const ot = e.target.closest('[data-open-thread]');
-    if (ot && ot.closest('#main') && !e.target.closest('a[href]')) { e.preventDefault(); e.stopPropagation(); openThread(ot.dataset.openThread); return; }
+    const inMain = ot && ot.closest('#main');
+    if (e.target.closest('[data-idea-miss-x]')) { S.ideaMiss = null; const m = $('#ideaMiss'); if (m) m.outerHTML = ideaMissHTML(); }
+    if (inMain && !e.target.closest('a[href]')) { e.preventDefault(); e.stopPropagation(); openThread(ot.dataset.openThread); return; }
     if (e.target.closest('[data-ag-reset]')) { S.ag.dirty = false; S.ag.detail = null; loadAgentsPage(); }
   }, true);
   document.addEventListener('keydown', (e) => {
@@ -3720,7 +4094,7 @@ function toolHTML(p) {
   </details>`;
 }
 
-function aiInner(m, live) {
+function aiInner(m, live, last = false) {
   let html = '';
   let tools = [];
   const usedKids = new Set(); // 同一条消息里的多张交接卡片不要认到同一个对方对话
@@ -3739,7 +4113,11 @@ function aiInner(m, live) {
     const runningTool = m.parts.some((p) => p.kind === 'tool' && p.status === 'running');
     html += `<div class="thinking"><span class="dots"><span></span><span></span><span></span></span>${runningTool ? _t('k1436') : _t('k1437')}</div>`;
   }
-  if (m.error) html += `<div class="notice err"><b>${_t('k0132')}</b><pre>${esc(zhErr(m.error))}</pre></div>`;
+  if (m.error) html += `<div class="notice err"><b>${_t('k0132')}</b><pre>${esc(zhErr(m.error))}</pre>${last ? `<button type="button" class="btn sm" data-retry-last>${_t('k0013')}</button>` : ''}</div>`;
+  // 运行结束却什么都没说（没有文字、没有工具、没报错）：别留一个空白的名字，说清楚并给「重试」
+  else if (!live && !m.stopped && !m.parts.some((p) => (p.kind === 'text' && String(p.text || '').trim()) || (p.kind === 'tool' && shortTool(p.name) !== 'ToolSearch'))) {
+    html += `<div class="notice warn">${_t('ux040')}${last ? ` <button type="button" class="btn sm" data-retry-last>${_t('k0013')}</button>` : ''}</div>`;
+  }
   if (m.denied && m.denied.length) {
     html += `<div class="notice warn">${_t('k1438')}${m.denied.map((d) => `<code>${esc(TOOL_LABELS[shortTool(d)] || shortTool(d))}</code>`).join(_t('k0015'))}${_t('k0199')}
       <br><button class="btn sm" data-retry-danger>${_t('k1439')}</button></div>`;
@@ -3759,7 +4137,7 @@ function aiInner(m, live) {
   return html;
 }
 
-function msgHTML(m, live = false) {
+function msgHTML(m, live = false, last = false) {
   if (m.role === 'user') {
     if (m.from) {
       const a = agentOf(m.from.agent);
@@ -3772,12 +4150,29 @@ function msgHTML(m, live = false) {
     return `<div class="msg user"><div class="bubble ${long ? 'clamp' : ''}">${esc(m.text)}</div>${long ? _t('k1447') : ''}${ctxTxt || m.allowDanger ? `<div class="ctx-mini">${ctxTxt ? `<span>${_t('k1448', { v: esc(ctxTxt) })}</span>` : ''}${m.allowDanger ? _t('k1449') : ''}</div>` : ''}</div>`;
   }
   const a = agentOf(m.agent);
-  return `<div class="msg ai" ${live ? 'data-live' : ''}><div class="who"><span class="g" style="--c:${a.color}">${esc(a.glyph)}</span><b>${esc(a.name)}</b></div><div class="body">${aiInner(m, live)}</div></div>`;
+  return `<div class="msg ai" ${live ? 'data-live' : ''}><div class="who"><span class="g" style="--c:${a.color}">${esc(a.glyph)}</span><b>${esc(a.name)}</b></div><div class="body">${aiInner(m, live, last)}</div></div>`;
 }
 
+// 在项目 / 回测 / 模拟实盘页打开对话时，示例问题先给跟这一页有关的
+function ctxStarters() {
+  const c = S.ctxOff ? null : currentContext();
+  if (!c) return [];
+  if (c.backtestId) return [_t('ux028'), _t('ux029')];
+  if (c.paperSessionId) return [_t('ux030')];
+  if (c.jobId) return [_t('ux031')];
+  return [_t('ux026'), _t('ux027')];
+}
+// 从页面上打开对话、还没开始聊时，按页面预选更合适的 agent（只替换默认的总控，不改用户自己选的）
+function ctxAgent() {
+  const r = S.route;
+  if (r.view === 'backtest') return 'analyst';
+  if (r.view === 'research') return 'researcher';
+  if (r.view === 'project' && r.tab === 'code') return 'engineer';
+  return null;
+}
 function introHTML(a) {
   return `<div class="intro"><div class="g" style="--c:${a.color}">${esc(a.glyph)}</div><h3>${esc(a.name)}</h3><p>${esc(a.role)}</p>
-    <div class="starters">${(a.starters || []).map((s) => `<button data-starter="${esc(s)}">${esc(s)}</button>`).join('')}</div></div>`;
+    <div class="starters">${[...ctxStarters(), ...(a.starters || [])].slice(0, 5).map((s) => `<button data-starter="${esc(s)}">${esc(s)}</button>`).join('')}</div></div>`;
 }
 
 const nearBottom = () => { const b = $('#messages'); return b.scrollHeight - b.scrollTop - b.clientHeight < 80; };
@@ -3790,7 +4185,8 @@ function renderThread(opts = {}) {
   const wasPinned = S.pinned;
   if (!S.thread || !S.thread.messages.length) { box.innerHTML = introHTML(agentOf(S.agentId)); S.pinned = true; updateComposer(); return; }
   const run = currentRunning();
-  box.innerHTML = S.thread.messages.map((m, i) => msgHTML(m, run && i === S.thread.messages.length - 1 && m.role === 'assistant')).join('');
+  box.innerHTML = S.thread.messages.map((m, i) => msgHTML(m, run && i === S.thread.messages.length - 1 && m.role === 'assistant', !run && i === S.thread.messages.length - 1)).join('');
+  unclampBubbles();
   if (opts.keep && !wasPinned) box.scrollTop = keepTop; else { box.scrollTop = box.scrollHeight; S.pinned = true; }
   updateComposer();
 }
@@ -3861,10 +4257,13 @@ function currentContext() {
 function renderCtx() {
   const ctx = currentContext();
   const row = $('#ctxRow');
+  // 还没开始聊：示例问题跟着当前页面换
+  if ((!S.thread || !S.thread.messages.length) && $('#messages')) $('#messages').innerHTML = introHTML(agentOf(S.agentId));
   if (!ctx) { row.innerHTML = ''; return; }
   const proj = ctx.projectName || `#${ctx.projectId}`;
   const label = ctx.paperSessionId ? `${proj} / ${ctx.paperName || _t('k0116')}` : ctx.backtestId ? `${proj} / ${ctx.backtestName || _t('k0111')}` : ctx.jobId ? `${proj} / ${ctx.jobTitle || _t('k0127')}` : proj;
-  row.innerHTML = `<div class="ctx-chip ${S.ctxOff ? 'off' : ''}"><span class="lab">${S.ctxOff ? _t('k1464') : _t('k1465')}</span><span>${esc(label)}</span>
+  const what = [ctx.projectName || `#${ctx.projectId}`, ctx.backtestName || ctx.backtestId, ctx.paperName || ctx.paperSessionId, ctx.jobTitle || ctx.jobId, ctx.tab].filter(Boolean).join(' · ');
+  row.innerHTML = `<div class="ctx-chip ${S.ctxOff ? 'off' : ''}" title="${esc(_t('ux032', { v: what }))}"><span class="lab">${S.ctxOff ? _t('k1464') : _t('k1465')}</span><span>${esc(label)}</span>
     <button type="button" data-ctx-toggle title="${S.ctxOff ? _t('k1466') : _t('k1467')}">${S.ctxOff ? '+' : '✕'}</button></div>`;
 }
 
@@ -3923,7 +4322,7 @@ async function send(text, opts = {}) {
   renderThread();
   subscribe(r.threadId);
   loadThreads();
-  return { ok: true };
+  return { ok: true, threadId: r.threadId };
 }
 
 // 首页想法：每个想法一个新对话，可以连续提交多个并行处理。
@@ -3934,8 +4333,11 @@ async function submitIdea() {
   if (!idea) { if (box) box.focus(); toast(_t('k1478')); return; }
   if (S.sending) return;
   setIdeaError(null);
+  const before = new Set((S.projects || []).map((p) => p.projectId));
   const r = await send(ideaPrompt(idea, S.route2), { idea: true });
   if (r.ok) {
+    if (r.threadId) S.ideaRuns.set(r.threadId, { before, threads: new Set([r.threadId]), error: null });
+    if (S.ideaMiss) { S.ideaMiss = null; const m = $('#ideaMiss'); if (m) m.outerHTML = ideaMissHTML(); }
     store.set('ideaDraft', '');
     const b = $('#ideaInput'); if (b) b.value = '';
     openChat();
@@ -3952,6 +4354,25 @@ let ideaErrHTML; _regT(() => { ideaErrHTML = () => (S.ideaError
   ? `<div class="error-box load-err idea-err" id="ideaErr" role="alert"><div>${_t('k1479', { v: esc(S.ideaError) })}</div><button type="button" class="btn sm" data-idea-retry>${_t('k0013')}</button></div>`
   : '<div id="ideaErr" hidden></div>'); });
 
+// 首页想法交给团队后：总控和它交出去的对话都结束了、却没有新项目，就在想法框下面说一声，并给对话链接
+S.ideaRuns = new Map(); // 根对话 id → { before: 提交前已有的项目, threads: 这一组对话, error }
+const ideaRunOf = (threadId) => [...S.ideaRuns.entries()].find(([, x]) => x.threads.has(threadId)) || null;
+async function ideaRunEnded(ev) {
+  const hit = ideaRunOf(ev.threadId);
+  if (!hit) return;
+  const [root, x] = hit;
+  if (ev.error && ev.threadId === root) x.error = ev.error;
+  if ([...x.threads].some((id) => S.running.has(id))) return;
+  S.ideaRuns.delete(root);
+  await loadProjects();
+  if ((S.projects || []).some((p) => !x.before.has(p.projectId))) return;
+  S.ideaMiss = { threadId: root, error: Boolean(x.error) };
+  const el = $('#ideaMiss'); if (el) el.outerHTML = ideaMissHTML();
+}
+const ideaMissHTML = () => (S.ideaMiss
+  ? `<div class="attn-bar bad idea-miss" id="ideaMiss" role="status"><span>${S.ideaMiss.error ? _t('ux038') : _t('ux037')}</span><button type="button" class="linkish" data-open-thread="${esc(S.ideaMiss.threadId)}" data-idea-miss-x>${_t('ux039')}</button><span class="sp"></span><button type="button" class="linkish" data-idea-miss-x aria-label="${_t('ux041')}">✕</button></div>`
+  : '<div id="ideaMiss" hidden></div>');
+
 async function stop() {
   if (!S.thread || !S.thread.id) return;
   S.stopping = S.thread.id;
@@ -3960,7 +4381,14 @@ async function stop() {
   if (r && !r.ok) { S.stopping = null; renderRunBar(); } // 服务器说没有在跑的任务
 }
 
+// 「展开全文」只给真的被截断的消息（按字数判断会误判：短行多的长消息其实已经显示全了）。对话框收着时量不到，打开时再量
+function unclampBubbles() {
+  for (const b of document.querySelectorAll('#messages .bubble.clamp')) {
+    if (b.clientHeight > 0 && b.scrollHeight <= b.clientHeight + 2) { b.classList.remove('clamp'); const more = b.nextElementSibling; if (more && more.matches('[data-bubble-more]')) more.remove(); }
+  }
+}
 function openChat() {
+  requestAnimationFrame(unclampBubbles);
   $('#app').classList.add('chat-open');
   $('#chatToggle').setAttribute('aria-expanded', 'true');
 }
@@ -4005,15 +4433,30 @@ function refreshViews() {
     if (S.route.view === 'home') loadUniverses(true);
   }, 400);
 }
+// 用户 / agent 写的内容由服务端按界面语言翻译：译文到了（或换了语言）就把当前看到的数据重新取一遍
+function refreshContent() {
+  refreshViews();
+  if (S.route.journal) loadJournal();
+  if (S.route.page === 'pipeline') loadPipeline();
+  if (S.route.data) loadDatasets();
+  loadThreads();
+  if (S.thread && S.thread.id && !S.running.has(S.thread.id) && !S.thread.running) {
+    const box = document.querySelector('#messages'); const y = box ? box.scrollTop : null;
+    openThread(S.thread.id, { quiet: true }).then(() => { const b = document.querySelector('#messages'); if (b && y != null) b.scrollTop = y; });
+  }
+}
 function connectBus() {
   const es = new EventSource('/api/events');
   es.onmessage = (msg) => {
     let ev;
     try { ev = JSON.parse(msg.data); } catch { return; }
-    if (ev.type === 'hello') {
+    if (ev.type === 'translations_updated') {
+      clearTimeout(S.trTimer); S.trTimer = setTimeout(refreshContent, 300);
+    } else if (ev.type === 'hello') {
       S.running = new Map(ev.running.map((r) => [r.threadId, { agent: r.agent, title: r.title, from: r.from || null }]));
     } else if (ev.type === 'run_start') {
       S.running.set(ev.threadId, { agent: ev.agent, title: ev.title, from: ev.from || null });
+      const fam = ev.from && ideaRunOf(ev.from.threadId); if (fam) fam[1].threads.add(ev.threadId);
       if (ev.from && S.thread && ev.from.threadId === S.thread.id) renderLive(); // 交接卡片：对方开始了
       if (ev.from) {
         const src = agentOf(ev.from.agent);
@@ -4030,6 +4473,7 @@ function connectBus() {
         const a = agentOf(ev.agent);
         toast(`${a.name}${ev.error ? _t('k0132') : ev.stopped ? _t('k0659') : _t('k0759')}${_t('k1483', { title: ev.title })}`, { label: _t('k0129'), run: () => openThread(ev.threadId) });
       }
+      ideaRunEnded(ev);
       loadThreads();
     } else if (ev.type === 'tool_done') {
       const short = shortTool(ev.name);
@@ -4059,6 +4503,8 @@ function connectBus() {
       else if (S.route.view === 'project' && S.route.projectId === ev.projectId) loadProjectView(true);
       if (ev.type === 'paper_updated' && ev.skipped && S.route.sessionId === ev.sessionId) toast(ev.skipReason ? `${_t('k1488', { skipReason: ev.skipReason })}` : `${_t('k1489', { dataDate: ev.dataDate })}`);
       if (ev.type === 'paper_updated' && ev.ok === false && S.route.sessionId !== ev.sessionId) toast(`${_t('k1490')}${ev.error || ''}`, { label: _t('k0129'), run: () => { location.hash = `#/p/${ev.projectId}/s/${ev.sessionId}`; } });
+    } else if (ev.type === 'deck_updated') {
+      if (window.HelmDecks) HelmDecks.onEvent(ev);
     } else if (ev.type === 'universe_started') {
       if (S.route.view === 'home') loadUniverses(true);
     } else if (ev.type === 'agents_changed') {
@@ -4098,9 +4544,107 @@ function connectBus() {
   };
 }
 
+/* ================= 右键菜单（组件在 ctxmenu.js） ================= */
+// 只给「一行代表一个东西」的地方加：项目（首页表格、侧栏）、回测行、想法检验行。
+// 菜单里只放已有的操作（不造新功能）；需要再确认或会填进对话框的，名字后面带「…」（macOS 惯例）。
+// 让智能体做事：只把请求填进对话框，不自动发送——右键容易误点。
+const ELL = '…';
+function ctxCopy(text, label) {
+  copyText(text).then((ok) => toast(ok ? _t('cx_copied', { v: label || text }) : _t('cx_copyFail')));
+}
+// 先切到那个项目（对话会带上当前项目），等页面换好再填对话框
+function inProject(pid, fn) {
+  if (S.route.projectId === pid && S.route.view === 'project') { fn(); return; }
+  addEventListener('hashchange', () => setTimeout(fn, 0), { once: true });
+  location.hash = `#/p/${pid}`;
+}
+function projCtx(pid) {
+  const p = (S.projects || []).find((x) => x.projectId === pid);
+  const st = p ? projStage(p) : null;
+  const here = S.route.projectId === pid && S.route.view === 'project' && isOverview(S.route.tab);
+  const ask = (agent, text) => () => inProject(pid, () => prefillChat(agent, text));
+  const nx = st && st.step > 0 ? st.next : null;
+  return [
+    here ? null : { label: _t('cx_open'), hint: '↵', run: () => { location.hash = `#/p/${pid}`; } },
+    nx ? { label: nx.ask ? `${nx.t}${ELL}` : nx.t, run: nx.ask ? ask(nx.ask, IDEA_ASK) : () => { location.hash = nx.href; } } : null,
+    'sep',
+    { label: _t('cx_ask'), sub: [
+      { label: `${_t('k0141')}${ELL}`, title: _t('k0142'), run: ask('researcher', IDEA_ASK) },
+      { label: `${_t('k0143')}${ELL}`, title: _t('k0144'), run: ask('engineer', _t('k0145')) },
+      { label: `${_t('k0146')}${ELL}`, title: _t('k0147'), run: ask('engineer', _t('k0148')) },
+      { label: `${_t('k0149')}${ELL}`, title: _t('k0150'), run: ask('analyst', _t('k0151')) },
+      { label: `${_t('k0152')}${ELL}`, title: _t('k0153'), run: ask('risk', _t('k0154')) },
+    ] },
+    'sep',
+    { label: _t('cx_copyId'), run: () => ctxCopy(`#${pid}`) },
+    'sep',
+    { label: `${_t('k0172')}${ELL}`, danger: true, run: () => doAction('project-delete', { pid }) },
+  ];
+}
+async function tagBacktest(projectId, backtestId, role) {
+  const r = await safePost('/api/actions/backtest-tag', { projectId, backtestId, role: role || null });
+  if (!r.success) { toast(`${_t('k1553')}${(r.errors || []).join('; ')}`); return; }
+  loadProjectView(true);
+}
+function btCtx(pid, bid) {
+  const b = Array.isArray(S.backtests) && S.backtests.find((x) => x.backtestId === bid);
+  if (!b) return null;
+  const inCmp = S.cmpSel.includes(bid);
+  const canMain = b.role !== 'main' && b.role !== 'benchmark' && !b.ranAsBenchmark && doneBt(b);
+  return [
+    { label: _t('cx_open'), hint: '↵', run: () => { location.hash = `#/p/${pid}/b/${bid}`; } },
+    { label: _t('cx_cmp'), checked: inCmp, disabled: !inCmp && S.cmpSel.length >= CMP_MAX, title: !inCmp && S.cmpSel.length >= CMP_MAX ? _t('k0419', { CMP_MAX }) : '',
+      run: () => { S.cmpSel = inCmp ? S.cmpSel.filter((x) => x !== bid) : [...S.cmpSel, bid]; renderMain(); } },
+    'sep',
+    canMain ? { label: _t('k0188'), run: () => doAction('set-main', { pid, bid }) } : null,
+    // 「主版本」不放进子菜单：上面已经有「设为主版本」，同一个操作只出现一次
+    { label: _t('cx_tag'), sub: [...['candidate', 'control', 'ablation', 'benchmark', 'debug'].map((k) => ({ label: ROLE_META[k][0], checked: b.role === k, run: () => tagBacktest(pid, bid, k) })),
+      'sep', { label: _t('k0185'), checked: !b.role, run: () => tagBacktest(pid, bid, null) }] },
+    'sep',
+    { label: `${_t('cx_diag')}${ELL}`, run: () => prefillChat('analyst', _t('cx_diagT', { backtestId: bid, name: b.name || '' })) },
+    'sep',
+    { label: _t('cx_copyBt'), run: () => ctxCopy(bid) },
+  ];
+}
+function jobCtx(pid, jobId) {
+  const j = Array.isArray(S.research) && S.research.find((x) => x.jobId === jobId);
+  if (!j) return null;
+  return [
+    { label: _t('cx_open'), hint: '↵', run: () => { location.hash = `#/p/${pid}/r/${jobId}`; } },
+    j.status === 'complete' ? { label: `${_t('cx_read')}${ELL}`, run: () => prefillChat('researcher', _t('k0825', { jobId, projectId: pid })) } : null,
+    'sep',
+    { label: _t('cx_copyJob'), run: () => ctxCopy(jobId) },
+  ];
+}
+// 被右键的是什么：返回 { el: 要描边的元素, items }
+function ctxHit(node) {
+  if (!node || !node.closest) return null;
+  const pr = node.closest('table.home-proj tr[data-href^="#/p/"], #projectList a[href^="#/p/"]');
+  if (pr) { const pid = Number((pr.dataset.href || pr.getAttribute('href')).split('/')[2]); return pid ? { el: pr, items: projCtx(pid) } : null; }
+  const bt = node.closest('tr[data-href*="/b/"]');
+  if (bt) { const [, , pid, , bid] = bt.dataset.href.split('/'); const items = btCtx(Number(pid), bid); return items ? { el: bt, items } : null; }
+  const rj = node.closest('a.rl-row[href*="/r/"]');
+  if (rj) { const [, , pid, , jobId] = rj.getAttribute('href').split('/'); const items = jobCtx(Number(pid), jobId); return items ? { el: rj, items } : null; }
+  return null;
+}
+document.addEventListener('contextmenu', (e) => {
+  if (e.shiftKey || !window.HelmCtx) return; // 按住 Shift 右键：保留系统菜单（查元素、调试用）
+  if (e.target.closest && e.target.closest('input, textarea, [contenteditable="true"]')) return;
+  const hit = ctxHit(e.target);
+  if (!hit) { HelmCtx.close(); return; }
+  e.preventDefault();
+  const items = hit.items.slice();
+  // 选中了这一行里的文字：第一项给「拷贝」，免得右键把系统的拷贝弄没了
+  const sel = String(getSelection() || '').trim();
+  if (sel && hit.el.contains(getSelection().anchorNode)) items.unshift({ label: _t('cx_copy'), hint: `${MOD_KEY.trim()}C`, run: () => ctxCopy(sel, sel.length > 24 ? `${sel.slice(0, 24)}…` : sel) }, 'sep');
+  // 键盘打开（Shift+F10 / 菜单键）：没有鼠标坐标，贴着那一行弹出并高亮第一项
+  const kb = !e.clientX && !e.clientY;
+  HelmCtx.open(items, kb ? { anchor: hit.el } : { x: e.clientX, y: e.clientY }, { target: hit.el });
+});
+
 /* ================= project actions（不经过 AI） ================= */
 async function doAction(kind, ds = {}) {
-  const projectId = S.route.projectId;
+  const projectId = Number(ds.pid) || S.route.projectId; // 右键菜单可以对别的项目操作（首页、侧栏）
   if (!projectId) return;
   if (kind === 'compile') {
     toast(_t('k1495'));
@@ -4109,9 +4653,10 @@ async function doAction(kind, ds = {}) {
     if (S.route.view === 'project') { location.hash = `#/p/${projectId}/code`; renderMain(); }
     toast(S.compileResult.state === 'BuildSuccess' ? _t('k1496') : _t('k1497'));
   }
-  if (kind === 'backtest') { const m = $('#runMenu'); const am = $('#askMenu'); if (am) am.hidden = true; if (m) m.hidden = !m.hidden; return; }
+  if (kind === 'backtest') { toggleMenu($('#runMenu'), ds.kb === '1'); return; }
   if (kind === 'project-delete') {
-    const name = (S.project && S.project.projectId === projectId && S.project.name) || `#${projectId}`;
+    const pp = (S.projects || []).find((x) => x.projectId === projectId);
+    const name = (S.project && S.project.projectId === projectId && pName(S.project)) || (pp && pName(pp)) || `#${projectId}`;
     if (!(await askConfirm({ title: _t('k0172'), message: `${_t('k1498', { name })}`, ok: _t('k0600'), danger: true }))) return;
     const r = await safePost('/api/actions/project-delete', { projectId });
     if (!r.success) { toast((r.errors || [_t('x011')]).join(_t('k0007'))); return; }
@@ -4226,6 +4771,8 @@ function openProjectModal() {
   const d = $('#projectModal');
   $('#pmName').value = '';
   $('#pmDesc').value = '';
+  $('#pmNameErr').hidden = true;
+  $('#pmName').removeAttribute('aria-invalid');
   d.showModal();
   $('#pmName').focus();
 }
@@ -4274,7 +4821,11 @@ function wire() {
   const app = $('#app');
   $('#chatToggle').onclick = () => {
     if (app.classList.contains('chat-open')) closeChat();
-    else { openChat(); setTimeout(() => $('#input').focus(), 30); }
+    else {
+      const pick = ctxAgent();
+      if (pick && !S.thread && S.agentId === 'mia' && S.agents.some((a) => a.id === pick)) { S.agentId = pick; renderAgents(); renderThread(); }
+      openChat(); setTimeout(() => $('#input').focus(), 30);
+    }
   };
   $('#chatClose').onclick = closeChat;
   $('#brandBtn').onclick = () => { if (narrow()) app.classList.toggle('side-open'); else app.classList.toggle('side-hidden'); };
@@ -4296,16 +4847,23 @@ function wire() {
   $('#ppCancel').onclick = () => $('#paperModal').close();
   $('#ppSim').onchange = renderPaperModal;
   $('#ppAlpaca').onchange = renderPaperModal;
-  $('#ppConnectBtn').onclick = connectAlpaca;
-  // 密钥框在 paperForm 里：回车会提交表单、直接开一个内部模拟。改成回车 = 验证并连接
-  for (const id of ['#ppKey', '#ppSecret']) $(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); connectAlpaca(); } });
+  $('#aiModal').addEventListener('close', () => renderSettings('ai'));
+  $('#aiCancel').onclick = () => $('#aiModal').close();
+  $('#aiTest').onclick = testAiUI;
+  for (const r of document.querySelectorAll('#aiForm input[name="aiMode"]')) r.onchange = renderAiModal;
+  $('#aiUrl').oninput = renderAiModal;
+  $('#aiForm').addEventListener('submit', (e) => { e.preventDefault(); saveAiUI(); });
   $('#paperForm').addEventListener('submit', (e) => { e.preventDefault(); submitPaper(); });
   $('#rmTarget').onchange = () => { $('#rmTickersWrap').hidden = $('#rmTarget').value !== 'custom'; };
   $('#researchForm').addEventListener('submit', (e) => { e.preventDefault(); submitResearch(); });
+  $('#pmName').addEventListener('input', () => { if ($('#pmName').value.trim().length >= 2) { $('#pmNameErr').hidden = true; $('#pmName').removeAttribute('aria-invalid'); } });
   $('#projectForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     const name = $('#pmName').value.trim();
-    if (!name) return;
+    const bad = name.length < 2;
+    $('#pmNameErr').hidden = !bad;
+    $('#pmName').setAttribute('aria-invalid', String(bad));
+    if (bad) { $('#pmName').focus(); return; }
     const tpl = (document.querySelector('input[name=tpl]:checked') || {}).value;
     const r = await once('project-create', $('#pmCreate'), () => safePost('/api/actions/project', { name, description: $('#pmDesc').value.trim(), template: tpl }));
     if (!r) return;
@@ -4356,6 +4914,10 @@ function wire() {
       const lastUser = [...(S.thread?.messages || [])].reverse().find((m) => m.role === 'user');
       if (lastUser) send(lastUser.text, { allowDanger: true });
     }
+    if (e.target.closest('[data-retry-last]')) {
+      const lastUser = [...(S.thread?.messages || [])].reverse().find((m) => m.role === 'user');
+      if (lastUser) send(lastUser.text);
+    }
   });
   $('#messages').addEventListener('toggle', (e) => {
     const d = e.target.closest && e.target.closest('details[data-tid]');
@@ -4373,8 +4935,16 @@ function wire() {
     submitIdea();
   });
   $('#main').addEventListener('toggle', (e) => { if (e.target.matches && e.target.matches('details.health-d')) S.healthClosed = !e.target.open; }, true);
+  // 代码编辑框：Tab 插入 4 个空格（Python 缩进），Shift+Tab 照常移走焦点
+  $('#main').addEventListener('keydown', (e) => {
+    if (e.target.id !== 'codeEditor' || e.key !== 'Tab' || e.shiftKey) return;
+    e.preventDefault();
+    e.target.setRangeText('    ', e.target.selectionStart, e.target.selectionEnd, 'end');
+    e.target.dispatchEvent(new Event('input', { bubbles: true }));
+  });
   $('#main').addEventListener('input', (e) => {
     if (e.target.id === 'ideaInput') store.set('ideaDraft', e.target.value);
+    if (e.target.id === 'codeEditor' && S.codeEdit) { S.codeEdit.draft = e.target.value; S.codeEdit.dirty = true; }
     if (e.target.id === 'jrQ' && S.journal) {
       S.journal.q = e.target.value;
       clearTimeout(jrTimer);
@@ -4422,13 +4992,14 @@ function wire() {
     }
   });
 
-  document.addEventListener('click', (e) => {
+  document.addEventListener('click', async (e) => {
     const cc = e.target.closest('[data-copy-code]');
     if (cc) {
       const code = cc.parentElement.querySelector('code');
       copyText(code ? code.textContent : '').then((ok) => { cc.textContent = ok ? _t('k1544') : _t('k1545'); setTimeout(() => { cc.textContent = _t('k1416'); }, 1600); });
       return;
     }
+    if (e.target.closest('[data-ai-open]')) { openAiModal(); return; }
     if (e.target.closest('[data-refresh]')) { loadStatus(true); loadProjects(); return; }
     if (e.target.closest('[data-reload]')) { reloadView(); return; }
     if (e.target.closest('[data-clear-search]')) { const si = $('#projectSearch'); si.value = ''; renderProjects(); si.focus(); return; }
@@ -4449,7 +5020,7 @@ function wire() {
     if (ot) { const rm = $('#runsMenu'); if (rm) rm.hidden = true; openThread(ot.dataset.openThread); return; }
     if (e.target.closest('[data-new-project]')) { openProjectModal(); return; }
     const r2 = e.target.closest('[data-route2]');
-    if (r2) { S.route2 = r2.dataset.route2; store.set('ideaRoute', S.route2); const box = r2.closest('.route-pick'); box.querySelectorAll('[data-route2]').forEach((b) => { const on = b === r2; b.classList.toggle('active', on); b.setAttribute('aria-checked', on); }); box.querySelector('.route-tip').textContent = (ROUTES.find((x) => x[0] === S.route2) || ROUTES[0])[2]; return; }
+    if (r2) { S.route2 = r2.dataset.route2; store.set('ideaRoute', S.route2); const box = r2.closest('.route-pick'); box.querySelectorAll('[data-route2]').forEach((b) => { const on = b === r2; b.classList.toggle('active', on); b.setAttribute('aria-checked', on); }); const rt = (ROUTES.find((x) => x[0] === S.route2) || ROUTES[0]); const tipEl = box.querySelector('.route-tip'); tipEl.textContent = rt[3]; tipEl.title = rt[2]; return; }
     const prep = e.target.closest('[data-prepare]');
     if (prep) {
       prep.disabled = true;
@@ -4465,25 +5036,44 @@ function wire() {
       const role = rr.dataset.runRole;
       const n = (Array.isArray(S.backtests) ? S.backtests.length : 0) + 1;
       S.runSpec = { role, name: `${ROLE_META[role][0]} #${n}` };
-      const m = $('#runMenu'); if (m) m.hidden = true;
+      closeMenus();
       once('backtest-run', $('[data-action=backtest]') || rr, () => doAction('backtest-run'));
       return;
     }
+    const bb = e.target.closest('a.back-bar');
+    if (bb && history.state && sameHref(history.state.helmPrev, bb.getAttribute('href'))) { e.preventDefault(); history.back(); return; }
+    const tb = S.route.view === 'backtest' && e.target.closest('nav.tabs a[href]');
+    if (tb && !e.metaKey && !e.ctrlKey) { e.preventDefault(); NAV.keepPrev = history.state ? history.state.helmPrev : null; location.replace(tb.getAttribute('href')); return; }
     const mt = e.target.closest('[data-menu]');
-    if (mt) { const m = document.getElementById(mt.dataset.menu); const open = m && m.hidden; document.querySelectorAll('.run-menu').forEach((x) => { x.hidden = true; }); if (m) m.hidden = !open; return; }
-    if (!e.target.closest('.run-wrap')) document.querySelectorAll('.run-menu').forEach((x) => { x.hidden = true; });
+    if (mt) { toggleMenu(document.getElementById(mt.dataset.menu), e.detail === 0); return; }
+    if (!e.target.closest('.run-wrap') || e.target.closest('.run-menu button')) closeMenus();
     const act = e.target.closest('[data-action]');
     if (act) {
       const k = act.dataset.action;
       // 打开菜单/对话框的按钮立即响应；会发请求的按钮在返回前不能再点
-      if (k === 'backtest' || k === 'research' || k === 'paper-new') doAction(k, act.dataset);
+      if (k === 'backtest') doAction(k, { kb: e.detail === 0 ? '1' : '0' });
+      else if (k === 'research' || k === 'paper-new') doAction(k, act.dataset);
       else once(`action:${k}`, act, () => doAction(k, act.dataset));
       return;
     }
     const f = e.target.closest('[data-file]');
-    if (f) { S.fileSel = f.dataset.file; renderMain(); return; }
+    if (f) { if (S.codeEdit && S.codeEdit.name !== f.dataset.file && S.codeEdit.dirty && !(await askConfirm({ title: _t('ux068'), message: _t('ux069'), ok: _t('ux070'), danger: true }))) return; if (S.codeEdit && S.codeEdit.name !== f.dataset.file) S.codeEdit = null; S.fileSel = f.dataset.file; renderMain(); return; }
+    const ce = e.target.closest('[data-code-edit]');
+    if (ce) { const file = (S.files || []).find((x) => x.name === ce.dataset.codeEdit); if (file) { S.codeEdit = { name: file.name, draft: file.content || '', dirty: false }; renderMain(); const ta = $('#codeEditor'); if (ta) ta.focus(); } return; }
+    if (e.target.closest('[data-code-cancel]')) { if (S.codeEdit && S.codeEdit.dirty && !(await askConfirm({ title: _t('ux068'), message: _t('ux069'), ok: _t('ux070'), danger: true }))) return; S.codeEdit = null; renderMain(); return; }
+    const cs = e.target.closest('[data-code-save]');
+    if (cs && S.codeEdit) {
+      const { name, draft } = S.codeEdit;
+      const r = await once('code-save', cs, () => data('files/update', { projectId: S.route.projectId, name, content: draft }));
+      if (!r) return;
+      if (!r.success) { toast(`${_t('ux071')}${(r.errors || []).map(zhErr).join('; ')}`); return; }
+      S.codeEdit = null; S.compileResult = null; S.projSig = null;
+      toast(_t('ux072', { name }));
+      loadProjectView(true);
+      return;
+    }
     const ask = e.target.closest('[data-ask]');
-    if (ask) { document.querySelectorAll('.run-menu').forEach((x) => { x.hidden = true; }); askAgent(ask.dataset.ask, ask.dataset.text); return; }
+    if (ask) { closeMenus(); askAgent(ask.dataset.ask, ask.dataset.text); return; }
     const so = e.target.closest('[data-sort]');
     if (so) {
       const k = so.dataset.sort; const cur = S.orderSort;
@@ -4497,8 +5087,9 @@ function wire() {
       const list = cb.dataset.src === 'bt' ? S.code : S.files;
       const f = Array.isArray(list) && list.find((x) => x.name === cb.dataset.name);
       if (!f) return;
-      if (cb.hasAttribute('data-code-copy')) copyText(f.content).then((ok) => toast(ok ? `${_t('k0030', { name: f.name })}` : _t('k0031')));
-      else { downloadText(f.name, f.content); toast(`${_t('k1552', { name: f.name })}`); }
+      const raw = f.contentOriginal ?? f.content; // 规则说明显示的是译文；复制 / 下载用原文
+      if (cb.hasAttribute('data-code-copy')) copyText(raw).then((ok) => toast(ok ? `${_t('k0030', { name: f.name })}` : _t('k0031')));
+      else { downloadText(f.name, raw); toast(`${_t('k1552', { name: f.name })}`); }
       return;
     }
     if (e.target.closest('[data-cmp-clear]')) { S.cmpSel = []; renderMain(); return; }
@@ -4516,6 +5107,17 @@ function wire() {
   });
 
   document.addEventListener('keydown', (e) => {
+    const menu = e.target.closest && e.target.closest('.run-menu');
+    if (menu && ['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) {
+      const items = [...menu.querySelectorAll('button:not([disabled])')];
+      const i = items.indexOf(e.target);
+      const n = e.key === 'Home' ? 0 : e.key === 'End' ? items.length - 1 : (i + (e.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length;
+      e.preventDefault(); if (items[n]) items[n].focus(); return;
+    }
+    if (e.key === 'ArrowDown' && e.target.matches && e.target.matches('[aria-haspopup="menu"]')) {
+      const m = document.getElementById(e.target.getAttribute('aria-controls'));
+      if (m) { e.preventDefault(); if (m.hidden) toggleMenu(m, true); else { const f = m.querySelector('button:not([disabled])'); if (f) f.focus(); } return; }
+    }
     const mod = e.metaKey || e.ctrlKey;
     if (mod && e.key.toLowerCase() === 'j') { e.preventDefault(); $('#chatToggle').click(); }
     if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); openChat(); input.focus(); }
@@ -4523,6 +5125,7 @@ function wire() {
       if (!$('#threadMenu').hidden) { $('#threadMenu').hidden = true; $('#threadBtn').focus(); return; }
       if (document.querySelector('dialog[open]')) return;
       const openMenu = [...document.querySelectorAll('.run-menu, #runsMenu')].find((x) => !x.hidden);
+      if (openMenu && openMenu.classList.contains('run-menu')) { closeMenus(null, true); return; }
       if (openMenu) { openMenu.hidden = true; const t = openMenu.parentElement && openMenu.parentElement.querySelector('button'); if (t) t.focus(); return; }
       const wasChat = app.classList.contains('chat-open');
       const wasSide = app.classList.contains('side-open');
@@ -4548,10 +5151,20 @@ function wire() {
       ? await safePost('/api/actions/backtest-main', { projectId: S.route.projectId, backtestId: sel.dataset.roleSel })
       : await safePost('/api/actions/backtest-tag', { projectId: S.route.projectId, backtestId: sel.dataset.roleSel, role: sel.value || null });
     // 失败时数据没变，loadProjectView 会因为签名相同而跳过重绘：要自己恢复下拉框，并清掉签名强制重绘
-    if (!r.success) { toast(`${_t('k1553')}${(r.errors || []).join('; ')}`); sel.disabled = false; S.projSig = null; loadProjectView(true); return; }
+    if (!r.success) { toast(`${_t('k1553')}${(r.errors || []).join('; ')}`); sel.disabled = false; S.projSig = null; if (S.route.view === 'backtest') loadBacktestView(true); else loadProjectView(true); return; }
     if (sel.value === 'main') toast(_t('k1501'));
-    loadProjectView(true);
+    if (S.route.view === 'backtest') loadBacktestView(true); else loadProjectView(true);
   });
+  document.addEventListener('focusout', (e) => {
+    const wrap = e.target.closest && e.target.closest('.run-wrap');
+    if (wrap && e.relatedTarget && !wrap.contains(e.relatedTarget)) closeMenus();
+  });
+  let scrollRaf = 0;
+  $('#main').addEventListener('scroll', () => {
+    if (scrollRaf) return;
+    scrollRaf = requestAnimationFrame(() => { scrollRaf = 0; const k = history.state && history.state.helmNav; if (k && !NAV.want) NAV.pos.set(k, $('#main').scrollTop); });
+  }, { passive: true });
+  window.addEventListener('wheel', () => { NAV.want = null; }, { passive: true }); // 用户自己在滚：不再抢着恢复位置
   window.addEventListener('hashchange', () => { closeChat(); onRoute(); }); // 从对话里点链接跳页面时收起对话窗
 }
 
@@ -4559,9 +5172,15 @@ function wire() {
 function themePref() { try { return localStorage.getItem('helm.theme') || 'auto'; } catch (e) { return 'auto'; } }
 function renderThemeSeg() {
   const el = document.getElementById('sideFoot'); if (!el) return;
+  el.innerHTML = `<button type="button" class="tf-guide" data-settings-open><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.2" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M8 1.8v2M8 12.2v2M1.8 8h2M12.2 8h2M3.6 3.6l1.4 1.4M11 11l1.4 1.4M3.6 12.4 5 11M11 5l1.4-1.4" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>${_t('ux049')}</button>`;
+  renderSettings();
+}
+document.addEventListener('click', (e) => { if (e.target.closest('[data-settings-open]')) openSettings(); });
+// 外观 + 语言两行：只在「设置」对话框里（左下角只留「设置」入口，同一个控件不出现两次）
+function lookRowsHTML() {
   const cur = themePref();
   const lp = HELM_I18N.pref();
-  el.innerHTML = `<div class="tf-row">${_t('k1557')}${[['auto', _t('k0924')], ['light', _t('k1554')], ['dark', _t('k1555')]].map(([v, t]) => `<button type="button" data-theme-set="${v}" aria-pressed="${v === cur}" title="${v === 'auto' ? _t('k1556') : ''}">${t}</button>`).join('')}</span></div>`
+  return `<div class="tf-row">${_t('k1557')}${[['auto', _t('k0924')], ['light', _t('k1554')], ['dark', _t('k1555')]].map(([v, t]) => `<button type="button" data-theme-set="${v}" aria-pressed="${v === cur}" title="${v === 'auto' ? _t('k1556') : ''}">${t}</button>`).join('')}</span></div>`
     + `<div class="tf-row"><span class="tf-k">${_t('x007')}</span><span class="theme-seg" role="group" aria-label="${_t('x007')}">${[['auto', _t('k0924'), _t('x008')], ['zh', _t('x009'), ''], ['en', _t('x010'), '']].map(([v, t, tip]) => `<button type="button" data-lang-set="${v}" aria-pressed="${v === lp}" title="${tip}">${t}</button>`).join('')}</span></div>`;
 }
 function applyTheme(v) {
@@ -4574,7 +5193,7 @@ function applyTheme(v) {
   if (typeof renderMain === 'function') renderMain();
 }
 document.addEventListener('click', (e) => { const b = e.target.closest('[data-theme-set]'); if (b) applyTheme(b.dataset.themeSet); });
-// 界面语言：不刷新页面，把当前能看到的东西都按新语言重画一遍（对话里已有的消息保持原样，那是 agent 当时的回复）
+// 界面语言：不刷新页面，把当前能看到的东西都按新语言重画一遍；数据（含对话）重新向服务端要新语言的版本
 function applyLang(v) {
   HELM_I18N.setPref(v);
   S.projSig = null;
@@ -4584,6 +5203,7 @@ function applyLang(v) {
   renderThemeSeg();
   renderStatus(); renderRuns(); renderProjects(); renderAgents(); renderRunOpts(); renderThread(); renderRunBar();
   renderCrumbs(); renderCtx(); setTitle(); renderMain();
+  refreshContent(); // 数据（项目说明、对话……）按新语言重新取
 }
 document.addEventListener('click', (e) => { const b = e.target.closest('[data-lang-set]'); if (b) applyLang(b.dataset.langSet); });
 document.addEventListener('click', (e) => {

@@ -1,10 +1,12 @@
 # Frequently Asked Questions
 
-Answers are taken from the README. For setup detail, follow the README's 「安装」 section.
+Answers are taken from the README. For setup, follow [GETTING-STARTED.md](GETTING-STARTED.md).
 
 ## Does Helm cost anything?
 
-The README describes Helm as free. It lists no paid service. The agents run through the `claude` command on your Mac, so you need Claude Code installed and logged in. Creating an Alpaca paper account is only needed for the Alpaca mode of paper trading.
+Helm itself is free and open source (MIT). The AI model is not: the agents run through Claude Code (`claude`) on your Mac, and that needs a Claude subscription (Pro / Max / Team), pay-as-you-go Anthropic API usage, or usage on a compatible provider such as DeepSeek or Kimi. Longer agent tasks use more. Content translation costs a few cents per few hundred passages, and a research deck about USD 0.50 with Sonnet.
+
+Everything else is free: LEAN, the Yahoo Finance prices (personal use, under Yahoo's terms), FRED and SEC data. An Alpaca paper account is free and only needed for the Alpaca mode of paper trading.
 
 ## What data does it have?
 
@@ -24,7 +26,7 @@ No. Paper trading uses an Alpaca paper account only. The README says the Alpaca 
 
 ## Which computers and systems does it support?
 
-The README describes a setup on a Mac: a .NET install in `~/.dotnet`, a Python framework install, and macOS `sandbox-exec` for running strategy code. It does not document other systems. If the sandbox is unavailable, the README says agent commands and code changes switch to asking you for approval.
+macOS only. It is tested on Apple Silicon; Intel Macs are untested; Linux and Windows are not supported. Strategy code runs under macOS `sandbox-exec`, and without it backtests refuse to run unless you set `HELM_EXEC_SANDBOX=off` (see [CONFIGURATION.md](CONFIGURATION.md#sandbox-helm_exec_sandbox)). A first install needs about 2–3 GB of disk and 15–30 minutes, depending on your network.
 
 ## What can the agents do, and what can they not do?
 
@@ -48,7 +50,7 @@ They cannot:
 - Paper-trading daily records are in `projects/<id>/paper/<session>/log.jsonl`.
 - Conversations are in `data/threads/`.
 - Custom datasets are in `helm/custom/`, the README's path, with a `.meta.json` file beside each CSV.
-- Alpaca keys are in `data/secrets/alpaca.json`, file mode 0600. The web page never returns them.
+- AI and Alpaca keys are in `~/Library/Application Support/Helm/secrets/` on new installs and `data/secrets/` on older ones, file mode 0600. The web page never returns them. See [CONFIGURATION.md](CONFIGURATION.md#where-keys-and-data-are-stored).
 - qlib data and caches are outside the repository, under `~/.qlib/`.
 
 ## Can I run a strategy on QuantConnect?

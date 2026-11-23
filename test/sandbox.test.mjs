@@ -7,6 +7,7 @@ import { existsSync } from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { leanSkip } from './lean-skip.mjs';
 
 const TMP = await mkdtemp(path.join(os.tmpdir(), 'helm-sandbox-'));
 process.env.HELM_PROJECTS_DIR = path.join(TMP, 'projects');
@@ -29,8 +30,8 @@ const check = (name, cond, extra = '') => {
 
 const status = await E.engineStatus();
 if (!status.ok) {
-  check('本地 LEAN 引擎就绪', false, `缺少 ${(status.missing || []).join(', ')}`);
-  process.exit(1);
+  leanSkip(check, status);
+  process.exit(failed ? 1 : 0);
 }
 
 // 本机的假服务：探针连它，不应该收到任何请求（证明 127.0.0.1 也连不上）

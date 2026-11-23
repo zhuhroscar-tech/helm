@@ -13,7 +13,8 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { engineStatus, listProjects, DATA_DIR, READ_ENDPOINTS, runSensitivity, sensitivityRead, runTune, tuneRead, PROJECTS_DIR, compileProject, createBacktest, createProject, trashProject, updateBacktest, reconcileLedgers, TEMPLATES, secretDirs, setMainByUser } from './lib/engine.mjs';
+import { engineStatus, listProjects, DATA_DIR, READ_ENDPOINTS, runSensitivity, sensitivityRead, runTune, tuneRead, PROJECTS_DIR, compileProject, createBacktest, createProject, trashProject, updateBacktest, reconcileLedgers, templateCode, secretDirs, setMainByUser, leanSandboxState, updateProjectFileByUser } from './lib/engine.mjs';
+import { setupHints, setupCommand } from './lib/setup-hints.mjs';
 import * as Q from './lib/qlib.mjs';
 import { loadRobust } from './lib/robust.mjs';
 import { loadDrift } from './lib/drift.mjs';
@@ -21,6 +22,7 @@ import { loadJournal } from './lib/journal.mjs';
 import { listDatasets } from './lib/datasets.mjs';
 import * as Paper from './lib/paper.mjs';
 import * as Alpaca from './lib/alpaca.mjs';
+import * as AI from './lib/ai.mjs';
 import { sensitiveReadDenies } from './lib/agent-perms.mjs';
 import { effectiveTools, localTools, validateAgentPatch, saveAgentPatch, isQcTool } from './lib/agents.mjs';
 import { decide as decideChange, scopeKey, simpleDiff } from './lib/change-policy.mjs';
@@ -29,6 +31,9 @@ import { ChangeStore, readTextSync, defaultRunTests } from './lib/changes.mjs';
 import { loadTasks, buildPipeline, projectTimeline } from './lib/pipeline.mjs';
 import { loadConfig, applyToEnv } from './lib/config.mjs';
 import { langOf, isLang, langPrompt, localize, localizeData, HEALTH_EN } from './lib/i18n.mjs';
+import { Translator, translateData, translatePrompt, parseArray } from './lib/translate.mjs';
+import { DeckService } from './lib/deck/pipeline.mjs';
+import { buildDataPack } from './lib/deck/datapack.mjs';
 
 function loadEnv(file) {
   if (!existsSync(file)) return;
@@ -216,9 +221,16 @@ function cleanEnv() {
 function run(cmd, args, timeout = 25000) {
   return new Promise((resolve) => {
     execFile(cmd, args, { env: cleanEnv(), timeout, cwd: WORKSPACE }, (err, stdout, stderr) => {
-      resolve({ ok: !err, out: String(stdout || ''), err: String(stderr || (err && err.message) || '') });
+      resolve({ ok: !err, out: String(stdout || ''), err: String(stderr || (err && err.message) || ''), code: err && err.code });
     });
   });
+}
+// claude 命令跑不起来的原因，换成人话（不把「spawn claude ENOENT」直接给用户看）
+function claudeError(r) {
+  if (r.code === 'ENOENT') return `找不到 claude 命令（${CLAUDE_BIN}）：Claude Code 还没有安装，或者不在 PATH 里`;
+  if (r.code === 'EACCES') return `claude 命令（${CLAUDE_BIN}）没有执行权限`;
+  if (r.code === 'ETIMEDOUT' || r.killed) return 'claude 命令没有响应（超时）';
+  return String(r.err || '').trim().split('\n')[0].slice(0, 200) || 'claude 命令运行失败';
 }
 
 // 所有响应都带的安全头：不让浏览器猜类型、不带 Referer、不许被别的页面嵌进 iframe（防点击劫持）
@@ -229,7 +241,10 @@ const SEC_HEADERS = { 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'n
 const CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'";
 
 function sendJson(res, code, data) {
-  data = localizeData(res.helmLang, data); // 英文界面：把用户会看到的错误 / 提示翻成英文（没有对应翻译的原样返回中文）
+  // 用户 / agent 写的内容（项目说明、回测名、对话……）按界面语言换成译文；没翻过的先显示原文，后台翻好后网页会自动刷新
+  // 先用固定译文翻系统消息（错误 / 提示 / 成交状态…），剩下的用户内容再交给模型翻：系统消息不必花模型调用
+  if (res.helmLang === 'en') data = localizeData(res.helmLang, structuredClone(data));
+  if (res.helmTranslate && code === 200 && TRANSLATOR) data = translateData(TRANSLATOR, res.helmLang, res.helmLang === 'en' ? data : structuredClone(data));
   res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...SEC_HEADERS });
   res.end(JSON.stringify(data));
 }
@@ -260,19 +275,21 @@ async function readJsonRaw(req, limit = 2_000_000) {
 
 
 // ---- 请求体校验：所有 POST 接口在进业务代码之前先过这一关，类型不对 / 缺字段 / 太长一律 400 + 中文说明 ----
-const STR_MAX = { name: 120, description: 2000, template: 40, backtestId: 64, sessionId: 64, jobId: 64, index: 40, start: 10, role: 20, period: 20, mode: 20, title: 120, target: 40, benchmark: 20, features: 30, neutralize: 30, advanced: 30, idea: 4000, keyId: 200, secret: 400, message: 200000, threadId: 64, feature: 40, ideaFactor: 60, file: 120, model: 40, effort: 20, agent: 40 };
+const STR_MAX = { name: 120, description: 2000, template: 40, backtestId: 64, sessionId: 64, jobId: 64, index: 40, start: 10, role: 20, period: 20, mode: 20, title: 120, target: 40, benchmark: 20, features: 30, neutralize: 30, advanced: 30, idea: 4000, keyId: 200, secret: 400, message: 200000, threadId: 64, feature: 40, ideaFactor: 60, file: 120, model: 40, effort: 20, agent: 40, aiMode: 20, apiKey: 500, baseUrl: 300, aiModel: 120, nameEn: 120, nameZh: 120, deckId: 64, audience: 20, quality: 20, length: 20, note: 2000, notes: 2000, firm: 200, presenter: 200, disclaimer: 4000, disclaimerEn: 4000 };
 const NUM_FIELDS = ['costBps', 'holdoutYears', 'capital'];
-const BOOL_FIELDS = ['full', 'fresh', 'allowDanger', 'wait'];
-const ARR_MAX = { tickers: 2000, factors: 20, horizons: 20 };
+const BOOL_FIELDS = ['full', 'fresh', 'allowDanger', 'wait', 'reviewOutline', 'clearTemplate', 'clearLogo'];
+const ARR_MAX = { tickers: 2000, factors: 20, horizons: 20, backtestIds: 6 };
 const REQUIRED = {
   '/api/actions/project': ['name'], '/api/actions/project-delete': ['projectId'], '/api/actions/compile': ['projectId'], '/api/actions/backtest': ['projectId'],
   '/api/actions/backtest-tag': ['projectId', 'backtestId'], '/api/actions/backtest-main': ['projectId', 'backtestId'], '/api/actions/sensitivity': ['projectId', 'backtestId'], '/api/actions/tune': ['projectId', 'backtestId'], '/api/actions/universe': ['index'], '/api/actions/research': ['projectId'], '/api/actions/idea': ['projectId'],
   '/api/actions/research-stop': ['projectId', 'jobId'], '/api/actions/research-resume': ['projectId', 'jobId'],
   '/api/actions/paper-start': ['projectId', 'backtestId'], '/api/actions/paper-stop': ['projectId', 'sessionId'], '/api/actions/paper-run': ['projectId', 'sessionId'],
-  '/api/actions/alpaca-connect': ['keyId', 'secret'], '/api/actions/signals': ['projectId', 'jobId'], '/api/chat': ['message'], '/api/chat/stop': ['threadId'],
-  '/api/data/files/read': ['projectId'], '/api/data/backtests/list': ['projectId'], '/api/data/backtests/read': ['projectId', 'backtestId'],
+  '/api/actions/alpaca-connect': ['keyId', 'secret'], '/api/actions/ai-save': ['aiMode'], '/api/actions/signals': ['projectId', 'jobId'], '/api/chat': ['message'], '/api/chat/stop': ['threadId'],
+  '/api/data/files/read': ['projectId'], '/api/data/files/update': ['projectId', 'name'], '/api/data/backtests/list': ['projectId'], '/api/data/backtests/read': ['projectId', 'backtestId'],
   '/api/data/backtests/chart/read': ['projectId', 'backtestId'], '/api/data/backtests/orders/read': ['projectId', 'backtestId'], '/api/data/backtests/log/read': ['projectId', 'backtestId'],
   '/api/data/backtests/code/read': ['projectId', 'backtestId'], '/api/data/backtests/validate': ['projectId', 'backtestId'],
+  '/api/decks/list': ['projectId'], '/api/decks/read': ['projectId', 'deckId'], '/api/actions/deck-create': ['projectId'], '/api/actions/deck-approve': ['projectId', 'deckId'], '/api/actions/deck-redo': ['projectId', 'deckId'],
+  '/api/actions/deck-retry': ['projectId', 'deckId'], '/api/actions/deck-rerender': ['projectId', 'deckId'], '/api/actions/deck-delete': ['projectId', 'deckId'], '/api/actions/deck-template': ['name'], '/api/actions/deck-logo': ['name'],
   '/api/qlib/universe-status': ['index'], '/api/qlib/research/list': ['projectId'], '/api/qlib/research/read': ['projectId', 'jobId'], '/api/paper/read': ['projectId', 'sessionId'],
 };
 function validateBody(p, b) {
@@ -309,12 +326,39 @@ async function getStatus(force = false) {
   if (!force && statusCache && Date.now() - statusAt < 60_000) return statusCache;
   const [ver, engine] = await Promise.all([run(CLAUDE_BIN, ['--version'], 10000), engineStatus()]);
   statusCache = {
-    claude: ver.ok ? { ok: true, version: ver.out.trim() } : { ok: false, error: ver.err.trim().slice(0, 200) },
+    claude: ver.ok ? { ok: true, version: ver.out.trim() } : { ok: false, error: claudeError(ver), missing: ver.code === 'ENOENT' },
     engine,
     checkedAt: Date.now(),
   };
   statusAt = Date.now();
   return statusCache;
+}
+
+// AI 连接是否可用。订阅 / auto 看 `claude auth status`（不花额度）；apiKey / custom 保存前已经测过，这里只看有没有保存。
+// 只返回登录方式，不返回邮箱 / 组织名。旧版 Claude Code 没有 auth status 时当作「不确定」，不拦用户
+let aiLoginCache = null;
+const AI_MODE_ZH = { auto: '自动（沿用 Claude Code 的登录）', subscription: 'Claude 订阅', apiKey: 'Anthropic API key', custom: '兼容接口' };
+async function aiLogin(force = false) {
+  if (!force && aiLoginCache && Date.now() - aiLoginCache.at < 60_000) return aiLoginCache.value;
+  const cfg = await AI.loadAi();
+  let value;
+  if (cfg.mode === 'apiKey' || cfg.mode === 'custom') value = { ok: Boolean(cfg.apiKey), mode: cfg.mode, method: cfg.mode, error: cfg.apiKey ? null : '没有保存 API key' };
+  else {
+    const env = AI.applyLaunchEnv(cleanEnv(), AI.claudeLaunch(cfg));
+    const r = await new Promise((resolve) => execFile(CLAUDE_BIN, ['auth', 'status', '--json'], { env, timeout: 15000, cwd: WORKSPACE }, (err, out, errOut) => resolve({ err, out: String(out || ''), errOut: String(errOut || '') })));
+    let j = null; try { j = JSON.parse(r.out); } catch { /* 旧版或出错 */ }
+    // 命令本身跑不起来（不存在 / 没权限 / 超时 / 被杀）：不能当作「连接正常」
+    const spawnFail = r.err && (typeof r.err.code === 'string' || r.err.killed || r.err.signal);
+    // 旧版 Claude Code 没有 auth status：报「unknown command / unknown option」之类，才当作「不确定」放行
+    const oldCli = r.err && /unknown|unrecognized|invalid (command|option)|did you mean/i.test(r.errOut + r.out);
+    if (spawnFail) value = { ok: false, mode: cfg.mode, method: null, error: `${claudeError({ code: r.err.code, killed: r.err.killed, err: r.errOut })}，无法检查 AI 连接` };
+    else if ((!j || typeof j.loggedIn !== 'boolean') && r.err && !oldCli) value = { ok: false, mode: cfg.mode, method: null, error: `检查 AI 连接失败：${(r.errOut || r.err.message || '').trim().split('\n')[0].slice(0, 160) || 'claude auth status 出错'}` };
+    else if (!j || typeof j.loggedIn !== 'boolean') value = { ok: true, unknown: true, mode: cfg.mode, method: null, error: null };
+    else if (!j.loggedIn) value = { ok: false, mode: cfg.mode, method: null, error: cfg.mode === 'subscription' ? 'Claude Code 还没有登录 Claude 账号：在终端运行 claude，按提示用订阅账号登录' : '还没有连接 AI：在终端运行 claude 登录，或在 Helm 里填 API key' };
+    else value = { ok: true, mode: cfg.mode, method: String(j.authMethod || ''), subscription: typeof j.subscriptionType === 'string' ? j.subscriptionType : null, error: null };
+  }
+  aiLoginCache = { at: Date.now(), value };
+  return value;
 }
 
 // 环境体检：把「能不能对话、能不能回测、能不能做 qlib 研究」拆成一项项，网页可以直接告诉用户缺什么、怎么补，
@@ -335,32 +379,48 @@ function getHealth(force = false) {
 }
 async function computeHealth(force) {
   const [st, q] = await Promise.all([getStatus(force), getQlibHealth(force)]);
+  // claude 命令不在：AI 连接一项也算不通过（之前会显示「连接正常 / 版本较旧」）
+  const ai = st.claude.ok ? await aiLogin(force) : { ok: false, mode: null, error: '先安装 Claude Code（见上一项），装好后重启 Helm' };
   const miss = new Set(st.engine.missing);
   const venv = path.join(ROOT, 'engine', '.venv');
+  const H = setupHints({ venvExists: existsSync(venv) });
+  const sb = leanSandboxState();
+  const aiHint = (lang) => {
+    const err = ai.error ? (lang === 'en' ? localize('en', ai.error) : ai.error) : '';
+    if (!st.claude.ok) return err;
+    return lang === 'en'
+      ? `${err ? `${err}. ` : ''}Click "AI" in the top bar to use your Claude subscription, an Anthropic API key, or another compatible API (DeepSeek, Kimi, GLM, OpenRouter and others). For a subscription, also run claude in a terminal once and sign in.`
+      : `${err ? `${err}。` : ''}点顶栏的「AI」按钮，可以改用 Claude 订阅、Anthropic API key 或其它兼容接口（DeepSeek、Kimi、GLM、OpenRouter 等）`;
+  };
   const components = [
-    { id: 'claude', zh: 'Claude Code 命令行', required: true, ok: st.claude.ok, detail: st.claude.ok ? st.claude.version : st.claude.error,
-      hint: '安装并登录 Claude Code：终端运行 npm install -g @anthropic-ai/claude-code，然后运行 claude 完成登录，再用 claude --version 确认。claude 不在 PATH 里的话，在 helm 目录的 .env 里加一行 CLAUDE_BIN=/绝对路径/claude' },
-    { id: 'dotnet', zh: '.NET 运行时', required: true, ok: !miss.has('dotnet'), detail: process.env.DOTNET_BIN || '~/.dotnet/dotnet',
-      hint: '在终端运行：curl -sSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel 10.0 --install-dir ~/.dotnet 。装在别处的话，在 .env 里加一行 DOTNET_BIN=/绝对路径/dotnet' },
-    { id: 'lean', zh: 'LEAN 引擎（已编译）', required: true, ok: !miss.has('lean'), detail: 'engine/Lean/Launcher/bin/Release',
-      hint: '在 helm 目录运行：git clone --depth 1 https://github.com/QuantConnect/Lean.git engine/Lean （已经有 engine/Lean 就跳过这行），然后运行：~/.dotnet/dotnet build engine/Lean/Launcher/QuantConnect.Lean.Launcher.csproj -c Release' },
-    { id: 'python', zh: 'Python 虚拟环境', required: true, ok: !miss.has('python'), detail: path.relative(ROOT, path.join(venv, 'bin', 'python')),
-      hint: '在 helm 目录运行：uv venv --python 3.11 engine/.venv ，然后运行：uv pip install --python engine/.venv/bin/python numpy==1.26.4 pandas==2.3.3 scipy==1.13.1 matplotlib==3.8.4 scikit-learn==1.6.1 statsmodels==0.14.6 yfinance' },
-    { id: 'libpython', zh: 'Python 动态库（LEAN 加载策略用）', required: true, ok: !miss.has('libpython'), detail: miss.has('python') ? '要先有 engine/.venv' : 'libpython',
-      hint: 'engine/.venv 里的 Python 缺少 libpython 动态库。请用 uv 管理的 Python 3.11 重建：先把 engine/.venv 改名或删掉，再运行 uv venv --python 3.11 engine/.venv ，并重新安装依赖（见 python 项的命令）' },
+    { id: 'claude', zh: 'Claude Code 命令行', required: true, ok: st.claude.ok, detail: st.claude.ok ? st.claude.version : st.claude.error, hint: H.claude.zh, hintEn: H.claude.en, cmd: H.claude.cmd },
+    { id: 'ai', zh: 'AI 连接', required: true, ok: ai.ok, detail: !st.claude.ok ? '无法检查（缺少 claude 命令）' : ai.unknown ? '未知（Claude Code 版本较旧）' : AI_MODE_ZH[ai.mode] || ai.mode, hint: aiHint('zh'), hintEn: aiHint('en') },
+    { id: 'dotnet', zh: '.NET 运行时', required: true, ok: !miss.has('dotnet'), detail: process.env.DOTNET_BIN || '~/.dotnet/dotnet', hint: H.dotnet.zh, hintEn: H.dotnet.en, cmd: H.dotnet.cmd },
+    { id: 'lean', zh: 'LEAN 引擎（已编译）', required: true, ok: !miss.has('lean'), detail: 'engine/Lean/Launcher/bin/Release', hint: H.lean.zh, hintEn: H.lean.en, cmd: H.lean.cmd },
+    { id: 'python', zh: 'Python 虚拟环境', required: true, ok: !miss.has('python'), detail: path.relative(ROOT, path.join(venv, 'bin', 'python')), hint: H.python.zh, hintEn: H.python.en, cmd: H.python.cmd },
+    { id: 'libpython', zh: 'Python 动态库（LEAN 加载策略用）', required: true, ok: !miss.has('libpython'), detail: miss.has('python') ? '要先有 engine/.venv' : 'libpython', hint: H.libpython.zh, hintEn: H.libpython.en, cmd: H.libpython.cmd },
+    // 策略沙盒：AI 写的策略代码在里面跑。不可用时回测会被拒绝；设了 HELM_EXEC_SANDBOX=off 能跑，但不受保护
+    { id: 'sandbox', zh: '策略沙盒（macOS sandbox-exec）', required: false, warning: !sb.available, ok: sb.available,
+      detail: sb.available ? '/usr/bin/sandbox-exec' : sb.off ? '已关闭（HELM_EXEC_SANDBOX=off）：策略代码不在沙盒里运行' : '不可用：回测会被拒绝',
+      hint: sb.off ? '沙盒已关闭：AI 写的策略代码运行时能读写你的文件、联网。只在你信任代码时这样用' : '这台机器没有 /usr/bin/sandbox-exec（不是 macOS），为了安全回测会被拒绝。确实要运行，请在 .env 里加一行 HELM_EXEC_SANDBOX=off 后重启 Helm',
+      hintEn: sb.off ? 'The sandbox is off: AI-written strategy code can read and write your files and use the network while it runs. Only do this if you trust the code.' : 'This machine has no /usr/bin/sandbox-exec (not macOS), so backtests are refused for safety. To run them anyway, add HELM_EXEC_SANDBOX=off to .env and restart Helm.' },
     { id: 'priceData', zh: '行情数据', required: false, ok: st.engine.tickers > 0, detail: `本地已有 ${st.engine.tickers} 个代码的日线`,
       hint: '不用手动准备：第一次运行回测时，会自动下载代码里用到的股票 / ETF 日线（可以忽略这一项）' },
     { id: 'qlib', zh: 'qlib 研究引擎', required: false, ok: Boolean(q && q.ok), detail: q ? (q.python || (q.runSh ? '找不到装了 qlib 的 Python' : '找不到 engine/qlib_research/run.sh')) : '检查超时或出错',
-      hint: '只有「想法检验 / 完整研究 / 股票池」需要。在 helm 目录运行：engine/qlib_research/run.sh --which-python ，看它报缺什么（需要一个装了 qlib 的 Python，也可以在 .env 里加一行 QS_PYTHON=/绝对路径/python）' },
+      hint: '只有「想法检验 / 完整研究 / 股票池」需要。在 helm 目录运行：engine/qlib_research/run.sh --which-python ，看它报缺什么（推荐装到 engine/.qlib-venv，也可以在 .env 里加一行 QS_PYTHON=/绝对路径/python）' },
     { id: 'qlibData', zh: 'qlib 美股数据', required: false, ok: Boolean(q && q.data), detail: '~/.qlib/qlib_data/us_data',
       hint: '只有 qlib 研究需要：把 qlib 的美股日线数据放到 ~/.qlib/qlib_data/us_data（目录里要有 calendars、features、instruments）' },
   // detail 里可能带绝对路径（DOTNET_BIN、qlib 的 Python、claude 的报错）：把用户主目录换成 ~，不把目录结构给网页
-  ].map((c) => ({ ...c, en: (HEALTH_EN[c.id] || {}).en || c.zh, hintEn: c.ok ? null : (HEALTH_EN[c.id] || {}).hintEn || c.hint, ok: Boolean(c.ok), detail: typeof c.detail === 'string' ? c.detail.split(os.homedir()).join('~') : c.detail, hint: c.ok ? null : c.hint }));
+  ].map((c) => ({ ...c, en: (HEALTH_EN[c.id] || {}).en || c.zh, hintEn: c.ok ? null : c.hintEn || (HEALTH_EN[c.id] || {}).hintEn || c.hint, ok: Boolean(c.ok), detail: typeof c.detail === 'string' ? c.detail.split(os.homedir()).join('~') : c.detail, hint: c.ok ? null : c.hint, cmd: c.ok ? null : c.cmd || null }));
   return {
     ok: components.every((c) => c.ok || !c.required),
     checkedAt: st.checkedAt,
+    // 安装目录（绝对路径）：网页引导里显示 cd "<installDir>" && scripts/setup.sh
+    installDir: ROOT,
+    setupCommand: setupCommand(ROOT),
     missing: components.filter((c) => c.required && !c.ok).map((c) => c.id),
     optionalMissing: components.filter((c) => !c.required && !c.ok).map((c) => c.id),
+    warnings: components.filter((c) => c.warning).map((c) => c.id),
     components,
   };
 }
@@ -426,6 +486,78 @@ const liveThreads = () => new Map([...runs.values()].map((r) => [r.thread.id, r.
 const handoffDrafts = () => [...runs.values()].filter((r) => r.draft && shortToolName(r.draft.name) === 'handoff')
   .map((r) => ({ threadId: r.thread.id, from: r.thread.agent, agent: r.draft.agent || null }));
 function broadcast(ev) { for (const res of bus) sseSend(res, ev); }
+
+/* ---------------- 内容翻译（用「AI 连接」里配好的模型，结果缓存在本机，每段只翻一次） ---------------- */
+
+function runTranslateBatch(texts, target) {
+  return new Promise((resolve, reject) => {
+    AI.loadAi().then((cfg) => {
+      const launch = AI.claudeLaunch(cfg);
+      const args = ['-p', '--model', launch.model || 'haiku', '--tools', '', '--strict-mcp-config', '--no-session-persistence', '--output-format', 'json',
+        '--system-prompt', translatePrompt(target), ...launch.args];
+      const child = spawn(CLAUDE_BIN, args, { cwd: os.tmpdir(), env: AI.applyLaunchEnv(cleanEnv(), launch), stdio: ['pipe', 'pipe', 'ignore'] });
+      let out = '';
+      const timer = setTimeout(() => child.kill('SIGKILL'), 180_000);
+      child.stdout.on('data', (c) => { out += c; if (out.length > 4_000_000) child.kill('SIGKILL'); });
+      child.on('error', (e) => { clearTimeout(timer); reject(e); });
+      child.on('close', (code) => {
+        clearTimeout(timer);
+        try {
+          const j = JSON.parse(out);
+          if (code !== 0 || j.is_error) throw new Error(String(j.result || `exit ${code}`).slice(0, 200));
+          resolve(parseArray(j.result));
+        } catch (e) { reject(e); }
+      });
+      child.stdin.on('error', () => {});
+      child.stdin.end(JSON.stringify(texts));
+    }, reject);
+  });
+}
+// 一次性的模型调用（没有工具、不留会话），给汇报流水线用。返回模型的文字回复
+function runModelOnce({ system, input, model, timeoutMs = 600_000 }) {
+  return new Promise((resolve, reject) => {
+    AI.loadAi().then((cfg) => {
+      const launch = AI.claudeLaunch(cfg);
+      const args = ['-p', '--model', launch.model || model || 'sonnet', '--tools', '', '--strict-mcp-config', '--no-session-persistence', '--output-format', 'json',
+        '--system-prompt', system, ...launch.args];
+      const child = spawn(CLAUDE_BIN, args, { cwd: os.tmpdir(), env: AI.applyLaunchEnv(cleanEnv(), launch), stdio: ['pipe', 'pipe', 'ignore'] });
+      let out = '';
+      const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+      child.stdout.on('data', (c) => { out += c; if (out.length > 8_000_000) child.kill('SIGKILL'); });
+      child.on('error', (e) => { clearTimeout(timer); reject(e); });
+      child.on('close', (code) => {
+        clearTimeout(timer);
+        try {
+          const j = JSON.parse(out);
+          if (code !== 0 || j.is_error) throw new Error(String(j.result || `exit ${code}`).slice(0, 300));
+          resolve(String(j.result || ''));
+        } catch (e) { reject(code !== 0 && !out ? new Error(`claude exit ${code}`) : e); }
+      });
+      child.stdin.on('error', () => {});
+      child.stdin.end(input);
+    }, reject);
+  });
+}
+// 研发汇报：模板 / logo / 免责声明放 data/deck/，每份汇报放在项目的 decks/<id>/
+const DECKS = new DeckService({
+  projectsDir: PROJECTS_DIR,
+  dataDir: process.env.HELM_DECK_DIR || path.join(ROOT, 'data', 'deck'),
+  python: path.join(ROOT, 'engine', '.venv', 'bin', 'python'),
+  rendererDir: path.join(ROOT, 'engine', 'deck'),
+  runModel: runModelOnce,
+  buildDataPack,
+  onUpdate: (deck) => broadcast({ type: 'deck_updated', projectId: Number(deck.projectId), deck }),
+});
+
+let translateNotify = null;
+const TRANSLATOR = process.env.HELM_TRANSLATE === '0' ? null : new Translator({
+  file: process.env.HELM_TRANSLATIONS_FILE || path.join(ROOT, 'data', 'i18n', 'translations.json'),
+  runBatch: runTranslateBatch,
+  // 翻好一批就通知网页重新取数据（2 秒内多批只通知一次）
+  onUpdate: () => { if (translateNotify) return; translateNotify = setTimeout(() => { translateNotify = null; broadcast({ type: 'translations_updated' }); }, 2000); },
+});
+// 哪些接口的返回要翻（只读的数据接口；questions / approvals / agents 不翻：选项文字要原样回传给服务端）
+const TRANSLATE_ROUTES = /^\/api\/(data\/(projects\/read|backtests\/list|backtests\/read|backtests\/validate|backtests\/spec|files\/read|journal)|pipeline(\/.*)?|threads(\/[a-z0-9-]+)?|qlib\/(research\/list|research\/read|universes|universe-status)|paper\/(list|read)|data\/paper\/drift|datasets)$/;
 const runningList = () => [...runs.values()].map((r) => ({ threadId: r.thread.id, agent: r.thread.agent, title: r.thread.title, from: r.thread.from ? { agent: r.thread.from.agent, threadId: r.thread.from.threadId } : null, startedAt: r.assistant ? r.assistant.at : null }));
 
 /* ---------------- claude runs ---------------- */
@@ -442,7 +574,7 @@ function formatContext(ctx) {
 
 function teamPrompt(self) {
   const others = AGENTS.filter((a) => a.id !== self.id).map((a) => `- ${a.id}（${a.name}）：${a.role}`).join('\n');
-  return `\n\n## 团队\n你是团队中的「${self.name}」。其他成员：\n${others}\n\n需要别的成员接手时，调用 mcp__qc__handoff，传入对方的 id 和一份完整、自洽的任务说明（对方看不到你的对话，要写清 projectId、要做什么、怎样算完成）。网站会立即为对方开一个新对话，用户点它的标签就能实时看到。\n- 你需要拿到对方的结果才能继续时（比如研究员要评估工程师的回测），用 wait=true，它会等对方做完并把对方的最终回答返回给你。\n- 只是转交、不需要结果时，用 wait=false，然后告诉用户可以点「对方名字」标签查看。\n- 只有 handoff 工具返回成功后，才能说“已经交给某某”。不要用任何其他方式模拟交接。`;
+  return `\n\n## 团队\n你是团队中的「${self.name}」。其他成员：\n${others}\n\n需要别的成员接手时，调用 mcp__qc__handoff，传入对方的 id 和一份完整、自洽的任务说明（对方看不到你的对话，要写清 projectId、要做什么、怎样算完成）。网站会立即为对方开一个新对话，用户点它的标签就能实时看到。\n- 你需要拿到对方的结果才能继续时（比如研究员要评估工程师的回测），用 wait=true，它会等对方做完并把对方的最终回答返回给你。\n- 只是转交、不需要结果时，用 wait=false，然后告诉用户可以点「对方名字」标签查看。\n- 只有 handoff 工具返回成功后，才能说“已经交给某某”。不要用任何其他方式模拟交接。\n\n## 项目名\n网页有中文和英文两种界面。建项目（create_project）时 name 用用户的语言，同时给 nameEn（英文名）和 nameZh（中文名），意思一致、简短；改名（update_project）时两种也一起改。`;
 }
 
 // 调度型 agent（agents.json 里 orchestrator: true）：自己不做执行类工作，每个阶段交给对应的 agent
@@ -479,7 +611,8 @@ function buildArgs(agent, thread, context, allowDanger, opts) {
   const args = ['-p', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
     '--append-system-prompt', sys, '--permission-mode', 'default',
     '--mcp-config', MCP_CONFIG, '--strict-mcp-config', '--permission-prompt-tool', `mcp__${MCP_NAME}__approve`];
-  const model = opts.model || agent.model || process.env.CLAUDE_MODEL;
+  // 用兼容接口时只能用对方的模型：忽略网页上选的 Claude 模型
+  const model = opts.forceModel || opts.model || agent.model || process.env.CLAUDE_MODEL;
   if (model) args.push('--model', model);
   const effort = opts.effort || agent.effort || process.env.CLAUDE_EFFORT;
   if (effort) args.push('--effort', effort);
@@ -490,6 +623,7 @@ function buildArgs(agent, thread, context, allowDanger, opts) {
   // 调度者：改文件和跑命令直接禁用（不走审批）；其它 agent 的 Edit/Write/Bash 走 approve
   const orchestratorBlocked = agent.orchestrator ? ['Bash', 'Edit', 'Write', 'MultiEdit'] : [];
   args.push('--disallowedTools', ...READ_DENIES, ...ALWAYS_BLOCKED, ...orchestratorBlocked, ...agentDenied, ...(allowDanger ? [] : DANGEROUS.map((t) => `mcp__${MCP_NAME}__${t}`)));
+  if (opts.extraArgs) args.push(...opts.extraArgs);
   return args;
 }
 
@@ -530,10 +664,12 @@ async function startRun(thread, { message, context = null, allowDanger = false, 
   // 这个对话永远显示「运行中」、永远 409，还一直占着一个 MAX_RUNS 名额
   let child;
   try {
-  child = spawn(CLAUDE_BIN, buildArgs(agent, thread, context, allowDanger, opts), {
+  // 用户在「AI 连接」里选的方式：订阅 / API key / 兼容接口（密钥经 apiKeyHelper 读，不进环境变量）
+  const launch = AI.claudeLaunch(await AI.loadAi());
+  child = spawn(CLAUDE_BIN, buildArgs(agent, thread, context, allowDanger, { ...opts, forceModel: launch.model, extraArgs: launch.args }), {
     cwd: WORKSPACE,
     env: {
-      ...cleanEnv(),
+      ...AI.applyLaunchEnv(cleanEnv(), launch),
       HELM_URL: `http://127.0.0.1:${PORT}`,
       HELM_TOKEN: HANDOFF_TOKEN,
       HELM_THREAD_ID: thread.id,
@@ -902,6 +1038,7 @@ const server = http.createServer(async (req, res) => {
     const readJson = async (rq) => { const b = await readJsonRaw(rq); const bad = validateBody(p, b); if (bad) throw httpError(400, bad); return b; };
 
     res.helmLang = langOf(req);
+    res.helmTranslate = TRANSLATE_ROUTES.test(p);
     if (!allowedHosts.has(req.headers.host || '')) return sendJson(res, 403, { error: 'bad host' });
     const denied = checkMutation(req, p);
     if (denied) return sendJson(res, 403, { error: denied });
@@ -924,6 +1061,13 @@ const server = http.createServer(async (req, res) => {
       return undefined;
     }
 
+    // 用户自己改代码（代码页的编辑器）：只能覆盖项目里已有的 .py 文件，和其它改状态的接口一样要页面令牌 + 同源
+    if (p === '/api/data/files/update' && req.method === 'POST') {
+      const b = await readJson(req);
+      const r = await updateProjectFileByUser({ projectId: Number(b.projectId), name: b.name, content: b.content });
+      if (r.success) broadcast({ type: 'project_files_updated', projectId: Number(b.projectId), name: b.name });
+      return sendJson(res, 200, r);
+    }
     if (p.startsWith('/api/data/') && req.method === 'POST') {
       const fn = READ_ENDPOINTS[p.slice('/api/data/'.length)];
       if (!fn) return sendJson(res, 403, { success: false, errors: ['没有这个接口'] });
@@ -1008,8 +1152,8 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/datasets' && req.method === 'GET') return sendJson(res, 200, await listDatasets({ dataDir: DATA_DIR }));
     // 像 QC 一样，编译和回测按钮直接可用，不经过 AI
     if (p === '/api/actions/project' && req.method === 'POST') {
-      const { name, description, template } = await readJson(req);
-      const r = await createProject({ name: String(name || '').trim(), description: String(description || '').slice(0, 2000), code: Object.hasOwn(TEMPLATES, template) ? TEMPLATES[template] : undefined });
+      const { name, description, template, nameEn, nameZh } = await readJson(req);
+      const r = await createProject({ name: String(name || '').trim(), nameEn, nameZh, description: String(description || '').slice(0, 2000), code: templateCode(template, res.helmLang) });
       if (r.success) broadcast({ type: 'project_created', projectId: r.projects[0].projectId });
       return sendJson(res, 200, r);
     }
@@ -1113,6 +1257,91 @@ const server = http.createServer(async (req, res) => {
       if (r.success) broadcast({ type: 'research_started', projectId: Number(b.projectId), jobId: b.jobId });
       return sendJson(res, 200, r);
     }
+    /* ---- 研发汇报（一键生成幻灯片） ---- */
+    if (p === '/api/decks/list' && req.method === 'POST') {
+      const b = await readJson(req);
+      return sendJson(res, 200, { success: true, decks: await DECKS.list(Number(b.projectId)) });
+    }
+    if (p === '/api/decks/read' && req.method === 'POST') {
+      const b = await readJson(req);
+      const d = await DECKS.read(Number(b.projectId), String(b.deckId || ''));
+      return d ? sendJson(res, 200, { success: true, deck: d }) : sendJson(res, 404, { success: false, errors: ['not found'] });
+    }
+    if (p === '/api/decks/settings' && req.method === 'POST') {
+      await readJson(req);
+      const st = await DECKS.settings();
+      return sendJson(res, 200, { success: true, settings: { ...st, logo: Boolean(st.logo), hasPreview: Boolean(st.template && existsSync(DECKS.templateFile('preview'))) } });
+    }
+    const DECK_ACTIONS = {
+      '/api/actions/deck-create': (b) => DECKS.create(Number(b.projectId), b),
+      '/api/actions/deck-approve': (b) => DECKS.approve(Number(b.projectId), String(b.deckId), b.note),
+      '/api/actions/deck-redo': (b) => DECKS.redoOutline(Number(b.projectId), String(b.deckId), b.note),
+      '/api/actions/deck-retry': (b) => DECKS.retry(Number(b.projectId), String(b.deckId)),
+      '/api/actions/deck-rerender': (b) => DECKS.rerender(Number(b.projectId), String(b.deckId)),
+      '/api/actions/deck-delete': (b) => DECKS.remove(Number(b.projectId), String(b.deckId)),
+    };
+    if (DECK_ACTIONS[p] && req.method === 'POST') {
+      const b = await readJson(req);
+      try {
+        const deck = await DECK_ACTIONS[p](b);
+        if (p === '/api/actions/deck-delete') broadcast({ type: 'deck_updated', projectId: Number(b.projectId), deleted: b.deckId });
+        return sendJson(res, 200, { success: true, errors: [], deck });
+      } catch (e) {
+        return sendJson(res, 200, { success: false, errors: [e.message] });
+      }
+    }
+    if (p === '/api/actions/deck-settings' && req.method === 'POST') {
+      const b = await readJson(req);
+      const st = await DECKS.saveSettings(b);
+      return sendJson(res, 200, { success: true, errors: [], settings: { ...st, logo: Boolean(st.logo) } });
+    }
+    // 模板 / logo 上传：文件以 base64 放在 JSON 里（页面只有 fetch，没有表单上传）
+    if ((p === '/api/actions/deck-template' || p === '/api/actions/deck-logo') && req.method === 'POST') {
+      const b = await readJsonRaw(req, 90_000_000);
+      const bad = validateBody(p, b);
+      if (bad) throw httpError(400, bad);
+      if (typeof b.data !== 'string' || !b.data) throw httpError(400, '缺少必填字段 data');
+      const buf = Buffer.from(b.data, 'base64');
+      try {
+        if (p === '/api/actions/deck-template') {
+          const info = await DECKS.uploadTemplate(String(b.name || ''), buf);
+          return sendJson(res, 200, { success: true, errors: [], template: info });
+        }
+        await DECKS.uploadLogo(String(b.name || ''), buf);
+        return sendJson(res, 200, { success: true, errors: [] });
+      } catch (e) {
+        return sendJson(res, 200, { success: false, errors: [e.message] });
+      }
+    }
+    if (p === '/api/decks/template-preview' && req.method === 'GET') {
+      const f = DECKS.templateFile('preview');
+      if (!f || !existsSync(f)) return sendJson(res, 404, { error: 'not found' });
+      res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-cache', ...SEC_HEADERS });
+      return res.end(await readFile(f));
+    }
+    if ((p === '/api/decks/file' || p === '/api/decks/page') && req.method === 'GET') {
+      const projectId = Number(url.searchParams.get('projectId'));
+      const deckId = String(url.searchParams.get('deckId') || '');
+      if (!Number.isSafeInteger(projectId) || !/^[a-z0-9-]{6,64}$/.test(deckId)) return sendJson(res, 400, { error: 'bad id' });
+      if (p === '/api/decks/page') {
+        const f = await DECKS.page(projectId, deckId, url.searchParams.get('n'));
+        if (!f) return sendJson(res, 404, { error: 'not found' });
+        res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'no-cache', ...SEC_HEADERS });
+        return res.end(await readFile(f));
+      }
+      const kind = url.searchParams.get('kind');
+      const f = await DECKS.file(projectId, deckId, kind);
+      if (!f) return sendJson(res, 404, { error: 'not found' });
+      const job = await DECKS.readJob(projectId, deckId);
+      const base = String(job?.title || 'deck').replace(/[\\/:*?"<>|\n\r]+/g, ' ').trim().slice(0, 80) || 'deck';
+      const fname = `${base}.${kind}`;
+      res.writeHead(200, {
+        'Content-Type': kind === 'pdf' ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+        'Content-Disposition': `attachment; filename="deck.${kind}"; filename*=UTF-8''${encodeURIComponent(fname)}`,
+        'Cache-Control': 'no-store', ...SEC_HEADERS,
+      });
+      return res.end(await readFile(f));
+    }
     /* ---- 模拟实盘：内部模拟 / Alpaca 模拟账户 ---- */
     const PREAD = {
       '/api/paper/list': (b) => Paper.listSessions({ projectId: b.projectId ? Number(b.projectId) : undefined }),
@@ -1148,6 +1377,28 @@ const server = http.createServer(async (req, res) => {
       const r = await Alpaca.saveCreds({ keyId: String(b.keyId || ''), secret: String(b.secret || '') });
       if (!r.success) return sendJson(res, 200, { success: false, errors: r.errors });
       return sendJson(res, 200, { success: true, errors: [], status: await Alpaca.status() });
+    }
+    /* ---- AI 连接：订阅 / API key / 兼容接口。key 只进不出：返回给网页的只有末 4 位 ---- */
+    // 别的 GET 只靠 Host 检查；这里有接口地址和 key 末 4 位，额外要网页令牌
+    if (p === '/api/ai/status' && req.method === 'GET' && !safeEqual(req.headers['x-helm-ui-token'], UI_TOKEN)) return sendJson(res, 403, { error: '请求被拒绝：缺少或错误的页面令牌。如果服务刚重启过，请刷新页面。' });
+    if (p === '/api/ai/status' && req.method === 'GET') return sendJson(res, 200, { success: true, ai: AI.publicView(await AI.loadAi()), login: await aiLogin(url.searchParams.has('refresh')) });
+    if (p === '/api/actions/ai-save' && req.method === 'POST') {
+      const b = await readJson(req);
+      const r = await AI.saveAi({ mode: String(b.aiMode || ''), apiKey: typeof b.apiKey === 'string' ? b.apiKey : '', baseUrl: typeof b.baseUrl === 'string' ? b.baseUrl : '', model: typeof b.aiModel === 'string' ? b.aiModel : '' });
+      if (r.success) { statusCache = null; aiLoginCache = null; }
+      return sendJson(res, 200, r.success ? { success: true, errors: [], ai: r.ai, login: await aiLogin(true) } : { success: false, errors: r.errors });
+    }
+    if (p === '/api/actions/ai-test' && req.method === 'POST') {
+      const cfg = await AI.loadAi();
+      if (cfg.mode === 'apiKey' || cfg.mode === 'custom') return sendJson(res, 200, await AI.retestAi());
+      const login = await aiLogin(true);
+      return sendJson(res, 200, { success: login.ok, errors: login.ok ? [] : [login.error], ai: AI.publicView(cfg), login });
+    }
+    if (p === '/api/actions/ai-clear' && req.method === 'POST') {
+      await readJson(req);
+      const r = await AI.clearAi();
+      statusCache = null; aiLoginCache = null;
+      return sendJson(res, 200, { ...r, errors: [], login: await aiLogin(true) });
     }
     if (p === '/api/actions/alpaca-disconnect' && req.method === 'POST') {
       const active = (await Paper.listSessions()).sessions.filter((x) => x.mode === 'alpaca' && x.status === 'active');
@@ -1274,20 +1525,29 @@ const server = http.createServer(async (req, res) => {
 });
 
 await mkdir(THREADS_DIR, { recursive: true });
+// 终端日志的语言：HELM_LANG=zh/en 优先；否则系统语言（LC_ALL / LANG）是中文才用中文，其余一律英文
+const LOG_ZH = process.env.HELM_LANG ? /^zh/i.test(process.env.HELM_LANG) : /^zh/i.test(process.env.LC_ALL || process.env.LC_MESSAGES || process.env.LANG || '');
+const L = (zh, en) => (LOG_ZH ? zh : en);
 server.on('error', (e) => {
-  if (e.code === 'EADDRINUSE') console.error(`\n  端口 ${PORT} 已被占用：Helm 可能已经在运行了，先打开 http://localhost:${PORT} 看看。\n  不是的话，换个端口启动：PORT=${PORT + 1} node server.mjs\n`);
-  else console.error(`\n  Helm 启动失败：${e.message}\n`);
+  if (e.code === 'EADDRINUSE') console.error(L(`\n  端口 ${PORT} 已被占用：Helm 可能已经在运行了，先打开 http://localhost:${PORT} 看看。\n  不是的话，换个端口启动：PORT=${PORT + 1} node server.mjs\n`, `\n  Port ${PORT} is already in use: Helm may already be running — open http://localhost:${PORT} to check.\n  Otherwise start it on another port: PORT=${PORT + 1} node server.mjs\n`));
+  else console.error(L(`\n  Helm 启动失败：${e.message}\n`, `\n  Helm failed to start: ${e.message}\n`));
   process.exit(1);
 });
 server.listen(PORT, HOST, () => {
-  console.log(`\n  Helm 已启动 →  http://localhost:${PORT}\n`);
-  engineStatus().then((s) => console.log(`  本地 LEAN 引擎：${s.ok ? '就绪' : `缺少 ${s.missing.join(', ')}（见 README 安装步骤）`}`));
-  console.log(`  Agent 工作目录：${WORKSPACE}\n`);
+  console.log(L(`\n  Helm 已启动 →  http://localhost:${PORT}\n`, `\n  Helm is running →  http://localhost:${PORT}\n`));
+  getStatus().then((st) => {
+    const e = st.engine;
+    console.log(L(`  本地 LEAN 引擎：${e.ok ? '就绪' : `缺少 ${e.missing.join(', ')}（在安装目录运行 scripts/setup.sh）`}`, `  Local LEAN engine: ${e.ok ? 'ready' : `missing ${e.missing.join(', ')} (run scripts/setup.sh in the install folder)`}`));
+    if (!st.claude.ok) console.log(L(`  Claude Code：${st.claude.error}。安装：${setupHints().claude.cmd} ，然后重启 Helm`, `  Claude Code: ${st.claude.missing ? `the claude command (${CLAUDE_BIN}) was not found — Claude Code is not installed or not on PATH` : localize('en', st.claude.error)}. Install it with: ${setupHints().claude.cmd} , then restart Helm`));
+    if (!leanSandboxState().ok) console.log(L('  策略沙盒不可用（没有 /usr/bin/sandbox-exec）：回测会被拒绝。确实要运行请在 .env 里设 HELM_EXEC_SANDBOX=off', '  Strategy sandbox unavailable (no /usr/bin/sandbox-exec): backtests will be refused. Set HELM_EXEC_SANDBOX=off in .env to run them anyway'));
+    else if (!leanSandboxState().available) console.log(L('  警告：策略沙盒已关闭（HELM_EXEC_SANDBOX=off），AI 写的策略代码不受保护', '  Warning: the strategy sandbox is off (HELM_EXEC_SANDBOX=off); AI-written strategy code runs unprotected'));
+  }).catch(() => {});
+  console.log(L(`  Agent 工作目录：${WORKSPACE}\n`, `  Agent workspace: ${WORKSPACE}\n`));
   // 补账：把记录功能上线前的回测补进尝试记录和验证期记录（可重复执行）
-  // 模拟实盘：每个交易日美东 17:15 之后自动用最新数据跑一次
+  // 模拟实盘：每个交易日结束后（美东午夜过后）自动用最新数据跑一次
   Paper.onPaperEvent((ev) => broadcast(ev));
   Paper.startScheduler();
-  reconcileLedgers().then((r) => { if (r.trialsAdded || r.holdoutBackfilled.length) console.log(`  补记尝试 ${r.trialsAdded} 次，补记验证期 ${r.holdoutBackfilled.length} 次`); }).catch((e) => console.log(`  补账失败：${e.message}`));
+  reconcileLedgers().then((r) => { if (r.trialsAdded || r.holdoutBackfilled.length) console.log(L(`  补记尝试 ${r.trialsAdded} 次，补记验证期 ${r.holdoutBackfilled.length} 次`, `  Backfilled ${r.trialsAdded} trial(s) and ${r.holdoutBackfilled.length} holdout record(s)`)); }).catch((e) => console.log(L(`  补账失败：${e.message}`, `  Ledger backfill failed: ${e.message}`)));
 });
 
 // 优雅退出：不再接新连接，结束所有 SSE 事件流，终止网页发起的 claude 对话进程；
@@ -1297,9 +1557,9 @@ let shuttingDown = false;
 function shutdown(sig) {
   if (shuttingDown) return process.exit(0);
   shuttingDown = true;
-  console.log(`\n  收到 ${sig}，正在关闭 Helm …（正在跑的回测 / 研究不会被中断）`);
+  console.log(L(`\n  收到 ${sig}，正在关闭 Helm …（正在跑的回测 / 研究不会被中断）`, `\n  Got ${sig}, shutting down Helm … (running backtests / research keep going)`));
   const live = Paper.runningSessions().length;
-  if (live) console.log(`  有 ${live} 个模拟实盘正在更新，这一次会被打断；下次启动 Helm 后会自动补跑，不会重复下单。`);
+  if (live) console.log(L(`  有 ${live} 个模拟实盘正在更新，这一次会被打断；下次启动 Helm 后会自动补跑，不会重复下单。`, `  ${live} paper session(s) are updating and will be interrupted; Helm re-runs them on next start without duplicate orders.`));
   const hardStop = setTimeout(() => process.exit(0), 3000); hardStop.unref();
   server.close(() => process.exit(0));
   for (const res of bus) { try { res.end(); } catch { /* 已断开 */ } }

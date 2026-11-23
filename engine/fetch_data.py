@@ -14,6 +14,7 @@
 """
 import json
 import os
+import random
 import shutil
 import sys
 import time
@@ -21,7 +22,11 @@ import zipfile
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-import yfinance as yf
+try:
+    import yfinance as yf
+except ImportError:  # 没装依赖时给一句能照着做的话，而不是一串 Traceback
+    print(json.dumps({"results": [], "error": "engine/.venv 里没有 yfinance：在 Helm 安装目录运行 scripts/setup.sh"}, ensure_ascii=False))
+    sys.exit(1)
 
 STALE_SECONDS = 20 * 3600
 
@@ -62,6 +67,62 @@ def ny_now():
     return datetime.now(ZoneInfo("America/New_York"))
 
 
+# Yahoo 限流 / 网络抖动时重试：每个代码最多 4 次，等待 2s、4s、8s（加一点随机）；整个进程的等待合计不超过 90 秒，
+# 免得几十个代码一起被限流时超过调用方的 5 分钟超时。HELM_FETCH_BACKOFF 可以改基础等待（测试用）
+MAX_TRIES = 4
+BACKOFF = float(os.environ.get("HELM_FETCH_BACKOFF", "2"))
+WAIT_BUDGET = [90.0]
+
+
+class FetchError(Exception):
+    pass
+
+
+def transient_kind(e):
+    """'throttle' = 被限流；'network' = 连不上 / 超时；None = 不值得重试的错误。"""
+    name, msg = type(e).__name__, str(e)
+    if "RateLimit" in name or "Too Many Requests" in msg or "429" in msg or "rate limit" in msg.lower():
+        return "throttle"
+    low = msg.lower()
+    if isinstance(e, (TimeoutError, ConnectionError)) or any(k in name for k in ("Timeout", "Connection", "SSLError", "ProxyError")) \
+            or any(k in low for k in ("timed out", "timeout", "connection", "temporarily unavailable", "name resolution", "502", "503", "504")):
+        return "network"
+    return None
+
+
+def download_history(ticker, history=None, sleep=time.sleep):
+    """下载整段复权日线，遇到限流 / 网络问题按指数退避重试；最后仍失败就抛出说清原因的 FetchError。
+    空结果也重试一次（Yahoo 被限流时有时直接返回空表）。"""
+    history = history or (lambda sym: yf.Ticker(sym).history(period="max", interval="1d", auto_adjust=True, actions=False))
+    sym = yahoo_symbol(ticker)
+    last_kind, last_err, empty_retried = None, None, False
+    for attempt in range(MAX_TRIES):
+        try:
+            df = history(sym)
+            if df is not None and not df.empty:
+                return df
+            if empty_retried:
+                return df
+            empty_retried, last_kind, last_err = True, "empty", None
+        except Exception as e:  # noqa: BLE001
+            kind = transient_kind(e)
+            if kind is None:
+                raise
+            last_kind, last_err = kind, e
+        if attempt == MAX_TRIES - 1:
+            break
+        wait = min(BACKOFF * (2 ** attempt) * (1 + 0.25 * random.random()), WAIT_BUDGET[0])
+        if wait <= 0 and last_kind != "empty":
+            break
+        WAIT_BUDGET[0] -= wait
+        sleep(wait)
+    if last_kind == "empty":
+        return None
+    if last_kind == "throttle":
+        raise FetchError(f"Yahoo Finance 限流（请求太多），重试 {MAX_TRIES} 次仍失败：等几分钟后再运行一次")
+    raise FetchError(f"连不上 Yahoo Finance（{str(last_err)[:120]}），重试 {MAX_TRIES} 次仍失败：检查网络 / 代理后再试")
+
+
 def fetch_one(data, ticker, meta, force, min_end=None):
     sym = lean_symbol(ticker)
     base = os.path.join(data, "equity", "usa")
@@ -78,7 +139,7 @@ def fetch_one(data, ticker, meta, force, min_end=None):
     if not force and m and fresh_enough and time.time() - m.get("fetchedAt", 0) < STALE_SECONDS and os.path.exists(zpath):
         return {"ticker": sym.upper(), "status": "cached", "start": m["start"], "end": m["end"], "rows": m["rows"]}
 
-    df = yf.Ticker(yahoo_symbol(ticker)).history(period="max", interval="1d", auto_adjust=True, actions=False)
+    df = download_history(ticker)
     if df is None or df.empty:
         return {"ticker": sym.upper(), "status": "error", "error": "Yahoo 没有这个代码的数据"}
     df = df.dropna(subset=["Open", "High", "Low", "Close"])

@@ -52,11 +52,11 @@ check('休市原因是中文', holidayName('2026-11-26') === '感恩节' && holi
   // 周三 11-25 收盘后跑完：下次是周五 11-27（感恩节顺延），不是周四
   const done = { status: 'active', lastRun: { ok: true, dataDate: '2026-11-25', at: '2026-11-25T22:30:00Z' }, lastAttemptAt: '2026-11-25T22:20:00Z' };
   const nx = paperNextRun(done, new Date('2026-11-26T02:00:00Z'));
-  check('感恩节前一天跑完：下次运行是 11-27 美东 17:15，并说明感恩节休市', nx.kind === 'sched' && nx.at.toISOString() === '2026-11-27T22:15:00.000Z' && nx.closed && nx.closed.date === '2026-11-26' && nx.closed.name === '感恩节', JSON.stringify(nx));
+  check('感恩节前一天跑完：下次运行是 11-27 那天结束（美东 11-28 00:00），并说明感恩节休市', nx.kind === 'sched' && nx.at.toISOString() === '2026-11-28T05:00:00.000Z' && nx.closed && nx.closed.date === '2026-11-26' && nx.closed.name === '感恩节', JSON.stringify(nx));
   const hol = paperNextRun(done, new Date('2026-11-26T23:30:00Z'));
-  check('感恩节当天收盘后：不算“还没跑”，仍等 11-27', hol.kind === 'sched' && hol.at.toISOString() === '2026-11-27T22:15:00.000Z', JSON.stringify(hol));
+  check('感恩节当天收盘后：不算“还没跑”，仍等 11-27', hol.kind === 'sched' && hol.at.toISOString() === '2026-11-28T05:00:00.000Z', JSON.stringify(hol));
   const plain = paperNextRun({ status: 'active', lastRun: { ok: true, dataDate: '2026-11-09', at: '2026-11-09T22:30:00Z' } }, new Date('2026-11-10T02:00:00Z'));
-  check('普通交易日：下次是第二天 17:15，没有休市说明', plain.kind === 'sched' && plain.at.toISOString() === '2026-11-10T22:15:00.000Z' && !plain.closed, JSON.stringify(plain));
+  check('普通交易日：下次是第二天那个交易日结束（美东午夜），没有休市说明', plain.kind === 'sched' && plain.at.toISOString() === '2026-11-11T05:00:00.000Z' && !plain.closed, JSON.stringify(plain));
 }
 
 console.log(failed ? `\n${failed} 项失败` : '\n全部通过');

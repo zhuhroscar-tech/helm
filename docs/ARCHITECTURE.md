@@ -13,7 +13,7 @@ How Helm is put together, where it keeps state, and which mechanisms keep resear
     |   |  +---- /api/handoff, /api/ask, ---+   v
     |   |        /api/approval (agent token)  mcp/qc-mcp.mjs  (tools: projects, backtests, data, qlib, paper read, ask_user ...)
     |   |                                         |
-    |   +-- lib/paper.mjs (scheduler, ET 17:15)   +--> lib/engine.mjs  -- detached --> lib/run-backtest.mjs
+    |   +-- lib/paper.mjs (scheduler, after ET midnight)   +--> lib/engine.mjs  -- detached --> lib/run-backtest.mjs
     |        '-> lib/alpaca.mjs (paper-api only)  |        |                                  |
     |                                              |        v                                  v
     |                                              |   engine/fetch_data.py            LEAN launcher (.NET) in sandbox-exec
@@ -85,7 +85,7 @@ How Helm is put together, where it keeps state, and which mechanisms keep resear
 | Location | Contents |
 |---|---|
 | `projects/<id>/` | `project.json`, `main.py` and other `.py` files, `spec.md`, `holdout_log.json`, `backtests/<bid>/` (code snapshot, `meta.json`, LEAN `out/`, `sensitivity/`), `paper/<sessionId>/log.jsonl`, `research/` |
-| `data/` | `trials.jsonl` (trial ledger), `threads/` (conversations), `secrets/` (Alpaca key), `changes/` (agent edit snapshots), `mcp.json` (rewritten at each start), `qlib/`, `sandbox/`, `server.log`, `agents-backups/` |
+| `data/` | `trials.jsonl` (trial ledger), `threads/` (conversations), `secrets/` (AI and Alpaca keys on older installs; new installs keep them in `~/Library/Application Support/Helm/secrets`, see CONFIGURATION.md), `changes/` (agent edit snapshots), `mcp.json` (rewritten at each start), `qlib/`, `sandbox/`, `server.log`, `agents-backups/` |
 | `engine/Lean/`, `engine/.venv/` | Local LEAN checkout and build, Python environment (git-ignored) |
 | `engine/Lean/Data/` | LEAN data folder: equity daily zips, plus Helm-written `helm/macro/` and `helm/custom/` |
 | `~/.qlib/` | qlib US data, constituents, SEC fundamentals cache (shared with the older Quant Strategy project) |
@@ -99,7 +99,7 @@ How Helm is put together, where it keeps state, and which mechanisms keep resear
 - **Local server.** Bound to 127.0.0.1, `Host` checked. POST/DELETE need the per-start page token (injected only into `index.html`), a same-site `Origin` and `Sec-Fetch-Site: same-origin`; otherwise 403. Agent-to-server calls use a different token passed only to the MCP process. Page headers include a CSP without inline scripts. Request bodies are validated; malformed input yields 400, not 500. This is defence in depth, not protection from a hostile local process.
 - **Write token and web-only actions.** Starting or stopping paper sessions, connecting Alpaca, marking a backtest `main` by hand, and enabling deletion are web-only.
 - **Approval flow.** Every agent file edit or command passes `mcp__qc__approve` -> `lib/change-policy.mjs`. Free: research engine code (excluding research rules), new tests, skills, quick tests, read-only git/ls. Ask you first: deletes, platform code (`lib/`, `mcp/`, top-level `engine/` scripts), existing tests, `server.mjs`, page, `agents.json`, permissions, `workspace/CLAUDE.md`, `package.json`, installs, other commands. Refused: anything outside the repo, `.env`, secrets, `data/`, `projects/`, `.git/`. A pending approval times out to "deny" after 15 minutes.
-- **Sandbox.** Strategy code in LEAN and agent-runnable code (tests, auto-checks, qlib runs) execute under macOS `sandbox-exec`: no secrets, no access to the running Helm, limited write paths; strategies also get no network. If the sandbox is unavailable, free-to-edit actions tighten to "ask first". The sandbox rules were only text-checked on Linux according to `CHANGELOG.md`.
+- **Sandbox.** Strategy code in LEAN and agent-runnable code (tests, auto-checks, qlib runs) execute under macOS `sandbox-exec`: no secrets, no access to the running Helm, limited write paths; strategies also get no network. If the sandbox is unavailable, free-to-edit actions tighten to "ask first", and backtests refuse to run unless you set `HELM_EXEC_SANDBOX=off`. The sandbox rules were only text-checked on Linux according to `CHANGELOG.md`.
 - **Protected definitions.** `INTEGRITY` in `lib/change-policy.mjs` lists research-rule code (statistics, trial ledger, holdout log, validation, tuning, `helm_data.py`, the lint, the sandbox, parts of the qlib engine). Edits touching them need approval and show you the diff.
 - **Lint.** `engine/lint_strategy.py` rejects forbidden imports, `open`/`eval`/`exec`, dunder access, non-daily resolutions, file reads, private-attribute access on `helm_data` objects and more, and does not count as a trial. It is the first gate; the sandbox is the real one.
 - **Agent read deny-list.** `lib/agent-perms.mjs`: SSH, cloud and Claude credentials, `~/Library`, `.env*`, `*.pem`, `data/secrets`, `data/threads`, `data/server.log`. It is a deny-list, not an allow-list; `WebFetch` is unrestricted.
@@ -115,4 +115,4 @@ How Helm is put together, where it keeps state, and which mechanisms keep resear
 - **Forward test.** Paper trading freezes code on its first run day; only later returns count as out-of-sample.
 - **Point-in-time reads.** `HelmUniverse`, `HelmSignals`, `HelmMacro` and `HelmDataset` only return what was known strictly before the current day.
 
-See also [CONFIGURATION.md](CONFIGURATION.md), [ROADMAP.md](ROADMAP.md) and the internal review in [REVIEW-2026-11-14.md](REVIEW-2026-11-14.md).
+See also [CONFIGURATION.md](CONFIGURATION.md) and [ROADMAP.md](ROADMAP.md).

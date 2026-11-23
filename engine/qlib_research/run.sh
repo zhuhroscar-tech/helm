@@ -1,8 +1,16 @@
 #!/bin/bash
 # Launcher for the quant-strategy engine.
-# Finds an existing Python that already has qlib + lightgbm (reuse, don't reinstall),
-# caches the choice, and runs qs_pipeline.py from a neutral directory so a cloned
-# `qlib/` source folder in the project can never shadow the installed package.
+# Picks the Python to run qlib with, in this order:
+#   1. QS_PYTHON (if it has the stack)
+#   2. engine/.qlib-venv/bin/python   <- recommended dedicated env
+#   3. engine/.venv/bin/python        (if someone installed qlib there)
+#   4. the cached / system-wide search (legacy fallback)
+# and runs qs_pipeline.py from a neutral directory so a cloned `qlib/` source
+# folder in the project can never shadow the installed package.
+#
+# Create the dedicated env (Python 3.8-3.12; qlib has no wheels for newer):
+#   uv venv --python 3.11 engine/.qlib-venv
+#   uv pip install --python engine/.qlib-venv/bin/python pyqlib lightgbm matplotlib yfinance
 #
 #   run.sh run --target QQQ --workdir "/path/to/project"
 #   run.sh status --target QQQ --workdir "/path/to/project"
@@ -18,8 +26,15 @@ has_stack() {
   "$1" -I -c "import qlib, lightgbm, pandas, numpy, matplotlib" >/dev/null 2>&1
 }
 
+ENGINE_DIR="$(cd "$HERE/.." && pwd)"
+QLIB_VENV="$ENGINE_DIR/.qlib-venv/bin/python"
+
 find_python() {
   if [ -n "${QS_PYTHON:-}" ] && has_stack "$QS_PYTHON"; then echo "$QS_PYTHON"; return 0; fi
+  # dedicated envs first: never silently pick some unrelated system Python when one of these works
+  for c in "$QLIB_VENV" "$ENGINE_DIR/.venv/bin/python"; do
+    if [ -x "$c" ] && has_stack "$c"; then echo "$c"; return 0; fi
+  done
   if [ -f "$CACHE_DIR/python" ]; then
     local c; c="$(cat "$CACHE_DIR/python")"
     if [ -x "$c" ] && has_stack "$c"; then echo "$c"; return 0; fi
@@ -43,10 +58,19 @@ find_python() {
 
 PY="$(find_python || true)"
 if [ -z "$PY" ]; then
-  echo "No Python with qlib+lightgbm+pandas+matplotlib found." >&2
-  echo "Install into ONE interpreter (Python 3.8-3.12), e.g.:" >&2
-  echo "  python3.12 -m pip install pyqlib lightgbm matplotlib yfinance" >&2
-  echo "then re-run, or set QS_PYTHON=/path/to/python." >&2
+  {
+    echo "qlib is not installed: no Python with qlib + lightgbm + pandas + matplotlib was found."
+    if [ -n "${QS_PYTHON:-}" ]; then echo "QS_PYTHON=$QS_PYTHON is set but cannot import those packages."; fi
+    if [ -x "$QLIB_VENV" ]; then
+      echo "engine/.qlib-venv exists but is missing packages. Install them with:"
+      echo "  uv pip install --python \"$QLIB_VENV\" pyqlib lightgbm matplotlib yfinance"
+    else
+      echo "Create the dedicated research environment (Python 3.8-3.12), from the Helm folder:"
+      echo "  uv venv --python 3.11 engine/.qlib-venv"
+      echo "  uv pip install --python engine/.qlib-venv/bin/python pyqlib lightgbm matplotlib yfinance"
+    fi
+    echo "Then re-run, or set QS_PYTHON=/path/to/python in .env."
+  } >&2
   exit 3
 fi
 

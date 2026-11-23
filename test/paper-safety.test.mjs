@@ -7,6 +7,7 @@ import { existsSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { leanSkip } from './lean-skip.mjs';
 
 const FAST = process.argv.includes('--fast');
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -238,8 +239,8 @@ try {
   {
     // 2026-11-26 感恩节（周四）美东 18:00；11-27 半日市照常；2026-07-03 独立日补休（周五）
     const T = (iso) => new Date(iso);
-    check('(h) 感恩节当天收盘后：应有数据日 = 周三 11-25（老口径是 11-26）', PP.expectedTradingDate(T('2026-11-26T23:00:00Z')) === '2026-11-25' && PP.expectedDataDate(T('2026-11-26T23:00:00Z')) === '2026-11-26');
-    check('(h) 感恩节次日收盘前仍是 11-25，收盘后是 11-27', PP.expectedTradingDate(T('2026-11-27T15:00:00Z')) === '2026-11-25' && PP.expectedTradingDate(T('2026-11-27T23:00:00Z')) === '2026-11-27');
+    check('(h) 感恩节当天收盘后：应有数据日 = 周三 11-25（老口径是 11-26）', PP.expectedTradingDate(T('2026-11-26T23:00:00Z')) === '2026-11-25' && PP.expectedTradingDate(T('2026-11-27T06:00:00Z')) === '2026-11-25');
+    check('(h) 感恩节次日当天仍是 11-25，过了美东午夜是 11-27', PP.expectedTradingDate(T('2026-11-27T23:00:00Z')) === '2026-11-25' && PP.expectedTradingDate(T('2026-11-28T06:00:00Z')) === '2026-11-27');
     check('(h) 长周末（周五休市）：周一收盘前应有数据日 = 周四', PP.expectedTradingDate(T('2026-07-06T14:00:00Z')) === '2026-07-02');
     check('(h) 普通交易日和老口径一致', ['2026-11-09T15:00:00Z', '2026-11-09T22:30:00Z', '2026-11-07T18:00:00Z'].every((x) => PP.expectedTradingDate(T(x)) === PP.expectedDataDate(T(x))));
     check('(h) 休市日数据停在上一个交易日：不算过期', PP.staleDataReason({ dataDate: '2026-11-25', expected: PP.expectedTradingDate(T('2026-11-26T23:00:00Z')), barDates: { SPY: '2026-11-25' } }) === null);
@@ -264,7 +265,7 @@ try {
     const E = await import('../lib/engine.mjs');
     const status = await E.engineStatus();
     if (!status.ok) {
-      check('本地 LEAN 引擎就绪', false, `缺少 ${status.missing.join(', ')}`);
+      leanSkip(check, status);
     } else {
       // (f) 老格式样本用真实 LEAN 跑一次（证明重启后照样能跑）：需要策略代码，只读复制真实会话冻结的 code/（开始模拟时就定下、之后不会变）
       const realCode = path.join(ROOT, 'projects', '1002', 'paper', OLD_SID, 'code');

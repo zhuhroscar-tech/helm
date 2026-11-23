@@ -3,6 +3,7 @@
 import { mkdtemp, rm, mkdir, writeFile, readFile, cp } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { leanSkip } from './lean-skip.mjs';
 
 const FAST = process.argv.includes('--fast');
 const TMP = await mkdtemp(path.join(os.tmpdir(), 'helm-drift-'));
@@ -119,7 +120,7 @@ try {
     const E = await import('../lib/engine.mjs');
     const status = await E.engineStatus();
     if (!status.ok) {
-      check('本地 LEAN 引擎就绪', false, `缺少 ${status.missing.join(', ')}`);
+      leanSkip(check, status);
     } else {
       const code = `from AlgorithmImports import *
 class DriftTest(QCAlgorithm):

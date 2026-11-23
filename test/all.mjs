@@ -4,7 +4,12 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { sandboxReady, sandboxArgs, scrubEnv } from '../lib/exec-sandbox.mjs';
+import { mkdtempSync, rmSync } from 'node:fs';
+import os from 'node:os';
+// 沙盒规则文件写到临时目录，测试不往仓库的 data/sandbox 里写（子进程继承这个变量）
+const SB_DIR = process.env.HELM_SANDBOX_DIR ? null : mkdtempSync(path.join(os.tmpdir(), 'helm-test-sandbox-'));
+if (SB_DIR) process.env.HELM_SANDBOX_DIR = SB_DIR;
+const { sandboxReady, sandboxArgs, scrubEnv } = await import('../lib/exec-sandbox.mjs');
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
 const FAST = process.argv.includes('--fast');
@@ -37,6 +42,10 @@ const SUITES = [
   ['self-fix.test.mjs', [], []],
   ['tune.test.mjs', [], []],
   ['ask-user.test.mjs', [], []],
+  ['ai-connect.test.mjs', [], []],
+  ['translate.test.mjs', [], []],
+  ['deck.test.mjs', [], []],
+  ['project-names.test.mjs', [], []],
   ['contract.test.mjs', [], []],
   ['round2.test.mjs', [], []],
   ['sensitivity.test.mjs', [], ['--fast']],
@@ -44,6 +53,7 @@ const SUITES = [
   ['audit-fixes.test.mjs', [], []],
   ['p0-fixes.test.mjs', [], []],
   ['efficiency.test.mjs', [], []],
+  ['first-run.test.mjs', [], []],
   ['sandbox.test.mjs', [], null],
 ];
 // 清单里没写的 *.test.mjs 也会跑（两种模式都不带参数），免得新加的测试文件被悄悄漏掉。
@@ -68,5 +78,6 @@ for (const [file, full, fast] of SUITES) {
   if (r.error && r.error.code === 'ETIMEDOUT') console.log(`超时：${file} 超过 ${Math.round(TIMEOUT_MS / 60000)} 分钟，已停止`);
   if (r.status !== 0) failed.push(file);
 }
+if (SB_DIR) rmSync(SB_DIR, { recursive: true, force: true });
 console.log(failed.length ? `\n失败：${failed.join('、')}` : '\n全部测试文件通过');
 process.exit(failed.length ? 1 : 0);

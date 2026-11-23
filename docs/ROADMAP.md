@@ -1,6 +1,6 @@
 # Roadmap
 
-Derived only from `docs/REVIEW-2026-11-14.md` (the P0/P1/P2 list and the week-by-week sequencing) and the "not verified" and "known" notes in `CHANGELOG.md`. Nothing here is a new feature. Item numbers (#n) refer to the review.
+Derived only from an internal code review of 2026-11-14 (not published; its P0/P1/P2 list and week-by-week sequencing) and the "not verified" and "known" notes in `CHANGELOG.md`. Nothing here is a new feature. Item numbers (#n) refer to the review.
 
 ## Done
 

@@ -1,116 +1,201 @@
-# Getting started on macOS
+# Getting started
 
-This guide takes a clean Mac to a first backtest. Every command below comes from `README.md` (the Chinese source of truth), the `/api/health` hints in `server.mjs`, or `engine/qlib_research/run.sh`. Where the README does not say how to do something (for example how to install Node or `uv`), this guide says so rather than inventing a recipe.
+[中文](GETTING-STARTED.zh.md)
 
-The web UI is Chinese-only. Section 6 lists the Chinese labels you will meet.
+From a fresh clone to your first backtest.
 
-If you prefer automation: `scripts/setup.sh --check` reports what is missing and `scripts/setup.sh` installs it. The manual steps below are exactly what the script does.
+- **macOS only.** Tested on Apple Silicon. Intel Macs are untested. Linux and Windows are not supported (Helm's sandbox needs macOS `sandbox-exec`).
+- A first install needs about 2–3 GB of disk and 15–30 minutes, depending on your network. Most of it is waiting for downloads and one compile.
+- Helm itself is free and open source, but the agents use an AI model you pay for: a Claude subscription, Anthropic API usage, or a compatible provider (step 4).
 
-## 1. Prerequisites
+Helm runs entirely on your machine. The only thing that leaves it is the conversation with the AI model you connect in step 4.
 
-| Need | Check | Notes |
+## 1. What you need before starting
+
+| | How to check | If it's missing |
 |---|---|---|
-| macOS | `sw_vers` | Helm's sandboxing uses `sandbox-exec`. Without macOS, agent-edited code and research runs fall back to asking for your approval. |
-| Node 20+ | `node -v` | `package.json` requires `>=20`. The README does not say how to install it; use your usual method (nvm, Homebrew, nodejs.org). |
-| Git | `git --version` | Needed to fetch LEAN. |
-| Claude Code, logged in | `claude --version` | `npm install -g @anthropic-ai/claude-code`, then run `claude` once and complete login. |
-| `uv` | `uv --version` | Creates the Python 3.11 environment. The README does not say how to install it; Homebrew (`brew install uv`) is one option. |
-| .NET 10 SDK | `~/.dotnet/dotnet --version` | Installed in step 2 below. |
+| Node 20 or newer | `node -v` | `brew install node`, or the installer from nodejs.org |
+| Git | `git --version` | `xcode-select --install` |
+| Claude Code | `claude --version` | `curl -fsSL https://claude.ai/install.sh \| bash`, then run `claude` once to log in |
+| uv (Python tool) | `uv --version` | `brew install uv` (the setup script offers to do this). No Homebrew: `curl -LsSf https://astral.sh/uv/install.sh \| sh` ([details](https://docs.astral.sh/uv/getting-started/installation/)) |
 
-## 2. Install Helm's engine
+If you prefer npm: `npm install -g @anthropic-ai/claude-code`. With Node from the nodejs.org installer this often fails with `EACCES` (permission denied); use the install script above rather than `sudo`. After installing, open a new terminal so `claude` is on your PATH.
 
-From the repository root (the folder containing `server.mjs`):
+Claude Code is what actually runs the agents. You don't have to use it with a Claude subscription: an Anthropic API key or a compatible provider such as DeepSeek or Kimi also works, and you choose in step 4.
+
+## 2. Get the code and install the engine
 
 ```
-# .NET 10 SDK into ~/.dotnet
-curl -sSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel 10.0 --install-dir ~/.dotnet
-
-# LEAN source (skip the clone if engine/Lean already exists), then build
-git clone --depth 1 https://github.com/QuantConnect/Lean.git engine/Lean
-~/.dotnet/dotnet build engine/Lean/Launcher/QuantConnect.Lean.Launcher.csproj -c Release
-
-# Python 3.11 environment, versions pinned to LEAN's
-uv venv --python 3.11 engine/.venv
-uv pip install --python engine/.venv/bin/python numpy==1.26.4 pandas==2.3.3 scipy==1.13.1 matplotlib==3.8.4 scikit-learn==1.6.1 statsmodels==0.14.6 yfinance
+git clone https://github.com/zhuhroscar-tech/helm.git
+cd helm
+scripts/setup.sh --check
 ```
 
-Use a uv-managed Python 3.11 as shown. If `engine/.venv` is built on a Python without `libpython`, the health check reports `libpython` missing (see Troubleshooting).
+Downloading instead of cloning? **Code → Download ZIP** on GitHub works too. The unzipped folder is called `helm-main`, so use `cd helm-main` instead.
 
-There is nothing to `npm install`: Helm has no npm dependencies.
+`--check` only reports what's missing and changes nothing. When you're happy with the list, run it for real:
 
-## 3. Optional: qlib research engine and data
+```
+scripts/setup.sh
+```
 
-Needed only for idea tests, factor research and the index universes (S&P 500, Nasdaq 100). Plain ETF strategies written directly in LEAN do not need it.
+It shows each step and asks before doing it (`--yes` skips the questions). Nothing needs `sudo`, and everything goes into your home folder or the repo:
 
-- A Python (3.8-3.12) that has `qlib`, `lightgbm`, `pandas`, `numpy` and `matplotlib`. `engine/qlib_research/run.sh` searches common locations and prints its choice with `engine/qlib_research/run.sh --which-python`. Its own hint when none is found: `python3.12 -m pip install pyqlib lightgbm matplotlib yfinance`. To pin an interpreter, put `QS_PYTHON=/absolute/path/to/python` in `.env`.
-- qlib US daily data in `~/.qlib/qlib_data/us_data`, a directory that contains `calendars`, `features` and `instruments`. The README describes this folder (about 2.8 GB with SEC fundamentals and S&P 500 history caches, shared with the earlier "Quant Strategy" project) To get a starting copy, use qlib's own downloader: `python -m qlib.run.get_data qlib_data --target_dir ~/.qlib/qlib_data/us_data --region us` (see the qlib documentation for current options). That public snapshot is not kept up to date by Helm, and the SEC fundamentals and S&P 500 history caches are built by the research engine on first use.
+- the .NET 10 SDK, into `~/.dotnet` (about 650 MB)
+- the LEAN backtesting engine from QuantConnect, at a commit Helm is tested with, downloaded into `engine/Lean` and compiled (about 950 MB; the compile takes a few minutes)
+- a Python 3.11 environment in `engine/.venv` with the packages in `engine/requirements.txt` (about 370 MB)
 
-## 4. Optional: Alpaca paper keys
+Messages follow your system language (Chinese if `LANG` starts with `zh`, English otherwise).
 
-Only for broker-side paper trading; Helm's internal simulation needs no account.
+There is no `npm install`. Helm has no npm dependencies.
 
-1. On app.alpaca.markets, switch to a **Paper** account and generate an API key and secret.
-2. In Helm, open a finished backtest, click the start-paper-trading button (Chinese: 开始模拟实盘), choose the Alpaca paper account mode and enter the key in the dialog. This calls `/api/actions/alpaca-connect`.
-3. The key is stored in `data/secrets/alpaca.json` (mode 0600). Do not paste keys into agent chats; agents cannot read them and will not ask for them. Keys are never placed in environment variables for agents or LEAN.
+The script ends with `Required components are in place.` If it prints `Still missing: ...` instead, fix what it names and run `scripts/setup.sh --check` again.
 
-Alpaca mode only works from a `main` backtest that passed validation, or one you marked `main` yourself on the backtest page. Otherwise use the internal simulation. The endpoint is hard-wired to Alpaca's paper API, so real-money trading is impossible.
-
-## 5. First run
+## 3. Start Helm
 
 ```
 npm start
 ```
 
-Expected output: `Helm 已启动 -> http://localhost:4377` followed by the LEAN engine status (`就绪` means ready; otherwise it lists what is missing). Open http://localhost:4377.
+When the terminal prints the address `http://localhost:4377`, open it in your browser. Leave the terminal open; Ctrl+C stops Helm. (Parts of the startup log may be in Chinese. You don't need to read it: the page itself tells you whether anything is missing.)
 
-Optional settings go in `.env` (all optional, see `.env.example`): `PORT`, `CLAUDE_BIN`, `CLAUDE_MODEL`, `CLAUDE_EFFORT`, `DOTNET_BIN`. Do not commit `.env`.
+The first time you open it, a short setup guide walks you through the same checks as this page and then points out where everything is. You can reopen it any time: click **Settings** at the bottom left, then **Setup guide**.
 
-### Reading the health check
+The page opens in English if your browser is set to English. To switch language or light/dark mode, click **Settings** at the bottom left and use **Appearance and language**.
 
-`/api/health` (also shown in the page when something is missing; add `?refresh=1` to force a re-check, or use the re-check button in the UI) lists eight components. The first five are required, the last three optional.
+If something is still missing, the page shows an environment check with the exact command to run for each item. Fix it and click **Check again**. Two exceptions need a restart of Helm (Ctrl+C, then `npm start`): installing Claude Code, and editing `.env`.
 
-| id | Checks | Required |
+### Prefer an app?
+
+```
+macos/build.sh --install
+```
+
+This builds a small native Mac app from source and puts it in Applications. It starts the server for you, keeps running in the background when you close the window, and sends a notification when an agent is waiting on you. There is no downloadable app: you build it yourself, and it is ad-hoc signed, only for the Mac that built it. Details: [MACOS-APP.md](MACOS-APP.md).
+
+## 4. Connect an AI
+
+Click **AI** in the top bar. There are four choices:
+
+- **Auto**: use whatever `claude` is already logged in with. If you've run `claude` before and logged in, this just works.
+- **Claude subscription** (Pro, Max, Team): run `claude` once in a terminal and log in with that account first.
+- **Anthropic API key**: paste a key from console.anthropic.com. You pay per use.
+- **Other compatible API**: an endpoint that speaks the Anthropic Messages format, for example `https://api.deepseek.com/anthropic` with model `deepseek-chat`.
+
+Helm tests the connection before saving, so a wrong key fails immediately rather than halfway through a task. Keys are stored in `~/Library/Application Support/Helm/secrets/ai.json` (older installs: `data/secrets/ai.json`), readable only by you. The page and the agents never see them.
+
+A word on cheaper models: agents call many tools in a row, and weaker models tend to lose the thread on longer tasks. If results look confused, try a stronger model before blaming the idea.
+
+## 5. Your first strategy
+
+Open the chat on the right, pick **Lead**, and type something like:
+
+> Write a SPY 50/200 moving-average crossover strategy, create a project and backtest it.
+
+This one is a good first test because it only needs SPY prices, which download automatically.
+
+What happens next:
+
+1. **Spec.** Before writing code, the Lead writes a short rules sheet: universe, entries and exits, position size, costs, benchmark and dates. It's saved as the project's **Spec** tab. Skim it; this is where misunderstandings are cheapest to fix.
+2. **Questions.** If something in your idea could change the result, a question card appears in the chat. Answer it. If you don't, after 15 minutes the agent goes with the option it recommended and says so in its summary.
+3. **Code and backtest.** The Strategy Engineer writes LEAN code, the code is checked for unsafe imports, and the backtest runs on your machine. The first run takes a little longer while prices download.
+4. **Results.** The backtest page shows the equity curve, statistics, every order, and a robustness tab. The agent explains what it sees and whether the result held up.
+
+Everything an agent does is visible as it happens. If an agent wants to change Helm's own code or run a command outside the usual set, it asks first with a card you approve or reject. Deleting anything also needs the **Allow delete** switch under the input box, and that only lasts for one message.
+
+## 6. Which path an idea takes: LEAN and qlib
+
+Helm has two engines, but they are not two parallel routes. **LEAN is the trunk every idea goes through.** **qlib is an extra gate that stock-picking ideas can pass before LEAN**: it checks whether the idea showed any signal in the past.
+
+```
+Your idea
+ ├─ Timing: when to buy or sell (e.g. "go to cash when SPY drops below its 20-day average")
+ │     └──────────────────────────────────────────────┐
+ │                                                    ▼
+ └─ Stock picking: which stocks to hold       LEAN: write the strategy → backtest → checks → main version → paper trading
+       └→ qlib: is there a signal? ──signal──→ export daily scores; the strategy picks from them
+                  └─ no signal → stop here
+```
+
+**LEAN** (QuantConnect's open-source backtesting engine) turns the rules into code, backtests them on your machine, runs the statistical checks, sets a main version once they pass, and finally runs paper trading. Whatever the idea, the verdict is reached here.
+
+**qlib** (Microsoft's open-source quant research framework) is only for cross-sectional stock picking: ideas like "each month, pick a certain kind of stock from the S&P 500". It has two depths:
+
+| | What it does | When |
 |---|---|---|
-| `claude` | Claude Code CLI runs and reports a version | yes |
-| `dotnet` | .NET runtime at `~/.dotnet/dotnet` or `DOTNET_BIN` | yes |
-| `lean` | LEAN built in `engine/Lean/Launcher/bin/Release` | yes |
-| `python` | `engine/.venv/bin/python` exists | yes |
-| `libpython` | the venv's Python has a `libpython` dynamic library LEAN can load | yes |
-| `priceData` | local price files exist (count of tickers) | no, downloaded on first backtest |
-| `qlib` | a Python with qlib found via `engine/qlib_research/run.sh` | no |
-| `qlibData` | `~/.qlib/qlib_data/us_data` present | no |
+| Idea check | The Researcher writes the idea as 1–3 factor formulas and checks, on the dev period, whether higher-scoring stocks really did better. The verdict is Signal, Weak signal or No signal | First step for any stock-picking idea |
+| Full research | LightGBM and other models, with tests and a holdout, to see whether a model beats a single factor. Takes tens of minutes | After an idea check finds a signal, if you want to go further |
 
-Each failing item includes the command to fix it. After fixing, click re-check; no restart of the page is needed (a restart of `npm start` is, for a missing `claude`).
+If there is a signal, Helm exports the daily scores and each day's actual index members in a format LEAN can read, and the strategy picks stocks from those two (these are the `HelmSignals` and `HelmUniverse` you may see in a project description). That way the backtest only uses stocks that were really in the index at the time, not just the companies that survived to today.
 
-## 6. First idea to backtest
+**No signal means stop.** That's a result, not a failure: forcing a no-signal idea into a strategy mostly fits noise. Don't keep trying new formulas either. Helm records every formula you try, and the more you try, the higher the bar for calling something a signal.
 
-1. On the home page, choose an agent and type your idea in plain language. For a first run, the orchestrator (总控) is the natural entry: it writes the rules, creates the project and hands each stage to a specialist. Example prompts that ship with the agents: "write a SPY 50/200 moving-average crossover strategy, create a project and backtest it" (an ETF strategy needs no qlib), or "test: stocks that fell a lot in the past month without a volume spike rebound afterwards" (a stock-selection idea, needs qlib).
-2. Before any code, the agent writes a rules table (规则说明, saved as `spec.md` in the project) covering universe, entries/exits, sizing, rebalancing, costs, benchmark and dates. Read it. If an ambiguity could change results, a question card appears; answer it, or let it default after 15 minutes.
-3. For stock-selection ideas, the researcher first runs an **idea test** on the development period only. "No signal" is a valid end of the road; do not ask for variants until something passes, because each formula tried raises the bar for later ones.
-4. The engineer writes LEAN code, a lint runs (`engine/lint_strategy.py`), and the backtest runs on the local engine. The first run downloads the tickers' daily prices.
-5. Open the backtest page: equity curve, statistics, orders, the rules table as archived with that run, and the robustness tab. The agent should check for `Invalid` orders and tell you which backtest is `main` and whether it passed validation.
-6. Run the statistical validation. Only after the development-period conclusion is settled should the holdout period be run, once.
-7. Optionally freeze the backtest as a paper-trading session, or copy the code to QuantConnect with the export dialog (strategies using `helm_data` cannot run there).
+### Choosing on the page
 
-Permission cards appear when an agent wants to edit Helm's own code or run a command; deleting anything needs the "allow deletion" switch under the input box, valid for one message.
+Under the **Write down an idea** box on the home page there are three options. They pick the path:
 
-## Troubleshooting
+| Option | Path | Time |
+|---|---|---|
+| **Auto** (default) | The Lead decides: stock picking goes through qlib first, timing goes straight to LEAN | Depends on the idea |
+| **Fast** | LEAN only: code, backtest, checks | Minutes |
+| **Deep** | Stock picking goes straight to full qlib research, then exports signals into LEAN | Tens of minutes |
 
-| Symptom | Cause and fix |
+If unsure, use **Auto**.
+
+The progress bar at the top of a project has four steps: Idea check → Backtest → Checks → Paper trading. Timing projects don't go through qlib, so the first step shows "skipped". That's expected.
+
+qlib is optional; see [Optional: qlib research engine](#optional-qlib-research-engine) below. ETF, single-stock and timing strategies don't need it.
+
+## 7. Where to go from there
+
+**Stock-picking ideas** start with an idea check (see the previous section). Many end at "no signal", which saves you from tuning a strategy that was never there.
+
+**Dev period and holdout.** Helm keeps the most recent stretch of data aside. You develop on the earlier part; the holdout is run once at the end. Running it repeatedly until it looks good defeats the purpose, so Helm records every attempt.
+
+**Paper trading.** On a finished backtest, **Start paper trading** freezes the code and re-runs it after each US market close to see how it does on days it has never seen. You can also send the orders to an Alpaca paper account. Helm only talks to Alpaca's paper endpoint, so it can't place real trades.
+
+**Presenting to your team or clients.** **Make a deck** at the top right of a project: pick a template (you can upload your firm's PowerPoint template), approve the outline, and a few minutes later you have PowerPoint and PDF files whose numbers all come from the backtest records. PDF needs LibreOffice: `brew install --cask libreoffice`.
+
+**Idea log** and **Research pipeline** in the sidebar show everything you've tried and where each idea stands.
+
+**Language.** Names, specs, reports and chats are translated into the UI language in the background using your AI connection, so someone who doesn't read Chinese can follow work done in Chinese, and the reverse. Translations are cached; each piece of text is translated once.
+
+## Optional: qlib research engine
+
+Optional. Only needed for stock-picking research (idea tests, factor research) and the S&P 500 / Nasdaq 100 universes. ETF and single-ticker strategies don't need it, and you can add it later.
+
+**1. A Python with qlib and LightGBM.** Use a separate environment, `engine/.qlib-venv` (not `engine/.venv`, whose versions are pinned for LEAN). From the Helm folder, with uv (already installed by the setup script):
+
+```
+brew install libomp                       # LightGBM needs it on macOS
+uv venv --python 3.11 engine/.qlib-venv
+uv pip install --python engine/.qlib-venv/bin/python pyqlib lightgbm matplotlib yfinance
+```
+
+qlib needs Python 3.8–3.12. Without Homebrew, skip `libomp`; if LightGBM then fails to import, install libomp another way. Helm finds `engine/.qlib-venv` by itself; `engine/qlib_research/run.sh --which-python` shows which Python it uses. To use a different Python, set `QS_PYTHON=/full/path/to/python` in `.env` (create it with `cp .env.example .env`) and restart Helm.
+
+**2. Data.** Prices for research are downloaded from Yahoo Finance automatically and cached in `~/.qlib/qs_cache/`. A qlib US dataset in `~/.qlib/qlib_data/us_data` is optional extra: it supplies historical index membership and prices for stocks that have since been delisted. qlib's own downloader fetches a public community snapshot:
+
+```
+engine/.qlib-venv/bin/python -m qlib.run.get_data qlib_data --target_dir ~/.qlib/qlib_data/us_data --region us
+```
+
+Be aware that this snapshot is old (it ends around November 2020), is not maintained by Helm, and may be unavailable. Helm fills later prices from Yahoo, and results that depend on index membership after 2020 carry the caveats listed under "Data coverage and limits" in the README.
+
+## When something goes wrong
+
+| What you see | What to do |
 |---|---|
-| Startup says the port is in use ("Helm 可能已经在运行了") | Another Helm is on port 4377. Open http://localhost:4377, or start on another port: `PORT=4378 node server.mjs`. |
-| Page shows grey placeholders and a toast that the page expired | The server restarted and the per-start page token changed. Refresh the page. |
-| Health says `claude` missing | Install and log in (`npm install -g @anthropic-ai/claude-code`, then `claude`), confirm with `claude --version`. If it is not on PATH, add `CLAUDE_BIN=/absolute/path/to/claude` to `.env`. Restart Helm. |
-| Health says `dotnet` missing | Run the dotnet-install command from step 2. If installed elsewhere, set `DOTNET_BIN=/absolute/path/dotnet` in `.env`. |
-| Health says `lean` missing | Clone (if `engine/Lean` is absent) and run the `dotnet build` from step 2. |
-| Health says `python` missing | Run the `uv venv` and `uv pip install` commands from step 2. |
-| Health says `libpython` missing | The venv's Python lacks the dynamic library. Rename or delete `engine/.venv`, recreate it with `uv venv --python 3.11 engine/.venv`, and reinstall the packages. |
-| `qlib` or `qlibData` marked missing | Optional. Run `engine/qlib_research/run.sh --which-python` to see what it lacks; set `QS_PYTHON` if needed; place data under `~/.qlib/qlib_data/us_data`. |
-| Backtest cannot find a ticker | Prices are downloaded automatically for tickers appearing literally in the code. For dynamically built ticker lists, ask the agent to `fetch_data` them first. |
-| Alpaca paper session did not trade today | By design: no orders when data download failed or is stale; the reason is logged and it retries after 3 hours. Also only `main` backtests that passed validation (or that you marked) can start Alpaca mode. |
-| Paper sessions did not run while Helm was closed | They run only while Helm is open (checked every 10 minutes, after 17:15 US Eastern on trading days). The latest day is caught up at next start, without duplicate orders. |
-| Agent edits to `lib/` or `server.mjs` have no effect | Those need a restart of `npm start`; the UI says so. |
-| Ctrl+C and a backtest keeps running | Intended: backtests, research and sensitivity runs are detached and finish on their own. |
-| Need to reset | `.env` and `data/` are never touched by `scripts/setup.sh`. To rebuild the engine only, remove `engine/.venv` or `engine/Lean` yourself and re-run setup. |
+| `端口 4377 已被占用` ("port in use") at startup | Another copy of Helm is probably running. Open http://localhost:4377, or start on another port with `PORT=4378 npm start`. |
+| The page goes grey and says it expired | The server restarted. Refresh the page. |
+| Environment check: `claude` missing | Install Claude Code (`curl -fsSL https://claude.ai/install.sh \| bash`), then restart Helm. If it's installed somewhere unusual, create `.env` from the example (`cp .env.example .env`), set `CLAUDE_BIN=/full/path/to/claude` in it (`which claude` shows the path), and restart Helm. |
+| Environment check: `libpython` missing | The Python environment was built on a Python without its shared library. Delete `engine/.venv` and run `scripts/setup.sh` again. |
+| Backtests refuse to run and mention the sandbox | Helm couldn't use macOS `sandbox-exec`. See [Sandbox](CONFIGURATION.md#sandbox-helm_exec_sandbox). |
+| `npm install -g` fails with `EACCES` | Use the Claude Code install script instead: `curl -fsSL https://claude.ai/install.sh \| bash`. |
+| The AI dialog says the key is invalid | Copy the key again with no spaces. For a compatible API, check the address ends in `/anthropic` (not `/v1/messages`) and the model name is exact. |
+| The agent stops with a login or quota message | Open **AI** in the top bar and check the connection; **Test saved connection** tells you what's wrong. |
+| Content still shows in the other language | Translation happens in the background and the page refreshes on its own. If it never changes, check the AI connection. |
+| Paper trading didn't run while Helm was closed | It only runs while Helm is open. The missed day is caught up on next start, without duplicate orders. |
+| Ctrl+C but a backtest keeps going | Intended. Backtests and research run as separate processes and finish on their own. |
 
-More questions: [FAQ](FAQ.md), [configuration reference](CONFIGURATION.md), [architecture](ARCHITECTURE.md).
+Still stuck: [FAQ](FAQ.md) · [all settings](CONFIGURATION.md) · [how it fits together](ARCHITECTURE.md)

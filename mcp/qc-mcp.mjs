@@ -212,12 +212,13 @@ const TOOLS = [
   },
   {
     name: 'create_project', description: '新建项目（Python）。可以同时提供 main.py 的完整代码，会写入并编译。一个策略想法只建一个项目：基准、对照、消融都放在同一个项目里（另写 benchmark.py 等文件，或直接用 LEAN 自带的基准曲线），不要为它们另建项目。',
-    inputSchema: { type: 'object', properties: { name: str, description: str, code: { ...str, description: 'main.py 完整代码（可选）' } }, required: ['name'] },
-    async run({ name, description, code }) {
+    inputSchema: { type: 'object', properties: { name: { ...str, description: '项目名，用用户写想法时的语言' }, nameEn: { ...str, description: '项目的英文名（英文界面显示它）。name 不是英文时必须给' },
+      nameZh: { ...str, description: '项目的中文名（中文界面显示它）。name 不是中文时必须给' }, description: str, code: { ...str, description: 'main.py 完整代码（可选）' } }, required: ['name'] },
+    async run({ name, nameEn, nameZh, description, code }) {
       if (code && String(process.env.HELM_WRITE_ONLY || '').trim()) {
         return '错误：你不能写策略代码。先不带 code 建项目、存好 spec.md，再用 handoff 交给 engineer（策略工程师）写 main.py。';
       }
-      const r = await E.createProject({ name, description, code });
+      const r = await E.createProject({ name, nameEn, nameZh, description, code });
       if (!r.success) return failText(r);
       const p = r.projects[0];
       let out = `已创建项目「${p.name}」，projectId=${p.projectId}`;
@@ -226,8 +227,8 @@ const TOOLS = [
     },
   },
   {
-    name: 'update_project', description: '修改项目名称或说明。',
-    inputSchema: { type: 'object', properties: { ...P, name: str, description: str }, required: ['projectId'] },
+    name: 'update_project', description: '修改项目名称或说明（含英文名 nameEn / 中文名 nameZh，网页按界面语言显示）。',
+    inputSchema: { type: 'object', properties: { ...P, name: str, nameEn: str, nameZh: str, description: str }, required: ['projectId'] },
     async run(a) { const r = await E.updateProject(a); return r.success ? '已更新' : failText(r); },
   },
   {

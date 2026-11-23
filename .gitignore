@@ -3,14 +3,19 @@ data/
 projects/
 engine/Lean/
 engine/.venv/
+engine/.qlib-venv/
 node_modules/
 graphify-out/
 __pycache__/
 .DS_Store
 helm.config.json
 
-# 个人笔记，不公开
-private-notes/
-WashUAGENT.md
 .claude/
 *.log
+macos/.build/
+macos/dist/
+
+# internal notes and reviews (not published)
+notes/
+# demo videos: attached to GitHub Releases instead of the repo
+demo/

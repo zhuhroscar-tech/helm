@@ -46,7 +46,7 @@ The table in the README under 「结构」 is the map. In short: `server.mjs` (H
 4. **Statistics and tuning rules need an explicit owner decision.** This covers the thresholds in `lib/stats.mjs`, the registry, PBO and parameter selection (`lib/tune.mjs`, `qs_core.py`), and the validation gate. In a pull request, state the before and after numbers for anything that moves.
 5. **Sandbox and approval policy.** Strategy code runs under macOS `sandbox-exec` with no network and no home-directory access. Agent edits and commands are gated by `lib/change-policy.mjs` and `lib/agent-perms.mjs`. A change that moves a protected file into the free list, runs agent or LEAN code outside the sandbox, or passes `ALPACA_*` or other secrets to a child process needs owner review.
 6. **Paper trading only.** `lib/alpaca.mjs` is pinned to the paper endpoint. Orders come only from a paper session that the user starts in the web page. Agents cannot place or cancel orders. Do not add any other broker or live-trading path.
-7. **No secrets in the repo.** Keys stay in `data/secrets/`, which is never committed. Tests and fixtures use fake values.
+7. **No secrets in the repo.** Keys live outside the repo (`~/Library/Application Support/Helm/secrets/` on new installs; older installs keep the gitignored `data/secrets/`) and are never committed. Tests and fixtures use fake values.
 
 ## Commit messages
 

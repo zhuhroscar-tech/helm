@@ -4,6 +4,7 @@ import { isTradingDay } from '../lib/market-calendar.mjs';
 import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { leanSkip } from './lean-skip.mjs';
 
 const FAST = process.argv.includes('--fast');
 const TMP = await mkdtemp(path.join(os.tmpdir(), 'helm-smoke-'));
@@ -77,7 +78,7 @@ function fakeResult({ years = 3, drift = 0, vol = 0.01, benchDrift = 0, seed = 1
   const pos = PP.positionsFromOrders({ 1: { symbol: { value: 'SPY' }, quantity: 10, status: 3 }, 2: { symbol: { value: 'SPY' }, quantity: -10, status: 3 }, 3: { symbol: { value: 'QQQ' }, quantity: 5, status: 3 }, 4: { symbol: { value: 'QQQ' }, quantity: 3, status: 1 }, 5: { symbol: { value: 'TLT' }, quantity: 9, status: 7 } });
   check('从订单推出持仓（已成交 + 待执行，忽略无效单）', !pos.filled.SPY && pos.filled.QQQ === 5 && pos.pending.QQQ === 3 && !pos.filled.TLT && !pos.pending.TLT, JSON.stringify(pos));
   check('交易日：周六用周五的数据', PP.expectedDataDate(new Date('2026-11-07T18:00:00Z')) === '2026-11-06');
-  check('交易日：17:15 之前用前一天，之后用当天', PP.expectedDataDate(new Date('2026-11-09T15:00:00Z')) === '2026-11-06' && PP.expectedDataDate(new Date('2026-11-09T22:00:00Z')) === '2026-11-06' && PP.expectedDataDate(new Date('2026-11-09T22:30:00Z')) === '2026-11-09');
+  check('交易日：美东当天过完（午夜）才算当天（LEAN 只跑到美东的昨天）', PP.expectedDataDate(new Date('2026-11-09T15:00:00Z')) === '2026-11-06' && PP.expectedDataDate(new Date('2026-11-09T22:30:00Z')) === '2026-11-06' && PP.expectedDataDate(new Date('2026-11-10T04:50:00Z')) === '2026-11-06' && PP.expectedDataDate(new Date('2026-11-10T05:10:00Z')) === '2026-11-09');
   // LEAN 的权益点：午夜点是前一天的收盘值，收盘点是当天的
   const T = (iso) => Date.parse(iso) / 1000;
   const dd = PP.daily([[T('2026-11-05T05:00:00Z'), 100], [T('2026-11-05T21:00:00Z'), 101], [T('2026-11-06T05:00:00Z'), 101], [T('2026-11-07T05:00:00Z'), 102], [T('2026-11-08T05:00:00Z'), 102]]);
@@ -124,7 +125,7 @@ async function waitDone(projectId, backtestId, timeoutMs = 5 * 60 * 1000) {
 if (!FAST) {
   const status = await E.engineStatus();
   if (!status.ok) {
-    check('本地 LEAN 引擎就绪', false, `缺少 ${status.missing.join(', ')}`);
+    leanSkip(check, status);
   } else {
     const p = await E.createProject({ name: 'Smoke Test' });
     const pid = p.projects[0].projectId;

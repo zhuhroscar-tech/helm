@@ -11,7 +11,10 @@
   <script src="/theme.js"></script>
   <link rel="stylesheet" href="/styles.css">
   <script src="/calendar.js" defer></script>
+  <script src="/ctxmenu.js" defer></script>
   <script src="/app.js" defer></script>
+  <script src="/onboarding.js" defer></script>
+  <script src="/decks.js" defer></script>
 </head>
 <body>
   <div class="app" id="app">
@@ -57,7 +60,7 @@
       </a>
       <a class="side-link" href="#/agents" data-nav="agents">
         <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="5.5" cy="5.5" r="2.2" fill="none" stroke="currentColor" stroke-width="1.3"/><circle cx="11" cy="6.5" r="1.8" fill="none" stroke="currentColor" stroke-width="1.3"/><path d="M1.8 13c.4-2.3 1.9-3.6 3.7-3.6s3.3 1.3 3.7 3.6M9.4 10.2c.5-.4 1-.6 1.6-.6 1.5 0 2.6 1.1 2.9 3.2" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
-        Agents
+        <span data-i18n="ux050">Agents</span>
       </a>
       <button type="button" class="new-project" id="newProjectBtn">
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
@@ -139,12 +142,13 @@
 
   <div class="scrim" id="scrim" aria-hidden="true"></div>
   <dialog class="modal" id="projectModal" aria-labelledby="pmTitle">
-    <form method="dialog" id="projectForm">
+    <form method="dialog" id="projectForm" novalidate>
       <h2 id="pmTitle" data-i18n="h014">New project</h2>
-      <label class="field"><span data-i18n="h033">Name</span><input id="pmName" required maxlength="120" placeholder="E.g. SPY moving-average crossover" autocomplete="off" data-i18n-attr="placeholder:h034"></label>
+      <label class="field"><span data-i18n="h033">Name</span><input id="pmName" maxlength="120" aria-describedby="pmNameErr" placeholder="E.g. SPY moving-average crossover" autocomplete="off" data-i18n-attr="placeholder:h034"><span class="field-err" id="pmNameErr" role="alert" hidden data-i18n="ux075">Give the project a name of at least 2 characters.</span></label>
       <label class="field"><span data-i18n="h035">Description (optional)</span><input id="pmDesc" maxlength="300" placeholder="One line: what it tests" autocomplete="off" data-i18n-attr="placeholder:h036"></label>
       <fieldset class="templates">
         <legend data-i18n="h037">Starting code</legend>
+        <p class="modal-hint tpl-hint" data-i18n="ux076">Buy and hold is preselected: it is the smallest strategy that runs, so you can backtest right away and change it from there.</p>
         <label><input type="radio" name="tpl" value="buyhold" checked><span><b data-i18n="h038">Buy and hold</b><i data-i18n="h039">The simplest skeleton; write the rest yourself</i></span></label>
         <label><input type="radio" name="tpl" value="sma"><span><b data-i18n="h040">Moving-average crossover</b><i data-i18n="h041">SPY 50/200-day averages</i></span></label>
         <label><input type="radio" name="tpl" value="rotation"><span><b data-i18n="h042">Momentum rotation</b><i data-i18n="h043">Hold the strongest ETF each month</i></span></label>
@@ -197,7 +201,7 @@
   <dialog class="modal" id="paperModal" aria-labelledby="ppH">
     <form method="dialog" id="paperForm">
       <h2 id="ppH" data-i18n="h075">Start paper trading</h2>
-      <p class="modal-hint" style="margin-top:-4px"><span data-i18n="h076">Freezes the code of backtest "</span><b id="ppSource"></b><span data-i18n="h077">" and reruns it on the latest data every trading day after the US close (from 17:15 Eastern; Helm must be running). Returns after the freeze are out of sample.</span></p>
+      <p class="modal-hint" style="margin-top:-4px"><span data-i18n="h076">Freezes the code of backtest "</span><b id="ppSource"></b><span data-i18n="h077">" and reruns it on the latest data after every trading day ends (after midnight Eastern; Helm must be running). Returns after the freeze are out of sample.</span></p>
       <fieldset class="templates">
         <legend data-i18n="h078">Where to simulate</legend>
         <label><input type="radio" name="ppMode" id="ppSim" value="sim" checked><span><b data-i18n="h079">Helm internal simulation</b><i data-i18n="h080">No account needed. Helm keeps its own books, and fills follow LEAN's rules (filled at the close)</i></span></label>
@@ -205,18 +209,39 @@
       </fieldset>
       <p class="modal-hint warn-t" id="ppGate" hidden></p>
       <div class="pp-alpaca"><span id="ppAlpacaState"></span></div>
-      <div id="ppConnect" class="pp-connect" hidden>
-        <p class="modal-hint"><span data-i18n="h083">On</span> <b>app.alpaca.markets</b> <span data-i18n="h084">switch to the</span> <b>Paper</b> <span data-i18n="h085">account, generate an API key and enter it below. The key is stored only on this computer (data/secrets, readable only by your user), is never shown on the web page, and is never shown to agents. Helm connects only to the paper environment; live keys won't work.</span></p>
-        <label class="field"><span>API Key ID</span><input id="ppKey" autocomplete="off" spellcheck="false" placeholder="PK…"></label>
-        <label class="field"><span>Secret Key</span><input id="ppSecret" type="password" autocomplete="new-password" spellcheck="false"></label>
-        <div class="modal-actions"><button type="button" class="btn" id="ppConnectBtn" data-i18n="h086">Verify and connect</button></div>
-      </div>
       <label class="field" id="ppCapWrap"><span data-i18n="h087">Starting cash (USD)</span><input id="ppCapital" type="number" min="1000" step="1000" value="100000"></label>
       <p class="modal-hint warn-t" id="ppAlpacaWarn" hidden data-i18n="h088">On start it immediately places orders in the Alpaca paper account to reach the target holdings, then rebalances daily. It trades only this simulation's positions: other holdings in the account are left alone and not counted in strategy capital (starting cash = account equity − the market value of those holdings). No orders are placed on a day when the data update failed or is stale. One Alpaca account can follow only one simulation at a time.</p>
       <label class="field"><span data-i18n="h072">Name (optional)</span><input id="ppName" maxlength="120" placeholder="E.g. GEM main version forward test" autocomplete="off" data-i18n-attr="placeholder:h089"></label>
       <div class="modal-actions">
         <button type="button" class="btn" id="ppCancel" data-i18n="h045">Cancel</button>
         <button type="submit" class="btn primary" id="ppStart" data-i18n="h090">Start</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog class="modal" id="aiModal" aria-labelledby="aiH">
+    <form method="dialog" id="aiForm">
+      <h2 id="aiH" data-i18n="h092">AI connection</h2>
+      <p class="modal-hint" data-i18n="h093">Choose how Helm's agents reach a model. Keys are stored only on this computer (data/secrets, readable only by your user), are never shown on the page again, and agents can't read them.</p>
+      <p class="modal-hint" id="aiState"></p>
+      <fieldset class="templates">
+        <legend data-i18n="h094">Connect with</legend>
+        <label><input type="radio" name="aiMode" value="auto"><span><b data-i18n="h095">Automatic</b><i data-i18n="h096">Use whatever Claude Code is already signed in with (default)</i></span></label>
+        <label><input type="radio" name="aiMode" value="subscription"><span><b data-i18n="h097">Claude subscription (Pro / Max / Team)</b><i data-i18n="h098">Uses your plan's usage. Run claude in a terminal once and sign in with that account</i></span></label>
+        <label><input type="radio" name="aiMode" value="apiKey"><span><b data-i18n="h099">Anthropic API key</b><i data-i18n="h100">Pay as you go. Create a key at console.anthropic.com</i></span></label>
+        <label><input type="radio" name="aiMode" value="custom"><span><b data-i18n="h101">Other compatible API</b><i data-i18n="h102">Any endpoint that speaks the Anthropic Messages API: DeepSeek, Kimi, GLM, OpenRouter, a LiteLLM gateway and others</i></span></label>
+      </fieldset>
+      <div id="aiKeyWrap" hidden>
+        <label class="field" id="aiUrlWrap"><span data-i18n="h103">Endpoint URL</span><input id="aiUrl" placeholder="https://api.deepseek.com/anthropic" autocomplete="off" spellcheck="false"></label>
+        <label class="field"><span>API key</span><input id="aiKey" type="password" autocomplete="new-password" spellcheck="false"></label>
+        <p class="modal-hint" id="aiKeyKeep" hidden data-i18n="h104">Leave empty to keep the saved key.</p>
+        <label class="field" id="aiModelWrap"><span data-i18n="h105">Model ID</span><input id="aiModel" placeholder="deepseek-chat" autocomplete="off" spellcheck="false" maxlength="120"></label>
+        <p class="modal-hint warn-t" id="aiCustomNote" data-i18n="h106">Agents use this model for everything, and the model picker in chat is ignored. Helm relies on tool calls, so pick a strong model that handles tools well.</p>
+      </div>
+      <p class="modal-hint" id="aiSubNote" hidden data-i18n="h107">Saving checks that Claude Code is signed in. If it isn't, run claude in a terminal, sign in, then save again.</p>
+      <div class="modal-actions">
+        <button type="button" class="btn" id="aiTest" data-i18n="h108">Test saved connection</button>
+        <button type="button" class="btn" id="aiCancel" data-i18n="h045">Cancel</button>
+        <button type="submit" class="btn primary" id="aiSave" data-i18n="h109">Test and save</button>
       </div>
     </form>
   </dialog>

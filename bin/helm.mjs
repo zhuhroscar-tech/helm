@@ -77,6 +77,23 @@ function which(bin) {
   return null;
 }
 
+// engine/requirements.txt: one `name==version` per line, `#` comments. Shared with scripts/setup.sh and /api/health.
+function readRequirements() {
+  const f = path.join(ROOT, 'engine', 'requirements.txt');
+  if (!existsSync(f)) return [];
+  return readFileSync(f, 'utf8').split('\n').map((l) => l.replace(/#.*/, '').trim()).filter(Boolean)
+    .map((l) => { const [name, version = ''] = l.split('=='); return { name: name.trim(), version: version.trim() }; });
+}
+
+// returns "name (have X, want Y)" for every package that is missing or at another version
+function pythonMismatches(py, reqs) {
+  const code = 'import sys, json, importlib.metadata as m\nout = {}\nfor n in sys.argv[1:]:\n    try: out[n] = m.version(n)\n    except Exception: out[n] = None\nprint(json.dumps(out))';
+  const r = spawnSync(py, ['-I', '-c', code, ...reqs.map((x) => x.name)], { encoding: 'utf8', timeout: 30000 });
+  let have = {};
+  try { have = JSON.parse(r.stdout); } catch { return ['could not run engine/.venv/bin/python']; }
+  return reqs.filter((x) => have[x.name] !== x.version).map((x) => `${x.name} (have ${have[x.name] || 'none'}, want ${x.version})`);
+}
+
 function doctor() {
   const cfg = load();
   const results = [];
@@ -88,17 +105,23 @@ function doctor() {
   let cv = '';
   if (claude) { const r = spawnSync(claude, ['--version'], { encoding: 'utf8', timeout: 10000 }); cv = (r.stdout || '').trim(); }
   add('claude command', Boolean(claude), claude ? `${claude} ${cv}` : `"${claudeBin}" not found`,
-    'npm install -g @anthropic-ai/claude-code, run `claude` to log in; or set claude.bin / CLAUDE_BIN to its absolute path.');
+    'curl -fsSL https://claude.ai/install.sh | bash  (or: npm install -g @anthropic-ai/claude-code), run `claude` to log in, then restart Helm; or set claude.bin / CLAUDE_BIN to its absolute path.');
   const dotnetBin = cfg.values['engine.dotnetBin'] || path.join(os.homedir(), '.dotnet', 'dotnet');
   const dn = which(dotnetBin);
   add('dotnet', Boolean(dn), dn || `${dotnetBin} not found`,
     'curl -sSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel 10.0 --install-dir ~/.dotnet  (or set engine.dotnetBin / DOTNET_BIN)');
   const dll = path.join(ROOT, 'engine', 'Lean', 'Launcher', 'bin', 'Release', 'QuantConnect.Lean.Launcher.dll');
   add('LEAN launcher built', existsSync(dll), existsSync(dll) ? 'engine/Lean/Launcher/bin/Release' : 'QuantConnect.Lean.Launcher.dll missing',
-    'git clone --depth 1 https://github.com/QuantConnect/Lean.git engine/Lean && ~/.dotnet/dotnet build engine/Lean/Launcher/QuantConnect.Lean.Launcher.csproj -c Release');
+    'scripts/setup.sh  (downloads the pinned LEAN commit into engine/Lean and builds it with ~/.dotnet/dotnet build engine/Lean/Launcher/QuantConnect.Lean.Launcher.csproj -c Release)');
   const py = path.join(ROOT, 'engine', '.venv', 'bin', 'python');
+  const pipFix = 'uv pip install --python engine/.venv/bin/python -r engine/requirements.txt';
   add('engine/.venv python', existsSync(py), existsSync(py) ? 'engine/.venv/bin/python' : 'engine/.venv/bin/python missing',
-    'uv venv --python 3.11 engine/.venv && uv pip install --python engine/.venv/bin/python numpy==1.26.4 pandas==2.3.3 scipy==1.13.1 matplotlib==3.8.4 scikit-learn==1.6.1 statsmodels==0.14.6 yfinance');
+    `uv venv --python 3.11 engine/.venv && ${pipFix}`);
+  if (existsSync(py)) {
+    const reqs = readRequirements();
+    const bad = reqs.length ? pythonMismatches(py, reqs) : ['engine/requirements.txt missing'];
+    add('Python packages (engine/requirements.txt)', bad.length === 0, bad.length ? bad.join(', ') : `${reqs.length} pinned packages`, pipFix);
+  }
   add('config valid', cfg.errors.length === 0, cfg.errors.length ? cfg.errors.join('; ') : `${cfg.fileLoaded ? cfg.file : 'defaults + env'}${cfg.warnings.length ? ` (${cfg.warnings.length} warning(s))` : ''}`,
     'Run `helm config` and fix the listed errors.');
   let failed = 0;

@@ -5,6 +5,7 @@
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { leanSkip } from './lean-skip.mjs';
 
 const LEAN = process.argv.includes('--lean');
 const TMP = await mkdtemp(path.join(os.tmpdir(), 'helm-consistency-'));
@@ -174,7 +175,7 @@ async function waitDone(projectId, backtestId, timeoutMs = 5 * 60 * 1000) {
 }
 if (LEAN) {
   const status = await E.engineStatus();
-  if (!status.ok) check('本地 LEAN 引擎就绪', false, `缺少 ${status.missing.join(', ')}`);
+  if (!status.ok) leanSkip(check, status);
   else {
     for (const [label, code] of [['买入持有（默认模板）', undefined], ['均线交叉（有平仓交易）', E.TEMPLATES.sma]]) {
       const p = await E.createProject({ name: `Consistency ${label}`, ...(code ? { code } : {}) });

@@ -16,6 +16,40 @@ Values from the file are copied into the matching environment variable only when
 
 Secret settings are redacted (`********`) in `helm config`.
 
+### The `.env` file
+
+There is no `.env` by default. To use one, copy the example and uncomment what you need:
+
+```
+cp .env.example .env
+```
+
+The usual reason is `CLAUDE_BIN=/absolute/path/to/claude` when Helm can't find Claude Code. Restart Helm after editing `.env` (it is read once at start). `.env` is git-ignored, and agents and sandboxed code cannot read it.
+
+## Where keys and data are stored
+
+| What | Where |
+|---|---|
+| AI key and Alpaca paper keys | New installs store keys in `~/Library/Application Support/Helm/secrets/` (`ai.json`, `alpaca.json`; folder 0700, files 0600), outside the repo, which often sits in an iCloud-synced Desktop or Documents folder. Older installs keep `data/secrets/`: if a key file is already there, it is used and not moved. Override with `HELM_AI_FILE` / `HELM_ALPACA_FILE`. |
+| Strategy projects, backtests, paper-trading logs | `projects/` (`HELM_PROJECTS_DIR`) |
+| Conversations | `data/threads/` (`HELM_THREADS_DIR`) |
+| Trial ledger | `data/trials.jsonl` (`HELM_TRIALS_FILE`) |
+| Translations, deck settings, agent change snapshots | `data/i18n/`, `data/deck/`, `data/changes/` |
+| LEAN price data | `engine/Lean/Data/` (`HELM_LEAN_DATA`) |
+| qlib data and research caches (optional) | `~/.qlib/`, `~/.cache/quant-strategy/` |
+| Mac app server log | `~/Library/Logs/Helm/server.log` |
+
+`projects/` and `data/` are git-ignored. Nothing is uploaded anywhere; only the conversation with the AI model you connect leaves your Mac (plus price, macro and SEC downloads).
+
+## Sandbox (`HELM_EXEC_SANDBOX`)
+
+Strategy code written by agents runs inside LEAN under macOS `sandbox-exec`: no network, no home folder, no secrets. Agent-run tests and research runs use similar sandboxes.
+
+- `on` (default): if `sandbox-exec` is unavailable (not macOS, or the rules fail to compile), backtests refuse to run, and agent commands that would normally run freely ask for your approval instead.
+- `off`: backtests run strategy code **without** the sandbox, and those agent commands always ask for approval. Only the static lint (`engine/lint_strategy.py`) stands between strategy code and your files. Use it only on a machine without `sandbox-exec` and only with code you have read.
+
+Set it in `.env` (`HELM_EXEC_SANDBOX=off`) or in `helm.config.json` as `security.execSandbox`.
+
 ## Reference
 
 | Key | Env var | Type / range | Default | Description |
@@ -33,7 +67,7 @@ Secret settings are redacted (`********`) in `helm config`.
 | `storage.projectsDir` | `HELM_PROJECTS_DIR` | path | (empty) | Where strategy projects are stored. Empty = projects/.<br>策略项目存放目录。留空 = projects/。 |
 | `storage.threadsDir` | `HELM_THREADS_DIR` | path | (empty) | Where chat threads are stored. Empty = data/threads/.<br>对话记录存放目录。留空 = data/threads/。 |
 | `storage.trialsFile` | `HELM_TRIALS_FILE` | path | (empty) | Trial (multiple-testing) ledger file. Empty = data/trials.jsonl.<br>尝试次数（多重检验）登记文件。留空 = data/trials.jsonl。 |
-| `paper.alpacaFile` | `HELM_ALPACA_FILE` | path | (empty) | Alpaca paper-trading credentials file. Empty = data/secrets/alpaca.json.<br>Alpaca 模拟盘密钥文件。留空 = data/secrets/alpaca.json。 |
+| `paper.alpacaFile` | `HELM_ALPACA_FILE` | path | (empty) | Alpaca paper-trading credentials file. Empty = data/secrets/alpaca.json if it already exists, else ~/Library/Application Support/Helm/secrets/alpaca.json.<br>Alpaca 模拟盘密钥文件。留空 = 已有的 data/secrets/alpaca.json，没有就用 ~/Library/Application Support/Helm/secrets/alpaca.json。 |
 | `paper.alpacaTimeoutMs` | `HELM_ALPACA_TIMEOUT_MS` | int 1000..120000 | `15000` | Timeout of one Alpaca API request (ms).<br>单次 Alpaca 接口请求的超时（毫秒）。 |
 | `paper.alpacaBackoffMs` | `HELM_ALPACA_BACKOFF_MS` | int 0..30000 | `1000` | Base wait between Alpaca retries (ms).<br>Alpaca 请求重试之间的基础等待（毫秒）。 |
 | `qlib.python` | `QS_PYTHON` | path | (empty) | Python with qlib installed, for research. Empty = auto-detect.<br>研究用的、装了 qlib 的 Python。留空 = 自动查找。 |
@@ -41,6 +75,7 @@ Secret settings are redacted (`********`) in `helm config`.
 | `qlib.secUserAgent` (secret) | `QS_SEC_USER_AGENT` | string | (empty) | User-Agent (name + email) sent to SEC EDGAR for fundamentals downloads.<br>下载 SEC 财报基本面时发给 EDGAR 的 User-Agent（姓名 + 邮箱）。 |
 | `qlib.ideaRegistry` | `QS_IDEA_REGISTRY` | path | (empty) | Idea registry file. Empty = ~/.qlib/qs_cache/idea_registry.jsonl.<br>想法登记文件。留空 = ~/.qlib/qs_cache/idea_registry.jsonl。 |
 | `qlib.sp500PitFile` | `HELM_SP500_PIT` | path | (empty) | S&P 500 point-in-time membership file. Empty = ~/.qlib/qs_cache/membership/sp500_pit.txt.<br>S&P 500 历史成分股文件。留空 = ~/.qlib/qs_cache/membership/sp500_pit.txt。 |
+| `reports.soffice` | `HELM_SOFFICE` | path | (empty) | LibreOffice soffice, used to turn generated decks into PDF. Empty = auto-detect.<br>把生成的汇报转成 PDF 用的 LibreOffice soffice。留空 = 自动查找。 |
 
 ## CLI
 
@@ -61,6 +96,11 @@ Not part of the schema and not accepted in `helm.config.json`:
 - `HELM_SANDBOX_ASSUME`: Tests: pretend the sandbox is available/unavailable.
 - `HELM_AGENTS_FILE`: Tests: use another agents.json.
 - `HELM_MCP_CONFIG`: Tests: use another MCP config file (default data/mcp.json).
+- `HELM_AI_FILE`: Tests: use another AI-connection file (default: existing data/secrets/ai.json, else ~/Library/Application Support/Helm/secrets/ai.json).
+- `HELM_TRANSLATE`: =0 turns off translating user/agent content into the UI language.
+- `HELM_TRANSLATIONS_FILE`: Tests: use another translation cache (default data/i18n/translations.json).
+- `HELM_DECK_DIR`: Tests: where deck settings, template and logo live (default data/deck).
+- `HELM_AI_TEST_TIMEOUT_MS`: Timeout of the AI connection test request (default 20000).
 - `HELM_CHANGE_ROOT`: Tests: root directory for the change-approval policy.
 - `HELM_CHANGE_TESTS`: Tests: fake test runner for the change-approval flow.
 - `HELM_TEST_TIMEOUT_MS`: Tests: per-file timeout of test/all.mjs.

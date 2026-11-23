@@ -132,7 +132,8 @@ try {
   check('/api/health：每项有 ok / required / zh / detail，没就绪的带 hint', shapeOk, JSON.stringify((hj.components || []).find((c) => typeof c.detail !== 'string') || ''));
   const reqMissing = (hj.components || []).filter((c) => c.required && !c.ok).map((c) => c.id);
   check('/api/health：ok 和 missing 只看必需项，可选项进 optionalMissing', hj.ok === (reqMissing.length === 0) && JSON.stringify(hj.missing) === JSON.stringify(reqMissing) && Array.isArray(hj.optionalMissing) && hj.optionalMissing.every((id) => !hj.components.find((c) => c.id === id).required), JSON.stringify({ ok: hj.ok, missing: hj.missing, optionalMissing: hj.optionalMissing }));
-  check('/api/health：详情里不带用户主目录的绝对路径', !(h.text || JSON.stringify(hj)).includes(os.homedir()), os.homedir());
+  // installDir / setupCommand 是故意给的安装目录（网页引导里显示 cd "<installDir>" && scripts/setup.sh），其余字段不带主目录
+  check('/api/health：详情里不带用户主目录的绝对路径', !JSON.stringify({ ...hj, installDir: undefined, setupCommand: undefined }).includes(os.homedir()), os.homedir());
   check('/api/health：假的 claude 可用', (hj.components.find((c) => c.id === 'claude') || {}).ok === true && /fake/.test(hj.components.find((c) => c.id === 'claude').detail));
   const st = await req('GET', '/api/status');
   check('/api/health 和 /api/status 的引擎结论一致', st.json && want.slice(1, 5).every((id) => st.json.engine.missing.includes(id) === hj.missing.includes(id)), JSON.stringify(st.json && st.json.engine));
@@ -203,11 +204,16 @@ try {
   check('合法请求不受影响', okProj.status === 200 && okProj.json.success === true, okProj.text.slice(0, 100));
 
   /* ---- /api/health 的提示：能复制粘贴的中文操作，和 README 的安装步骤一致 ---- */
-  const HINT_MUST = { dotnet: /dotnet-install\.sh.*--channel 10\.0.*~\/\.dotnet/, lean: /git clone --depth 1 https:\/\/github\.com\/QuantConnect\/Lean\.git engine\/Lean.*dotnet build engine\/Lean\/Launcher\/QuantConnect\.Lean\.Launcher\.csproj -c Release/, python: /uv venv --python 3\.11 engine\/\.venv.*uv pip install --python engine\/\.venv\/bin\/python numpy==1\.26\.4/, libpython: /uv venv --python 3\.11 engine\/\.venv/, claude: /claude --version.*CLAUDE_BIN/, qlib: /run\.sh --which-python/, qlibData: /us_data/ };
+  // 提示首选 scripts/setup.sh；原始命令（LEAN 固定版本、requirements.txt）放在 cmd 里
+  const HINT_MUST = { dotnet: /scripts\/setup\.sh/, lean: /scripts\/setup\.sh/, python: /scripts\/setup\.sh/, libpython: /scripts\/setup\.sh/, claude: /claude\.ai\/install\.sh.*重启 Helm.*CLAUDE_BIN/, qlib: /run\.sh --which-python/, qlibData: /us_data/ };
+  const CMD_MUST = { dotnet: /dotnet-install\.sh.*--channel 10\.0.*~\/\.dotnet/, lean: /Lean\.git engine\/Lean && git -C engine\/Lean checkout [0-9a-f]{40}.*dotnet build engine\/Lean\/Launcher\/QuantConnect\.Lean\.Launcher\.csproj -c Release/, python: /uv venv --python 3\.11 engine\/\.venv.*-r engine\/requirements\.txt/ };
   const hp = await req('GET', '/api/health?refresh=1');
   const hc = hp.json.components;
   const hintBad = Object.entries(HINT_MUST).filter(([id, re]) => { const c = hc.find((x) => x.id === id); return !c || c.ok || !/[\u4e00-\u9fa5]/.test(c.hint) ? false : !re.test(c.hint); }).map(([id]) => id);
-  check('/api/health：没就绪的项，hint 里有 README 里的命令', hintBad.length === 0, hintBad.join(','));
+  check('/api/health：没就绪的项，hint 指向 scripts/setup.sh', hintBad.length === 0, hintBad.join(','));
+  const cmdBad = Object.entries(CMD_MUST).filter(([id, re]) => { const c = hc.find((x) => x.id === id); return c && !c.ok && !re.test(c.cmd || ''); }).map(([id]) => id);
+  check('/api/health：没就绪的项，cmd 里是原始命令（LEAN 固定版本、requirements.txt）', cmdBad.length === 0, cmdBad.join(','));
+  check('/api/health：带安装目录 installDir', hp.json.installDir === ROOT, hp.json.installDir);
   const t0 = Date.now();
   await Promise.all(Array.from({ length: 20 }, () => req('GET', '/api/health')));
   check('/api/health 连发 20 次（有缓存）很快返回', Date.now() - t0 < 3000, `${Date.now() - t0}ms`);
@@ -216,7 +222,7 @@ try {
   const dup = spawn(process.execPath, [path.join(ROOT, 'server.mjs')], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let dupLog = ''; dup.stdout.on('data', (c) => { dupLog += c; }); dup.stderr.on('data', (c) => { dupLog += c; });
   const dupCode = await new Promise((res) => { dup.on('close', res); setTimeout(() => { dup.kill('SIGKILL'); res('timeout'); }, 10000); });
-  check('端口被占用：退出码 1，提示 Helm 可能已经在运行 + 地址', dupCode === 1 && /已被占用/.test(dupLog) && /可能已经在运行/.test(dupLog) && dupLog.includes(`http://localhost:${PORT}`) && !/at .*node:/.test(dupLog), `exit=${dupCode} ${dupLog.slice(-200)}`);
+  check('端口被占用：退出码 1，提示 Helm 可能已经在运行 + 地址', dupCode === 1 && /已被占用|already in use/.test(dupLog) && /可能已经在运行|may already be running/.test(dupLog) && dupLog.includes(`http://localhost:${PORT}`) && !/at .*node:/.test(dupLog), `exit=${dupCode} ${dupLog.slice(-200)}`);
   check('启动信息里有访问地址', serverLog.includes(`http://localhost:${PORT}`), serverLog.slice(0, 150));
   const sse = await new Promise((resolve) => {
     const r = http.request(`${BASE}/api/events`, { method: 'GET' }, (res) => { res.on('data', () => {}); res.on('end', () => resolve('ended')); res.on('error', () => resolve('error')); });
@@ -225,7 +231,7 @@ try {
     setTimeout(() => resolve('hung'), 8000);
   });
   await sleep(300);
-  check('SIGTERM：事件流被关闭（不挂起），进程正常退出（码 0）', sse !== 'hung' && serverExit === 0 && /正在关闭/.test(serverLog), `sse=${sse} exit=${serverExit} ${serverLog.slice(-200)}`);
+  check('SIGTERM：事件流被关闭（不挂起），进程正常退出（码 0）', sse !== 'hung' && serverExit === 0 && /正在关闭|shutting down/.test(serverLog), `sse=${sse} exit=${serverExit} ${serverLog.slice(-200)}`);
 } catch (e) {
   check('测试过程没有异常', false, `${e.stack}\n${serverLog.slice(-600)}`);
 }

@@ -1,0 +1,20 @@
+# Python packages for engine/.venv (Python 3.11, the version LEAN expects).
+# Single source of truth: scripts/setup.sh, `npm run doctor` and the page's
+# environment check all read this file. Keep one `name==version` per line.
+#
+#   uv pip install --python engine/.venv/bin/python -r engine/requirements.txt
+
+# LEAN's Python runtime (versions follow LEAN's own pins)
+numpy==1.26.4
+pandas==2.3.3
+scipy==1.13.1
+matplotlib==3.8.4
+scikit-learn==1.6.1
+statsmodels==0.14.6
+
+# price downloads (engine/fetch_data.py)
+yfinance==1.8.0
+
+# research decks (engine/deck/)
+python-pptx==1.0.2
+pypdfium2==5.15.2

@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { leanSkip } from './lean-skip.mjs';
 
 const FAST = process.argv.includes('--fast');
 const TMP = await mkdtemp(path.join(os.tmpdir(), 'helm-sens-'));
@@ -306,7 +307,7 @@ class S(QCAlgorithm):
   /* ---- 10. 真实 LEAN：参数通路（只在完整模式跑）---- */
   if (!FAST) {
     const status = await E.engineStatus();
-    if (!status.ok) check('本地 LEAN 引擎就绪', false, `缺少 ${status.missing.join(', ')}`);
+    if (!status.ok) leanSkip(check, status);
     else {
       const SMA = `from AlgorithmImports import *
 
