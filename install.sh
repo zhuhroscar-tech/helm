@@ -17,6 +17,10 @@
 #   HELM_BRANCH=main       which branch to install    HELM_NO_APP=1 / --no-app  don't build the Mac app
 #   HELM_REPO=<git url>    install from a fork        HELM_NO_START=1 / --no-start  don't open Helm at the end
 #
+# Note: --yes also says yes to running the official installers it would otherwise ask about (Anthropic's
+# Claude Code installer and, in scripts/setup.sh, Microsoft's dotnet-install.sh), fetched with curl.
+# Updating an existing install fetches from its own `origin` remote (HELM_REPO is only used for a fresh clone).
+#
 # Messages follow your system language (LANG starting with zh = Chinese, else English).
 
 # Everything is inside main(), called on the last line: if the download is cut off halfway,
@@ -62,7 +66,7 @@ main() {
   }
 
   say "$(m 'Helm installer — a local quant research console (macOS).' 'Helm 安装程序：本机量化研究控制台（macOS）。')"
-  say "$(m "Install folder: $DIR    Source: $REPO ($BRANCH)" "安装位置：$DIR    来源：$REPO（$BRANCH）")"
+  say "$(m "Install folder: $DIR    Source: $REPO ($BRANCH)" "安装位置：$DIR    来源：${REPO}（${BRANCH}）")"
 
   # ---------------------------------------------------------------- 1. system
   step "$(m 'Checking your Mac' '检查这台 Mac')"
@@ -118,11 +122,17 @@ main() {
     if [ -n "$(git -C "$DIR" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
       say "  $(m 'Helm is already installed and has local code changes, so it was not updated (your changes are kept).' \
                  'Helm 已经装过，而且代码有本地改动，所以这次没有更新（你的改动保持不变）。')"
+    elif [ "$(git -C "$DIR" rev-parse --abbrev-ref HEAD 2>/dev/null)" != "$BRANCH" ]; then
+      # 用户自己切到了别的分支：不替他切回来
+      say "  $(m "Helm is already installed on another branch ($(git -C "$DIR" rev-parse --abbrev-ref HEAD 2>/dev/null)), so it was not updated." \
+                 "Helm 已经装过，现在在另一个分支（$(git -C "$DIR" rev-parse --abbrev-ref HEAD 2>/dev/null)）上，所以这次没有更新。")"
     else
-      say "  $(m 'Already installed: updating' '已经装过：更新到最新') ($BRANCH)"
-      git -C "$DIR" fetch --quiet origin "$BRANCH"
-      git -C "$DIR" checkout --quiet "$BRANCH" 2>/dev/null || git -C "$DIR" checkout --quiet -b "$BRANCH" "origin/$BRANCH"
-      git -C "$DIR" merge --ff-only --quiet "origin/$BRANCH" || say "  $(m 'Could not fast-forward; kept your current version.' '没法快进更新；保留当前版本。')"
+      say "  $(m 'Already installed: updating' '已经装过：更新到最新') (${BRANCH})"
+      if git -C "$DIR" fetch --quiet origin "$BRANCH"; then
+        git -C "$DIR" merge --ff-only --quiet "origin/$BRANCH" || say "  $(m 'Could not fast-forward; kept your current version.' '没法快进更新；保留当前版本。')"
+      else
+        say "  $(m 'Could not download the update (network?); kept your current version.' '没能下载更新（网络问题？）；保留当前版本。')"
+      fi
     fi
   elif [ -e "$DIR" ] && [ -n "$(ls -A "$DIR" 2>/dev/null)" ]; then
     fail "$(m "$DIR already exists and is not empty. Move it away, or set HELM_DIR to another folder." "$DIR 已经存在而且不是空的。请把它移走，或者用 HELM_DIR 换一个文件夹。")"
@@ -169,8 +179,8 @@ main() {
     say "  $(m "Start Helm:  cd $DIR && npm start   then open http://localhost:4377" "启动 Helm：cd $DIR && npm start   然后打开 http://localhost:4377")"
   fi
   say "  $(m 'Update later: run the same install command again.' '以后更新：再运行一次同样的安装命令。')"
-  say "  $(m "Uninstall: delete $DIR, Helm.app and ~/Library/Application Support/Helm (your projects live in $DIR/projects)." \
-             "卸载：删掉 $DIR、Helm.app 和 ~/Library/Application Support/Helm（你的项目在 $DIR/projects 里）。")"
+  say "  $(m "Uninstall: delete $DIR, Helm.app, ~/Library/Application Support/Helm and ~/Library/Logs/Helm (your projects live in $DIR/projects)." \
+             "卸载：删掉 ${DIR}、Helm.app、~/Library/Application Support/Helm 和 ~/Library/Logs/Helm（你的项目在 $DIR/projects 里）。")"
 
   if [ "$NO_START" != "1" ]; then
     if [ -n "$app" ]; then

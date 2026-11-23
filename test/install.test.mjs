@@ -1,7 +1,7 @@
 // 一行安装脚本（install.sh）测试：node test/install.test.mjs
 // 不联网、不装任何东西：从本地的假「远端仓库」克隆，uname / sw_vers / open / claude / curl / swift 都用替身，
 // scripts/setup.sh 和 macos/build.sh 也是假的（只记录被怎样调用）。
-import { mkdtemp, rm, writeFile, mkdir, chmod, readFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, mkdir, chmod, readFile, readdir, symlink } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { spawn, execFileSync } from 'node:child_process';
 import os from 'node:os';
@@ -45,7 +45,12 @@ const SWIFT_DIR = path.join(TMP, 'swift-bin');
 await mkdir(SWIFT_DIR);
 await sh(path.join(SWIFT_DIR, 'swift'), 'echo fake');
 
-const basePath = (extra = []) => [...extra, BIN, path.dirname(process.execPath), '/usr/bin', '/bin'].join(':');
+// 系统目录的替身：链接 /usr/bin 里除 swift 以外的全部命令。装了 Xcode 命令行工具的 Mac 上 /usr/bin/swift 是真的，
+// 直接把 /usr/bin 放进 PATH 的话，「没有 swift」这一条永远测不到（会去真的构建 App）
+const SYS_BIN = path.join(TMP, 'sys-bin');
+await mkdir(SYS_BIN);
+for (const n of await readdir('/usr/bin')) if (n !== 'swift' && n !== 'swiftc') await symlink(path.join('/usr/bin', n), path.join(SYS_BIN, n)).catch(() => {});
+const basePath = (extra = []) => [...extra, BIN, path.dirname(process.execPath), SYS_BIN, '/bin'].join(':');
 let homeN = 0;
 async function run({ env = {}, input = null, home = null, paths = [CLAUDE_BIN_DIR], args = [], viaPipe = false, scriptText = null } = {}) {
   const HOME = home || path.join(TMP, `home${++homeN}`);
