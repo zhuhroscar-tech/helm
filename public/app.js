@@ -243,6 +243,128 @@ function openQcDialog(files, ctx = {}) {
   }
 }
 
+// 「叠加 Qlib 选股」：预检 → 智能体评估出 2–4 个方案 → Kahoot 式色块让用户选 → 交给总控。
+// 色块颜色 + 形状一起区分（不只靠颜色）；键盘 1–4 选方案、0 选「不加这一层」、Enter 确认、Esc 关闭。
+const LY_TILES = [['red', '▲'], ['blue', '◆'], ['yellow', '●'], ['green', '■']];
+function openLayerModal() {
+  const projectId = S.route.projectId;
+  if (!projectId) return;
+  const st = { phase: 'check', pc: null, layer: null, sel: null, busy: false, timer: null, err: null, ready: null };
+  const { d, close } = openModal({ cls: 'layer-dlg', labelId: 'lyT', html: `<div class="cd-body"><h2 id="lyT">${_t('ly_title')}</h2><div class="ly-body" aria-live="polite"></div></div>`,
+    onClick: async (e, cl) => {
+      if (e.target.closest('[data-ly-close]')) { cl(); return; }
+      if (st.busy) return;
+      if (e.target.closest('[data-ly-start]')) { start(); return; }
+      if (e.target.closest('[data-ly-prev]')) { st.phase = 'run'; poll(st.ready); return; }
+      if (e.target.closest('[data-ly-back]')) { st.sel = null; render(); return; }
+      if (e.target.closest('[data-ly-retry]')) { start(); return; }
+      const t = e.target.closest('[data-ly-opt]');
+      if (t) { st.sel = t.dataset.lyOpt; render(); return; }
+      if (e.target.closest('[data-ly-go]')) choose();
+    },
+    onClose: () => { clearTimeout(st.timer); document.removeEventListener('keydown', onKey, true); } });
+  const box = d.querySelector('.ly-body');
+  const opts = () => (st.layer && st.layer.result ? st.layer.result.options : []);
+  function onKey(e) {
+    if (!d.open || st.phase !== 'pick' || st.busy || e.target.closest('input, textarea')) return;
+    const list = opts();
+    if (/^[1-4]$/.test(e.key)) { const o = list.filter((x) => x.kind === 'layer')[Number(e.key) - 1]; if (o) { st.sel = o.id; render(); e.preventDefault(); } }
+    else if (e.key === '0') { st.sel = 'none'; render(); e.preventDefault(); }
+    else if (e.key === 'Enter' && st.sel && !e.target.closest('button')) { choose(); e.preventDefault(); }
+  }
+  document.addEventListener('keydown', onKey, true);
+  const pitLabel = (p) => (p === 'pit' ? _t('ly_pit') : p === 'partial' ? _t('ly_pit_part') : _t('ly_pit_no'));
+  const riskLabel = (r) => _t(r === 'high' ? 'ly_risk_h' : r === 'low' ? 'ly_risk_l' : 'ly_risk_m');
+  function tileHTML(o, i) {
+    if (o.kind === 'none') return `<button type="button" class="ly-tile ly-none${st.sel === o.id ? ' sel' : ''}${st.sel && st.sel !== o.id ? ' dim' : ''}" data-ly-opt="none" aria-pressed="${st.sel === o.id}"><span class="ly-key">0</span><span class="ly-shape" aria-hidden="true">✕</span><span class="ly-tx"><b>${esc(o.title)}</b><i>${esc(o.tests)}</i></span></button>`;
+    const [color, shape] = LY_TILES[i % 4];
+    return `<button type="button" class="ly-tile ly-${color}${st.sel === o.id ? ' sel' : ''}${st.sel && st.sel !== o.id ? ' dim' : ''}" data-ly-opt="${esc(o.id)}" aria-pressed="${st.sel === o.id}">
+      <span class="ly-key">${i + 1}</span><span class="ly-shape" aria-hidden="true">${shape}</span>
+      <span class="ly-tx"><b>${esc(o.title)}</b><i>${esc(o.tests)}</i>
+      <span class="ly-badges"><em>${esc(o.replaces)} → ${esc(o.universeLabel || o.universe)}</em><em>${_t('ly_trials', { n: o.trials })}</em><em>${riskLabel(o.risk)}</em></span></span></button>`;
+  }
+  function detailHTML(o) {
+    if (o.kind === 'none') return `<div class="ly-detail"><p>${_t('ly_none_d')}</p><div class="modal-actions"><button type="button" class="btn" data-ly-back>${_t('ly_back')}</button><button type="button" class="btn primary" data-ly-go>${_t('ly_keep')}</button></div></div>`;
+    return `<div class="ly-detail"><h3>${esc(o.title)}</h3>
+      ${o.how ? `<p>${esc(o.how)}</p>` : ''}
+      <dl class="ly-dl">
+        <dt>${_t('ly_d_signal')}</dt><dd>${o.signalType === 'full' ? _t('ly_sig_full') : _t('ly_sig_idea')}${o.signal ? ` · ${esc(o.signal)}` : ''}</dd>
+        ${o.holdings ? `<dt>${_t('ly_d_hold')}</dt><dd>${esc(o.holdings)}</dd>` : ''}
+        <dt>${_t('ly_d_data')}</dt><dd>${esc(o.universeLabel || o.universe)} · ${pitLabel(o.pit)}${o.dataReady === false ? ` · ${_t('ly_prep')}` : ''}</dd>
+        <dt>${_t('ly_d_trials')}</dt><dd>${_t('ly_trials', { n: o.trials })} · ${_t('ly_trials_d')}</dd>
+        ${o.risks && o.risks.length ? `<dt>${_t('ly_d_risks')}</dt><dd><ul>${o.risks.map((r) => `<li>${esc(r)}</li>`).join('')}</ul></dd>` : ''}
+      </dl>
+      <p class="meta">${_t('ly_guard')}</p>
+      <div class="modal-actions"><button type="button" class="btn" data-ly-back>${_t('ly_back')}</button><button type="button" class="btn primary" data-ly-go>${_t('ly_go')}</button></div></div>`;
+  }
+  function render() {
+    let h = '';
+    if (st.phase === 'check') h = `<p class="meta">${_t('ly_checking')}</p>`;
+    else if (st.phase === 'fail') h = `<div class="error-box"><p style="margin:0">${esc(st.err || '')}</p></div><div class="modal-actions"><button type="button" class="btn" data-ly-close>${_t('k0029')}</button></div>`;
+    else if (st.phase === 'intro') {
+      const legs = st.pc.legs.map((l) => `<span class="ly-chip"><b>${esc(l.etf)}</b> → ${esc(l.label)} <i>${pitLabel(l.pit)}${l.ready === false ? ` · ${_t('ly_prep')}` : ''}</i></span>`).join('');
+      h = `<p>${_t('ly_intro', { v: esc(st.pc.backtest ? st.pc.backtest.name : '') })}</p><div class="ly-chips">${legs}</div>
+        <ol class="qc-list"><li>${_t('ly_s1')}</li><li>${_t('ly_s2')}</li><li>${_t('ly_s3')}</li></ol>
+        <p class="meta">${_t('ly_cost')}</p>
+        <div class="modal-actions">${st.ready ? `<button type="button" class="btn" data-ly-prev>${_t('ly_prev')}</button>` : ''}<button type="button" class="btn" data-ly-close>${_t('k0033')}</button><button type="button" class="btn primary" data-ly-start>${_t('ly_start')}</button></div>`;
+    } else if (st.phase === 'run') {
+      h = `<div class="ly-wait"><div class="ly-shapes" aria-hidden="true">${LY_TILES.map(([c, s2]) => `<span class="ly-${c}">${s2}</span>`).join('')}</div><p>${_t('ly_running')}</p><p class="meta">${_t('ly_running_d')}</p></div>
+        <div class="modal-actions"><button type="button" class="btn" data-ly-close>${_t('ly_bg')}</button></div>`;
+    } else if (st.phase === 'error') {
+      h = `<div class="error-box"><p style="margin:0">${esc(st.err || '')}</p></div><div class="modal-actions"><button type="button" class="btn" data-ly-close>${_t('k0029')}</button><button type="button" class="btn primary" data-ly-retry>${_t('ly_retry')}</button></div>`;
+    } else if (st.phase === 'pick') {
+      const list = opts();
+      const layers = list.filter((o) => o.kind === 'layer');
+      const none = list.find((o) => o.kind === 'none');
+      const sel = list.find((o) => o.id === st.sel);
+      h = `${st.layer.result.summary ? `<p class="ly-sum">${esc(st.layer.result.summary)}</p>` : ''}
+        ${layers.length ? '' : `<p class="meta">${_t('ly_nofit')}</p>`}
+        <div class="ly-grid${layers.length === 1 ? ' one' : ''}">${layers.map((o, i) => tileHTML(o, i)).join('')}</div>
+        ${none ? tileHTML(none, 4) : ''}
+        ${sel ? detailHTML(sel) : `<p class="meta ly-hint">${_t('ly_hint')}</p>`}`;
+    }
+    box.innerHTML = h;
+    if (st.phase === 'pick' && st.sel) { const dt = box.querySelector('.ly-detail'); if (dt) dt.scrollIntoView({ block: 'nearest' }); }
+  }
+  async function poll(layerId) {
+    clearTimeout(st.timer);
+    const r = await safePost('/api/actions/layer-read', { projectId, layerId });
+    if (!d.open) return;
+    if (!r.success) { st.phase = 'error'; st.err = (r.errors || []).join('; '); render(); return; }
+    st.layer = r.layer;
+    if (r.layer.status === 'running') { if (st.phase !== 'run') { st.phase = 'run'; render(); } st.timer = setTimeout(() => poll(layerId), 2500); return; }
+    if (r.layer.status === 'error') { st.phase = 'error'; st.err = r.layer.error; render(); return; }
+    if (r.layer.status === 'ready') { st.phase = 'pick'; st.sel = null; render(); return; }
+    st.phase = 'error'; st.err = _t('ly_used'); render();
+  }
+  async function start() {
+    st.busy = true;
+    const r = await safePost('/api/actions/layer-assess', { projectId });
+    st.busy = false;
+    if (!r.success) { st.phase = 'error'; st.err = (r.errors || []).join('; '); render(); return; }
+    st.phase = 'run'; render(); poll(r.layerId);
+  }
+  async function choose() {
+    if (!st.sel || st.busy) return;
+    st.busy = true;
+    const r = await safePost('/api/actions/layer-choose', { projectId, layerId: st.layer.layerId, optionId: st.sel });
+    st.busy = false;
+    if (!r.success) { toast((r.errors || []).join('; ')); return; }
+    close(true);
+    if (r.declined) { toast(_t('ly_kept')); return; }
+    toast(_t('ly_sent'));
+    askAgent(r.agent || 'mia', r.message);
+  }
+  render();
+  safePost('/api/actions/layer-precheck', { projectId }).then((r) => {
+    if (!d.open) return;
+    if (!r.success) { st.phase = 'fail'; st.err = (r.errors || []).join('; '); render(); return; }
+    if (r.running) { st.phase = 'run'; render(); poll(r.running); return; }
+    if (!r.precheck.ok) { st.phase = 'fail'; st.err = r.precheck.reason; render(); return; }
+    st.pc = r.precheck; st.ready = r.ready; st.phase = 'intro'; render();
+  });
+}
+
 // 应用内对话框的公共骨架（确认框、搬回 QuantConnect 共用）：原生 <dialog>.showModal()，页面其余部分自动不可聚焦；
 // Esc / 点遮罩 = close(false)；Tab 在框内循环。close(值) 只生效一次，再调用 onClose(值)。
 function openModal({ cls = '', labelId, describedBy, role, html, onClick, onClose }) {
@@ -878,7 +1000,8 @@ function projectHTML() {
         </div>
         ${moreMenu('projMore', [
     menuItem(`data-dk="new"`, _t('dk002')),
-    menuItem(`data-action="research"`, _t('k0747')),
+    // 完整 qlib 研究是从零找选股因子：只放在还没有回测的空项目里；已有策略的项目给「叠加 Qlib 选股」
+    count ? menuItem(`data-action="layer"`, `${_t('ly_menu')}${ELL}`, _t('ly_menu_d')) : count === 0 ? menuItem(`data-action="research"`, _t('k0747')) : '',
     menuItem(`data-action="compile"`, _t('k0046'), _t('ux002')),
     menuItem(`data-action="project-rename"`, `${_t('pr_rename')}${ELL}`),
     menuSep,
@@ -5227,6 +5350,7 @@ function wire() {
       const k = act.dataset.action;
       // 打开菜单/对话框的按钮立即响应；会发请求的按钮在返回前不能再点
       if (k === 'backtest') doAction(k, { kb: e.detail === 0 ? '1' : '0' });
+      else if (k === 'layer') openLayerModal();
       else if (k === 'research' || k === 'paper-new' || k === 'project-rename') doAction(k, act.dataset);
       else once(`action:${k}`, act, () => doAction(k, act.dataset));
       return;

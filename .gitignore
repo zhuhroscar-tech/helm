@@ -19,3 +19,4 @@ macos/dist/
 notes/
 # demo videos: attached to GitHub Releases instead of the repo
 demo/
+engine/qlib_research/mlruns/

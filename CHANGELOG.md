@@ -9,6 +9,13 @@
 
 ## 未发布
 
+### 叠加 Qlib 选股
+- 已有策略的项目，⋯ 菜单里新增「叠加 Qlib 选股…」：在现成的 LEAN 策略里把美股指数 ETF（SPY / QQQ / DIA / IWM / SOXX / OEF 等）那条腿换成 qlib 选出的个股，原来的择时规则不变。
+- 流程：不花钱的预检（`lib/layer.mjs`：有跑完的回测、有可替换的腿、还没用 HelmSignals）→ 一次不带工具的模型评估，给出 2–4 个方案，服务端校验（只能用预检找到的腿、字段截断、最多 4 个），并一定追加「不加这一层」→ Kahoot 式色块（颜色 + 形状 + 数字键，键盘 1–4 / 0 / Enter）→ 看细节、确认 → 带护栏的任务交给总控。
+- 护栏：信号只用开发期；叠加版跑成候选，原策略原样做消融对照；主版本和模拟实盘不动；没有历史成分股的股票池自动标出幸存者偏差；没跑的方案不计入尝试次数。评估记录存在 `projects/<id>/layers/`。
+- 「完整研究（高级）」改名「Qlib 研究」，只在还没有回测的空项目里出现（已有策略的项目里它不改进当前策略，容易误会）。
+- 新增 `test/layer.test.mjs`。**未验证**：真实模型的评估质量（测试里用的是假 claude）、Mac App 菜单里还没有「叠加 Qlib 选股」的命令。
+
 ### 直接发到 QuantConnect
 - 回测页「搬回 QuantConnect」对话框新增「发送到 QuantConnect」：用 QC 的 User ID + API token 连接一次（QC 接口没有 OAuth），之后一键在你的 QC 账户 `Helm/` 文件夹下新建项目、上传全部 `.py`、云端编译，显示编译结果（失败时附日志）和项目链接。手动复制收进「或者手动复制文件」。
 - 凭据存 secrets 目录 `quantconnect.json`（0600，可用 `HELM_QC_FILE` 覆盖），只进不出；请求只带 `sha256(token:时间戳)` 签名。客户端 `lib/quantconnect.mjs` 只允许 authenticate / projects/create / files/* / compile/*，不建云端回测、不碰 live 接口。

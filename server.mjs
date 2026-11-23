@@ -23,6 +23,7 @@ import { listDatasets } from './lib/datasets.mjs';
 import * as Paper from './lib/paper.mjs';
 import * as Alpaca from './lib/alpaca.mjs';
 import * as QC from './lib/quantconnect.mjs';
+import * as Layer from './lib/layer.mjs';
 import * as AI from './lib/ai.mjs';
 import { sensitiveReadDenies } from './lib/agent-perms.mjs';
 import { effectiveTools, localTools, validateAgentPatch, saveAgentPatch, isQcTool } from './lib/agents.mjs';
@@ -284,7 +285,7 @@ async function readJsonRaw(req, limit = 2_000_000) {
 
 
 // ---- 请求体校验：所有 POST 接口在进业务代码之前先过这一关，类型不对 / 缺字段 / 太长一律 400 + 中文说明 ----
-const STR_MAX = { name: 120, description: 2000, template: 40, backtestId: 64, sessionId: 64, jobId: 64, index: 40, start: 10, role: 20, period: 20, mode: 20, title: 120, target: 40, benchmark: 20, features: 30, neutralize: 30, advanced: 30, idea: 4000, keyId: 200, secret: 400, userId: 20, token: 200, message: 200000, threadId: 64, feature: 40, ideaFactor: 60, file: 120, model: 40, effort: 20, agent: 40, aiMode: 20, apiKey: 500, baseUrl: 300, aiModel: 120, nameEn: 120, nameZh: 120, deckId: 64, audience: 20, quality: 20, length: 20, note: 2000, notes: 2000, firm: 200, presenter: 200, disclaimer: 4000, disclaimerEn: 4000 };
+const STR_MAX = { name: 120, description: 2000, template: 40, backtestId: 64, sessionId: 64, jobId: 64, index: 40, start: 10, role: 20, period: 20, mode: 20, title: 120, target: 40, benchmark: 20, features: 30, neutralize: 30, advanced: 30, idea: 4000, keyId: 200, secret: 400, userId: 20, token: 200, layerId: 40, optionId: 8, message: 200000, threadId: 64, feature: 40, ideaFactor: 60, file: 120, model: 40, effort: 20, agent: 40, aiMode: 20, apiKey: 500, baseUrl: 300, aiModel: 120, nameEn: 120, nameZh: 120, deckId: 64, audience: 20, quality: 20, length: 20, note: 2000, notes: 2000, firm: 200, presenter: 200, disclaimer: 4000, disclaimerEn: 4000 };
 const NUM_FIELDS = ['costBps', 'holdoutYears', 'capital'];
 const BOOL_FIELDS = ['full', 'fresh', 'allowDanger', 'wait', 'reviewOutline', 'clearTemplate', 'clearLogo', 'confirmHelmData', 'verify'];
 const ARR_MAX = { tickers: 2000, factors: 20, horizons: 20, backtestIds: 6 };
@@ -293,7 +294,7 @@ const REQUIRED = {
   '/api/actions/backtest-tag': ['projectId', 'backtestId'], '/api/actions/backtest-main': ['projectId', 'backtestId'], '/api/actions/sensitivity': ['projectId', 'backtestId'], '/api/actions/tune': ['projectId', 'backtestId'], '/api/actions/universe': ['index'], '/api/actions/research': ['projectId'], '/api/actions/idea': ['projectId'],
   '/api/actions/research-stop': ['projectId', 'jobId'], '/api/actions/research-resume': ['projectId', 'jobId'],
   '/api/actions/paper-start': ['projectId', 'backtestId'], '/api/actions/paper-stop': ['projectId', 'sessionId'], '/api/actions/paper-run': ['projectId', 'sessionId'],
-  '/api/actions/alpaca-connect': ['keyId', 'secret'], '/api/actions/qc-connect': ['userId', 'token'], '/api/actions/qc-push': ['projectId', 'backtestId'], '/api/actions/ai-save': ['aiMode'], '/api/actions/signals': ['projectId', 'jobId'], '/api/chat': ['message'], '/api/chat/stop': ['threadId'],
+  '/api/actions/alpaca-connect': ['keyId', 'secret'], '/api/actions/qc-connect': ['userId', 'token'], '/api/actions/qc-push': ['projectId', 'backtestId'], '/api/actions/layer-precheck': ['projectId'], '/api/actions/layer-assess': ['projectId'], '/api/actions/layer-read': ['projectId', 'layerId'], '/api/actions/layer-choose': ['projectId', 'layerId', 'optionId'], '/api/actions/ai-save': ['aiMode'], '/api/actions/signals': ['projectId', 'jobId'], '/api/chat': ['message'], '/api/chat/stop': ['threadId'],
   '/api/data/files/read': ['projectId'], '/api/data/files/update': ['projectId', 'name'], '/api/data/backtests/list': ['projectId'], '/api/data/backtests/read': ['projectId', 'backtestId'],
   '/api/data/backtests/chart/read': ['projectId', 'backtestId'], '/api/data/backtests/orders/read': ['projectId', 'backtestId'], '/api/data/backtests/log/read': ['projectId', 'backtestId'],
   '/api/data/backtests/code/read': ['projectId', 'backtestId'], '/api/data/backtests/validate': ['projectId', 'backtestId'],
@@ -329,6 +330,7 @@ const shortToolName = (name) => String(name || '').replace(/^mcp__.*?__/i, '');
 
 /* ---------------- status ---------------- */
 
+const layerRunning = new Map(); // projectId → layerId：正在评估「叠加 Qlib 选股」的项目（一次一个）
 const qcPushing = new Set(); // 正在发到 QuantConnect 的项目：同一项目不并发发送
 let statusCache = null;
 let statusAt = 0;
@@ -1505,6 +1507,65 @@ const server = http.createServer(async (req, res) => {
         }
         return sendJson(res, 200, { ...r, helmData: hd });
       } finally { qcPushing.delete(pid); }
+    }
+
+    /* ---- 叠加 Qlib 选股：预检（不花钱）→ 模型评估出 2–4 个方案 + 「不加这一层」→ 用户选 → 交给总控 ---- */
+    if (p.startsWith('/api/actions/layer-') && req.method === 'POST') {
+      const b = await readJson(req);
+      const pid = Number(b.projectId);
+      if (!Number.isSafeInteger(pid) || pid <= 0) return sendJson(res, 400, { success: false, errors: ['projectId 不对'] });
+      const lang = res.helmLang === 'en' ? 'en' : 'zh';
+      if (p === '/api/actions/layer-read') {
+        const j = await Layer.readLayer(PROJECTS_DIR, pid, String(b.layerId));
+        if (!j) return sendJson(res, 200, { success: false, errors: ['找不到这次叠加评估'] });
+        if (j.status === 'running' && layerRunning.get(pid) !== j.layerId) { j.status = 'error'; j.error = '评估被中断了（服务重启过），请重新评估'; }
+        return sendJson(res, 200, { success: true, errors: [], layer: j });
+      }
+      if (p === '/api/actions/layer-choose') {
+        const j = await Layer.readLayer(PROJECTS_DIR, pid, String(b.layerId));
+        if (!j || j.status !== 'ready') return sendJson(res, 200, { success: false, errors: ['这次叠加评估还没完成，或已经选过了'] });
+        const opt = (j.result?.options || []).find((o) => o.id === String(b.optionId));
+        if (!opt) return sendJson(res, 200, { success: false, errors: ['没有这个方案'] });
+        j.choice = { optionId: opt.id, at: new Date().toISOString() };
+        j.status = opt.kind === 'none' ? 'declined' : 'chosen';
+        await Layer.saveLayer(PROJECTS_DIR, j);
+        if (opt.kind === 'none') return sendJson(res, 200, { success: true, errors: [], declined: true });
+        return sendJson(res, 200, { success: true, errors: [], agent: 'mia', message: Layer.taskMessage({ option: opt, backtest: j.backtest || {}, lang: j.lang || lang }) });
+      }
+      // 预检 / 评估都要先读：回测列表、主版本代码快照、股票池状态
+      const bl = await READ_ENDPOINTS['backtests/list']({ projectId: pid });
+      if (!bl.success) return sendJson(res, 200, bl);
+      const pick = Layer.pickBacktest(bl.backtests);
+      const code = pick ? await READ_ENDPOINTS['backtests/code/read']({ projectId: pid, backtestId: pick.backtestId }) : { files: [] };
+      const uni = await Promise.race([Q.listUniverses().catch(() => null), new Promise((r) => setTimeout(() => r(null), 8000))]);
+      const pc = Layer.precheck({ files: code.files || [], backtests: bl.backtests, universes: uni && uni.success ? uni.universes : null });
+      const running = layerRunning.get(pid) || null;
+      if (p === '/api/actions/layer-precheck') {
+        const prior = (await Layer.listLayers(PROJECTS_DIR, pid)).filter((x) => x.status === 'ready' && x.backtest?.backtestId === pc.backtest?.backtestId).pop() || null;
+        return sendJson(res, 200, { success: true, errors: [], precheck: { ok: pc.ok, reason: pc.reason || null, legs: pc.legs, backtest: pc.backtest ? { backtestId: pc.backtest.backtestId, name: pc.backtest.name, role: pc.backtest.role } : null }, running, ready: prior ? prior.layerId : null });
+      }
+      if (p === '/api/actions/layer-assess') {
+        if (!pc.ok) return sendJson(res, 200, { success: false, errors: [pc.reason] });
+        if (running) return sendJson(res, 200, { success: true, errors: [], layerId: running });
+        const proj = await READ_ENDPOINTS['projects/read']({ projectId: pid });
+        const project = proj.success ? proj.projects[0] : {};
+        const spec = (code.files || []).find((f) => f.name === 'spec.md')?.content
+          || await readFile(path.join(PROJECTS_DIR, String(pid), 'backtests', pc.backtest.backtestId, 'code', 'spec.md'), 'utf8').catch(() => '')
+          || await readFile(path.join(PROJECTS_DIR, String(pid), 'spec.md'), 'utf8').catch(() => '');
+        const holdout = JSON.parse(await readFile(path.join(PROJECTS_DIR, String(pid), 'holdout_log.json'), 'utf8').catch(() => '[]') || '[]');
+        const context = Layer.buildContext({ project, spec, files: code.files || [], backtest: pc.backtest, holdoutRuns: Array.isArray(holdout) ? holdout.length : 0, legs: pc.legs, lang });
+        const job = { layerId: Layer.newLayerId(), projectId: pid, status: 'running', lang, createdAt: new Date().toISOString(), backtest: { backtestId: pc.backtest.backtestId, name: pc.backtest.name, role: pc.backtest.role }, legs: pc.legs, result: null, error: null, choice: null };
+        await Layer.saveLayer(PROJECTS_DIR, job);
+        layerRunning.set(pid, job.layerId);
+        Layer.runAssessment({ context, legs: pc.legs, lang, runModel: runModelOnce })
+          .then((r) => { job.status = 'ready'; job.result = r; })
+          .catch((e) => { job.status = 'error'; job.error = `评估失败：${String(e && e.message || e).slice(0, 300)}`; })
+          .then(() => Layer.saveLayer(PROJECTS_DIR, job))
+          .catch(() => {})
+          .finally(() => { layerRunning.delete(pid); broadcast({ type: 'layer_updated', projectId: pid, layerId: job.layerId, status: job.status }); });
+        return sendJson(res, 200, { success: true, errors: [], layerId: job.layerId });
+      }
+      return sendJson(res, 404, { success: false, errors: ['没有这个接口'] });
     }
 
     if (p === '/api/actions/signals' && req.method === 'POST') {

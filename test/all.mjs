@@ -21,6 +21,7 @@ const SUITES = [
   ['fingerprint.test.mjs', [], []],
   ['alpaca.test.mjs', [], []],
   ['quantconnect.test.mjs', [], []],
+  ['layer.test.mjs', [], []],
   ['server-auth.test.mjs', [], []],
   ['i18n.test.mjs', [], []],
   ['paper-drift.test.mjs', [], ['--fast']],
