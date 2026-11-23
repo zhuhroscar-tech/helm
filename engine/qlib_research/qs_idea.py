@@ -253,8 +253,9 @@ def _check_node(node):
                 if s == "q" and not (0 <= a[1] <= 1):
                     raise IdeaError(f"{op} 的分位数参数要在 0 到 1 之间")
             else:
-                if s == "f" and a[0] == "num":
-                    raise IdeaError(f"{op} 的第一个参数应该是数据表达式，不是数字")
+                # 不只是光秃秃的数字：2*3、1+1 这种不含数据字段的式子也不行（否则算的时候才崩，或者整个因子悄悄变成全空）
+                if s == "f" and (a[0] == "num" or not _has_feature(a)):
+                    raise IdeaError(f"{op} 的这个参数应该是数据表达式（要用到 $close 这类字段），不是数字或只由数字组成的式子")
                 _check_node(a)
     elif kind == "bin":
         _check_node(node[2])
@@ -761,6 +762,11 @@ def expr_wide(expr: str, instruments: list, start, end) -> pd.DataFrame:
     if _PROVIDER["data"] is None:
         raise RuntimeError("expr_wide: no data directory set (set_provider)")
     w = qs_expr.expr_wide(expr, instruments, start, end, _PROVIDER["data"])
+    failed = w.attrs.get("failed") or {}
+    if instruments and failed and len(failed) >= len(instruments):
+        # 每只股票都算失败：不能当成「没有信号」记进多重检验登记（会抬高所有人的门槛），直接报错
+        first = next(iter(failed.values()))
+        raise IdeaError(f"表达式 {expr} 在每只股票上都算不出来：{first}")
     out = w.loc[w.attrs["rows"], sorted(w.attrs["present"])]  # the frame shape qlib's D.features + unstack gave
     out.index.name, out.columns.name = "datetime", "instrument"
     out.attrs = {}  # do not carry qs_expr's bookkeeping into later frames

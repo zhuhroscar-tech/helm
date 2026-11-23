@@ -243,7 +243,9 @@ def _lean_scale(df: pd.DataFrame):
     k = 10 ** int(np.ceil(-np.log10(lo)))
     df = df.copy()
     df[["open", "high", "low", "close"]] *= k
-    df["volume"] = df["volume"] / k
+    # volume / k, rounded (not truncated) and at least 1 when there was trading: small volumes must not become 0
+    v = df["volume"]
+    df["volume"] = np.where(v > 0, np.maximum(np.rint(v / k), 1), v)
     return df, k
 
 

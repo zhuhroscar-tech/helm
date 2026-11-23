@@ -405,8 +405,13 @@ def phase_data(run, args):
     cnt = pd.Series(1, index=pd.DatetimeIndex(np.concatenate([f.index.values for f in frames.values()]))).groupby(level=0).sum()
     cal = cnt[cnt >= np.maximum(3, 0.2 * cnt.rolling(250, min_periods=1).median())].index
     frames = {t: f.reindex(f.index.intersection(cal)) for t, f in frames.items()}
-    sig = hashlib.sha256(json.dumps({t: [len(f), str(f.index[0].date()), str(f.index[-1].date()), source_of[t]]
-                                     for t, f in sorted(frames.items())}).encode()).hexdigest()[:16]
+    # Per-run fields ($mkt from membership/eligibility, $f_* fundamentals) are written into the provider afterwards,
+    # so the signature also covers what they depend on: two runs with the same prices but different membership
+    # (e.g. a rebuilt PIT file) must not share a provider and overwrite each other's $mkt.
+    sig = hashlib.sha256(json.dumps({"prices": {t: [len(f), str(f.index[0].date()), str(f.index[-1].date()), source_of[t]]
+                                                for t, f in sorted(frames.items())},
+                                     "membership": hashlib.sha256(iv.to_csv(index=False).encode()).hexdigest(),
+                                     "fields": [bool(_idea_mkt(cfg)), bool(_uses_fund(cfg))]}).encode()).hexdigest()[:16]
     # Keyed by content signature, never rebuilt in place: another run with the same --name (e.g. every CUSTOM run,
     # or the same index with a different --start / newer data) may be mid-way through reading its own provider.
     # rmtree-ing it under that run silently shifts or empties its price reads.
