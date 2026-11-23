@@ -75,7 +75,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let server, server.owned else { return .terminateNow }
+        // 还在启动中（state 还不是 running）时 node 已经起来了：也要关掉，否则留下一个占着 4377 的孤儿进程
+        guard let server, server.owned || server.hasProcess else { return .terminateNow }
         if !events.running.isEmpty {
             let a = NSAlert()
             a.messageText = L("还有 \(events.running.count) 个 agent 任务在运行", "\(events.running.count) agent task(s) still running")
@@ -145,9 +146,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             return
         }
         UserDefaults.standard.set(url.path, forKey: "HelmRoot")
+        // 连着的是终端里 npm start 起的服务：App 关不掉它，换文件夹后还会连回它（看不出它是哪个文件夹的）
+        if let s = server, s.port != nil, !s.owned, !s.hasProcess {
+            let a = NSAlert()
+            a.messageText = L("现在连着的是另一个正在运行的 Helm", "Helm is connected to a server started elsewhere")
+            a.informativeText = L("它是在终端里启动的（npm start），App 关不掉它。先在那个终端里按 Ctrl+C 停掉它，再重新打开 Helm，新文件夹才会生效。", "It was started in a terminal (npm start), so the app can't stop it. Stop it with Ctrl+C in that terminal, then reopen Helm to use the new folder.")
+            a.runModal()
+            return
+        }
         events.disconnect()
+        let old = server
+        old?.shutdown()
         Task {
-            await server?.stopAndWait()
+            await old?.stopAndWait()
             startServer(root: url)
         }
     }
