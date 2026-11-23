@@ -412,8 +412,11 @@ async function computeHealth(force) {
       hintEn: sb.off ? 'The sandbox is off: AI-written strategy code can read and write your files and use the network while it runs. Only do this if you trust the code.' : 'This machine has no /usr/bin/sandbox-exec (not macOS), so backtests are refused for safety. To run them anyway, add HELM_EXEC_SANDBOX=off to .env and restart Helm.' },
     { id: 'priceData', zh: '行情数据', required: false, ok: st.engine.tickers > 0, detail: `本地已有 ${st.engine.tickers} 个代码的日线`,
       hint: '不用手动准备：第一次运行回测时，会自动下载代码里用到的股票 / ETF 日线（可以忽略这一项）' },
-    { id: 'qlib', zh: 'qlib 研究引擎', required: false, ok: Boolean(q && q.ok), detail: q ? (q.python || (q.runSh ? '找不到装了 qlib 的 Python' : '找不到 engine/qlib_research/run.sh')) : '检查超时或出错',
-      hint: '只有「想法检验 / 完整研究 / 股票池」需要。在 helm 目录运行：engine/qlib_research/run.sh --which-python ，看它报缺什么（推荐装到 engine/.qlib-venv，也可以在 .env 里加一行 QS_PYTHON=/绝对路径/python）' },
+    // 想法检验 / 股票池 / 导出信号只要 engine/.venv（公式在 qs_expr 里算）；qlib 只有完整因子研究要用
+    { id: 'research', zh: '研究引擎（想法检验、股票池）', required: false, ok: Boolean(q && q.ok), detail: q ? (q.python || (q.runSh ? '找不到研究用的 Python（engine/.venv）' : '找不到 engine/qlib_research/run.sh')) : '检查超时或出错',
+      hint: '用的是 Helm 自己的 engine/.venv（和回测同一个环境），不需要 qlib。缺的话先把上面的「Python 虚拟环境」装好' },
+    { id: 'qlib', zh: 'qlib（只有完整因子研究要用）', required: false, ok: Boolean(q && q.qlib), detail: q ? (q.qlibPython || '没装：想法检验、股票池不受影响') : '检查超时或出错',
+      hint: '只有完整因子研究（LightGBM、qlib 回测）需要。在 helm 目录运行：engine/qlib_research/run.sh --which-python ，看它报缺什么（推荐装到 engine/.qlib-venv，也可以在 .env 里加一行 QS_PYTHON=/绝对路径/python）' },
     { id: 'qlibData', zh: 'qlib 美股数据', required: false, ok: Boolean(q && q.data), detail: '~/.qlib/qlib_data/us_data',
       hint: '只有 qlib 研究需要：把 qlib 的美股日线数据放到 ~/.qlib/qlib_data/us_data（目录里要有 calendars、features、instruments）' },
   // detail 里可能带绝对路径（DOTNET_BIN、qlib 的 Python、claude 的报错）：把用户主目录换成 ~，不把目录结构给网页
