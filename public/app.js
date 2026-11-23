@@ -2386,13 +2386,15 @@ function universesHTML() {
       const job = u.job && u.job.status === 'running' ? u.job : null;
       const ex = u.exported;
       // 已有旧数据、但最近一次更新失败：之前这里只显示「已就绪」，失败被藏起来，用户只能一遍遍点「更新」
+      // 已经到最近一个完整交易日：写明「已是最新」，按钮变成不显眼的「重新准备」（之前一直显示「更新」，用户更新完还以为要再更新）
+      const fresh = Boolean(ex && u.upToDate && !(u.job && u.job.status === 'failed'));
       const lastFail = ex && u.job && u.job.status === 'failed' ? `<i class="u-fail" title="${esc(u.job.error || '')}">${_t('u_fail', { v: esc(String(u.job.error || '').slice(0, 80)) })}</i>` : '';
       const st = job ? `${_t('k0904')} ${Math.round((job.progress || 0) * 100)}%<i>${esc(job.phase || '')}</i></span>`
-        : ex ? `<span class="u-st ok">${_t('k0905', { v: esc(ex.start), v2: esc(ex.end) })} ${esc(ex.members_per_day ? ex.members_per_day.median : '?')} ${_t('k0906')}${lastFail}</span>`
+        : ex ? `<span class="u-st ok">${_t('k0905', { v: esc(ex.start), v2: esc(ex.end) })} ${esc(ex.members_per_day ? ex.members_per_day.median : '?')} ${_t('k0906')}${fresh ? `<i class="u-fresh">${_t('u_fresh')}</i>` : ''}${lastFail}</span>`
           : u.job && u.job.status === 'failed' ? `<span class="u-st bad" title="${esc(u.job.error || '')}">${_t('k0907')}${esc(String(u.job.error || '').slice(0, 60))}</i></span>` : _t('k0908');
       return `<div class="uni"><div class="u-n"><b>${esc(u.label)}</b><span class="u-k ${u.kind === 'snapshot' ? 'snap' : u.kind === 'partial-point-in-time' ? 'part' : 'pit'}" ${u.kind === 'partial-point-in-time' ? `${_t('k0909')} ${esc(u.qlib_as_of || '?')}${_t('k0910')}` : u.membership_source ? `${_t('k0911', { v: esc(u.membership_source) })}` : ''}>${u.kind === 'snapshot' ? _t('k0912') : u.kind === 'partial-point-in-time' ? `${_t('k0913')} ${esc(String(u.qlib_as_of || '?').slice(0, 7))}` : u.membership_source ? `${_t('k0913')} ${esc(String(u.qlib_as_of || '?').slice(0, 7))}` : _t('k0914')}</span></div>
         <div class="u-m">${_t('k0920')} ${esc(u.names_ever ?? '?')} ${_t('k0921', { v: esc(u.bench) })}</div>${u.data_warning ? `<div class="u-warn" title="${esc(u.data_warning)}">${_t('k0915')}</div>` : ''}${st}
-        ${job ? '' : `<button type="button" class="btn sm" data-prepare="${esc(u.key)}" aria-label="${ex ? _t('k0916') : _t('k0917')} ${_t('k0919', { v: esc(u.label) })}">${lastFail ? _t('u_retry') : ex ? _t('k0916') : _t('k0918')}</button>`}</div>`;
+        ${job ? '' : `<button type="button" class="btn sm${fresh ? ' quiet' : ''}" data-prepare="${esc(u.key)}" title="${fresh ? esc(_t('u_fresh_t')) : ''}" aria-label="${ex ? _t('k0916') : _t('k0917')} ${_t('k0919', { v: esc(u.label) })}">${lastFail ? _t('u_retry') : fresh ? _t('u_rebuild') : ex ? _t('k0916') : _t('k0918')}</button>`}</div>`;
     }).join('')}</div>`;
   return `<div class="panel" id="uniPanel"><div class="panel-head"><h2>${_t('k0922')}</h2><span class="meta">${_t('k0923')}</span></div>${body}</div>`;
 }
