@@ -25,6 +25,8 @@ Claude Code is what actually runs the agents. You don't have to use it with a Cl
 
 ## 2. Get the code and install the engine
 
+Shortcut: `curl -fsSL https://raw.githubusercontent.com/zhuhroscar-tech/helm/main/install.sh | bash` does steps 2 and 3 for you (and offers to install Claude Code and build the app). It asks before each change. The manual steps:
+
 ```
 git clone https://github.com/zhuhroscar-tech/helm.git
 cd helm

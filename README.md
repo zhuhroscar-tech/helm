@@ -1,275 +1,127 @@
-# Helm：个人量化指挥台
+# Helm：本机量化研究台
 
-[English](README.en.md) · [上手指南](docs/GETTING-STARTED.zh.md) · [配置](docs/CONFIGURATION.md) · [常见问题](docs/FAQ.md) · [架构](docs/ARCHITECTURE.md) · [参与贡献](CONTRIBUTING.md) · [路线图](docs/ROADMAP.md)
+> 中文（以本版为准）| [English](README.en.md) · 网页有中文和英文界面。
 
-在网页上输入策略想法，你本机的 Claude 会把它写成 QuantConnect 格式的 LEAN 代码，在你 Mac 上的 **LEAN 引擎**（QuantConnect 的开源回测引擎）里回测，再把结果解读给你。
+用大白话写一个交易想法，Helm 在你自己的 Mac 上把它变成经过检验的策略：Claude Code 智能体先写规则说明，再写 QuantConnect LEAN 代码，在本机编译好的 LEAN 引擎上回测，做统计检验和模拟实盘，并在本地网页里解释结果。
 
-Helm 本身免费、开源（MIT）。但 agent 要调用 AI 模型，这部分要花钱：Claude 订阅（Pro / Max / Team）、Anthropic API 按量付费，或者其它兼容接口的用量（见「接入 AI」）。生成一份研发汇报大约要 0.5 美元的用量。
+它的目的是让研究**更难自欺**：每个想法、每组参数都计数，验证期的使用有记录，策略必须通过统计门槛（按尝试次数校正）才能成为主版本。
 
 ![Helm 的项目页](docs/img/project-zh.png)
 
-演示视频在 GitHub 的 Releases 页面里（附件）。
+**现状**：早期版本（v1，2026 年 11 月），在 Apple Silicon Mac 上测试过。有些路径目前只用替身测过（见 [docs/ROADMAP.md](docs/ROADMAP.md)）。
 
-```
-网页 (localhost:4377) ──► server.mjs ──► 本机 claude -p ──► mcp/qc-mcp.mjs ──► lib/engine.mjs ──► 本地 LEAN（.NET + Python）
-        ▲                                                                        │
-        └──────────── 实时显示每一步、回测曲线、统计、订单和结论 ────────────────┘
-```
+**不构成投资建议。Helm 不能下真实订单。** 唯一的券商接口是 Alpaca **模拟盘**，地址写死为 `paper-api.alpaca.markets`。回测用的是免费的复权日线，对未来收益说明不了多少。
 
 ## 安装
 
-第一次用，请按 [上手指南](docs/GETTING-STARTED.zh.md) 一步步来，它会带你装好并跑出第一个回测。下面是简要版。
+只支持 macOS。把下面这行粘贴到「终端」：
 
-**只支持 macOS**：在 Apple Silicon 上测试过；Intel Mac 没测过；Linux 和 Windows 不支持（沙盒依赖 macOS 的 `sandbox-exec`）。第一次安装大约要 2–3 GB 硬盘空间、15–30 分钟（看网速）。
+```
+curl -fsSL https://raw.githubusercontent.com/zhuhroscar-tech/helm/main/install.sh | bash
+```
 
-1. **先装好这几样**：Node 20 或更新（`node -v` 确认；没有的话 `brew install node` 或去 nodejs.org 下载）、Git（`xcode-select --install`），以及 Claude Code：
-   ```
-   curl -fsSL https://claude.ai/install.sh | bash
-   claude          # 运行一次，登录
-   ```
-   也可以用 `npm install -g @anthropic-ai/claude-code`，但用 nodejs.org 安装包装的 Node 常会报 `EACCES` 权限错误，这时用上面的安装方式就行（不要加 sudo）。
-2. **下载代码**：
-   ```
-   git clone https://github.com/zhuhroscar-tech/helm.git
-   cd helm
-   ```
-   在 GitHub 页面上点「Code → Download ZIP」也可以，解压出来的文件夹叫 `helm-main`，那就 `cd helm-main`。
-3. **装回测引擎**（.NET 10、LEAN、Python 3.11 环境）。不用 sudo，每一步做之前都会问你：
-   ```
-   scripts/setup.sh --check     # 只列出还缺什么，不改动电脑
-   scripts/setup.sh             # 正式安装
-   ```
-4. **启动**，然后在浏览器打开 http://localhost:4377：
-   ```
-   npm start
-   ```
-   不需要 `npm install`，Helm 没有 npm 依赖。
+它会检查这台 Mac；缺 Node、Claude Code 时提议安装；把 Helm 下载到 `~/Helm`，装好引擎（.NET 10、Python 3.11、LEAN），提议构建 Mac App，最后打开 Helm。每一步改动前都会先问，不用 sudo。再运行一次就是更新。想先看脚本：下载 `install.sh` 看过再 `bash install.sh`。
 
-第一次打开网页会有设置向导。之后点顶栏的「AI」接入模型（见「接入 AI」）。装完 Claude Code 或改了 `.env` 之后，要重启 Helm（Ctrl+C 后再 `npm start`）。
+手动安装，效果一样：
 
-### 手动安装（`scripts/setup.sh` 做的就是这些）
+```
+git clone https://github.com/zhuhroscar-tech/helm.git && cd helm
+scripts/setup.sh --check   # 列出缺什么，不做改动
+scripts/setup.sh           # 安装
+npm start                  # 打开 http://localhost:4377
+```
 
-1. .NET 10 SDK，装在 `~/.dotnet`：
-   `curl -sSL https://dot.net/v1/dotnet-install.sh | bash -s -- --channel 10.0 --install-dir ~/.dotnet`
-2. LEAN 源码，固定在 Helm 测试过的版本（`scripts/setup.sh` 里的 `LEAN_COMMIT`），然后编译：
-   ```
-   mkdir -p engine/Lean && cd engine/Lean
-   git init && git remote add origin https://github.com/QuantConnect/Lean.git
-   git fetch --depth 1 origin <LEAN_COMMIT> && git checkout FETCH_HEAD
-   cd ../..
-   ~/.dotnet/dotnet build engine/Lean/Launcher/QuantConnect.Lean.Launcher.csproj -c Release
-   ```
-3. Python 3.11 环境（版本按 LEAN 官方锁定），包和版本都在 `engine/requirements.txt`：
-   ```
-   uv venv --python 3.11 engine/.venv
-   uv pip install --python engine/.venv/bin/python -r engine/requirements.txt
-   ```
+- **需要**：Mac（Apple Silicon 测过，Intel 没测过）、Node 20+、Git、Claude Code、2–3 GB 硬盘。第一次安装 15–30 分钟。
+- **费用**：Helm 免费（MIT）。智能体需要模型：Claude 订阅（Pro / Max / Team）、Anthropic API key，或兼容 Anthropic 接口的服务（DeepSeek、Kimi、GLM、OpenRouter 等）。一份研发汇报约 0.5 美元。在顶栏 **AI** 里选择（[详细说明](docs/CONFIGURATION.md#connecting-an-ai)）。
+- **选装**：qlib + LightGBM（完整 Qlib 研究）、LibreOffice（汇报导出 PDF）、Alpaca 模拟账户。
+- **帮助**：[上手指南](docs/GETTING-STARTED.zh.md)（从新 Mac 到第一个回测）· `npm run doctor` · [FAQ](docs/FAQ.md) · [配置](docs/CONFIGURATION.md) · [Mac App](docs/MACOS-APP.md)
 
-## 运行
+## 一个策略在 Helm 里怎么走
 
-- **环境体检**：`/api/health`（网页上缺东西时会直接提示）逐项检查 Claude Code 命令行、.NET、LEAN、Python 虚拟环境、libpython（这几项必需），以及行情数据、qlib 引擎、qlib 美股数据（可选），缺什么、怎么补都写在结果里；`/api/health?refresh=1` 强制重新检查。命令行里也可以跑 `npm run doctor`。
-- 端口被占用时会提示「Helm 可能已经在运行了」，并给出换端口的写法：`PORT=4378 node server.mjs`。
-- Ctrl+C（SIGINT / SIGTERM）会优雅退出：不再接新连接，结束网页的事件流，终止网页发起的 claude 对话；回测、研究和参数敏感性是独立进程，会继续跑完。模拟实盘的每日运行在服务进程里，正在跑的那一次会被打断，下次启动后马上补跑（不等 3 小时，也不会重复下单）。
+每个项目都显示四步：**想法检验 → 回测 → 统计检验 → 模拟实盘**。
 
-## Mac App
+1. **想法检验**（选股类想法）。想法写成 1–3 个带方向的因子公式，**只用开发期**、在按历史成分股的指数里检验。结果包括 IC 和 Newey-West t 值、扣成本后的五分组收益、逐年稳定性、与已知因子的相关，结论是有信号 / 弱信号 / 没有信号。每个公式都记账，试得越多门槛越高；「没有信号」就结束这个想法。
+2. **先规则，后代码。** 总控在写任何代码之前先写 `spec.md`（股票池、进出场、仓位、调仓、成本、基准、开发期和验证期），工程师写的 LEAN 代码必须和它一致。
+3. **回测**：在本机 LEAN 上后台运行。每次回测保存代码快照、结果、日志、数据和代码指纹，带角色（`main`、`candidate`、`ablation` 等）和时期（`dev`、`holdout`、`full`）。可以 2–4 个并排对比。
+4. **统计检验**（`validate_backtest`）：
+   - 指标必须自洽；
+   - 夏普 95% 置信区间下限要大于 0；
+   - 跑赢基准的置信度至少 90%；
+   - 按全部尝试次数校正的通缩夏普 ≥ 95%；
+   - 至少一年数据。
 
-`macos/build.sh --install` 会在你自己的 Mac 上从源码构建一个原生 Mac App（约 1 MB）并装到「应用程序」：双击就能打开，不用开终端和浏览器。App 会自动启动服务，关掉窗口服务也继续跑，需要批准时发系统通知。没有现成可下载的 App：它只是这个文件夹的外壳，用 ad-hoc 签名，只适合构建它的那台 Mac。详见 [docs/MACOS-APP.md](docs/MACOS-APP.md)。
+   只有通过的回测才能被智能体设为 `main`。验证期回测有记录，从第二次起提示验证期已经不干净。
+5. **稳健性和调参**：
+   - 用已存结果做分段、成本压力和市场状态拆解。
+   - 参数敏感性（×0.8 / ×1.2）。
+   - 拉丁超立方调参：推荐参数平台的中心而不是单个最好点，并估计回测过拟合概率（PBO）。每个候选都计入尝试次数。
+6. **模拟实盘**：冻结一个回测，Helm 在每个美股交易日之后重跑，冻结日之后的结果是真正的样本外。
+   - 两种模式：内部模拟，或 Alpaca 模拟账户。
+   - Alpaca 模式只动这个模拟自己开的仓位，只用 `main` 版本，数据过期的那天不下单。
+   - 有一块面板对比实际表现和回测的预期。
 
-## 数据
+## 其他功能
 
-- 来自 Yahoo Finance 的**美股和 ETF 复权日线**，从上市日到上一个交易日。
-- 回测时会自动下载策略里用到的代码，20 小时内不会重复下载。
-- 没有分钟数据、期权、期货、外汇、加密货币。
-- qlib 研究引擎另有：S&P 500 / 纳斯达克 100 的历史成分股、SEC 财报基本面（只在想法检验和因子研究里用，LEAN 策略里通过导出的打分 `HelmSignals` 间接使用）。
-- FRED 宏观序列（利率、信用利差等）：`fetch_macro` 下载，策略里用 `HelmMacro` 读，只给当时已经公布的值（FRED 是修订后的数值，不是初值）。
-- 自建数据集：想法需要 Helm 本地没有的数据（事件名单、公司属性、公告日期等）时，agent 先上网查公开来源，用 `save_dataset` 整理成表存到 `helm/custom/<名字>.csv`（附 `.meta.json`：来源、版本、哈希、备注），策略里用 `HelmDataset` 读。每行必须有 `available_date`（信息第一次公开的日期）和来源，读取时只给严格早于当天公开的行；行只能来自抓取的网页，不许凭记忆填。数据是网上整理的，可能不全或有错，回测页会固定提醒，并记录用了哪个版本。不收集具体个人的健康、宗教等敏感特征。「股票池与数据」页可以查看（只读）。
-- LEAN 的基准固定读小时数据，所以下载器会用日线合成一份每天一根的小时文件，只给基准用。
+- **叠加 Qlib 选股**：在已有策略（比如 ETF 动量）上，智能体给出 2–4 种把美股指数 ETF 换成 qlib 选股的方式，以色块列出，外加「不加这一层」。你选的方案跑成候选，和原策略原样对照；主版本和模拟实盘不动。
+- **Qlib 研究**：给还没有想法的空项目用。扫描 Alpha158 和基本面因子并训练 LightGBM，只看一次验证期。需要 qlib。
+- **波动率目标**（`HelmVol`）：只用过去的数据预测波动率，并据此缩放仓位。目的是降低回撤，不是提高收益。
+- **发到 QuantConnect**：用 QC 的 User ID 和 API token 连接一次，Helm 在你的账户里建项目、上传代码、云端编译。不开始云端回测，也不碰实盘。读 Helm 本地数据（`helm_data`）的策略要改过才能在 QC 上跑；QC 用未复权价格，结果会有些差别。
+- **研发汇报**：生成可编辑的 PowerPoint（PDF 需要 LibreOffice），给团队或客户看。每个数字都从回测记录里填入，不由模型手写；给客户的版本一定写明验证期和尝试次数。
+- **想法记录和研究流水线**：把每次想法检验、回测、验证期和模拟实盘排在一条时间线上。
 
-## 结构
+## Helm 不做的事
 
-| 路径 | 作用 |
+- 智能体从不下单或撤单，只有你在网页上开始的模拟盘会交易。
+- 没通过统计检验的回测不能设为 `main`，也不能用 Alpaca 交易。「差一点通过」不算通过。
+- 回测结果、尝试次数、验证期记录、模拟盘记录都只增不改；删掉回测不会降低门槛。
+- 没有引擎输出就不说某个策略有效。「没找到可靠的策略」也是有效结论。
+
+## 数据和局限
+
+- **价格**：Yahoo Finance 美股和 ETF 复权日线，每天更新。没有分钟数据、期权、期货、外汇、加密货币。复权价不是当时真实成交的价格，所以依赖绝对价位的规则不可靠。
+- **股票池**：
+  - 标普 500 按历史成分股；2020 年以后部分退市成员没有免费价格，后期结果偏乐观。
+  - 纳斯达克 100 的成分股历史不完整。
+  - 道琼斯 30、半导体、标普 100、罗素样本只有当前名单，有幸存者偏差。
+- **其他数据**：SEC 基本面；FRED 宏观序列（修订后的值，已按公布滞后处理）；智能体从公开来源整理的数据集，会标明可能不完整。
+- **成本**：LEAN 默认滑点为 0，规则说明里应写明滑点假设。
+
+## 安全（简要）
+
+- 服务只监听 127.0.0.1；会改状态的请求需要每次启动生成的网页令牌，并且必须同源。
+- 策略代码在 macOS `sandbox-exec` 沙盒里运行：不能联网，读不到用户主目录和密钥。没有沙盒时拒绝跑回测，除非你明确关掉（`HELM_EXEC_SANDBOX=off`）。
+- 密钥（AI、Alpaca、QuantConnect）存在本机，文件权限 0600，不会返回给网页，智能体也读不到。
+- 智能体改 Helm 自己的代码要过审批策略；改研究规则相关的代码需要你批准，测试不过会自动回滚。
+
+详细：[SECURITY.md](SECURITY.md) · [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#safety-model)（也讲了中英文界面和内容翻译怎么实现）
+
+## 智能体
+
+五个智能体（`agents.json`，可在网页上改），共享 `workspace/CLAUDE.md` 里的规则：
+
+| 智能体 | 做什么 |
 |---|---|
-| `server.mjs` | 本地服务器：页面、只读数据接口、启动 claude 并把输出流式转给网页 |
-| `mcp/qc-mcp.mjs` | MCP 服务器，Claude 通过它建项目、写代码、回测、读结果 |
-| `lib/engine.mjs` | 本地引擎：项目和文件存储、语法检查、启动 LEAN、解析结果 |
-| `lib/paper.mjs` | 模拟实盘：冻结回测代码，每个交易日收盘后用最新数据重跑，算前向收益；Alpaca 模式下同步调仓 |
-| `lib/alpaca.mjs` | Alpaca 模拟盘客户端（地址写死为 paper-api，不能连实盘） |
-| `lib/run-backtest.mjs` | 独立的回测进程，网页或 agent 退出都不影响它跑完 |
-| `engine/fetch_data.py` | Yahoo 数据转 LEAN 格式 |
-| `engine/helm_data.py` | 策略里读历史成分股、研究打分、FRED 宏观序列、自建数据集（`HelmUniverse` / `HelmSignals` / `HelmMacro` / `HelmDataset`） |
-| `engine/lint_strategy.py` | 回测前的代码检查（只解析不执行） |
-| `lib/macro.mjs` | 下载 FRED 宏观序列 |
-| `lib/datasets.mjs` | 自建数据集：校验（每行公开日期、来源、敏感特征检查）、保存、列表、读取 |
-| `lib/robust.mjs` | 回测稳健性分析（分段稳定性 / 成本压力 / 市场状态，只读已保存的结果）和参数敏感性的参数发现、变体取值、判定 |
-| `lib/drift.mjs` | 模拟实盘「是否在预期内」：用来源回测的日收益做块自助法（只读） |
-| `lib/journal.mjs` | 想法记录：把想法检验、回测、验证期、模拟实盘按时间排成一张表（只读） |
-| `lib/fingerprint.mjs` | 回测指纹：记下代码和数据的版本，发现“代码相同但数据变了” |
-| `lib/qlib.mjs` | 启动 qlib 研究引擎、读结果、把股票池和信号转成 LEAN 格式 |
-| `lib/agent-perms.mjs` | agent 的敏感路径黑名单（见「安全」） |
-| `public/i18n.js`、`public/i18n-dict.js`、`lib/i18n.mjs` | 界面语言：网页的文字字典（中 / 英）和服务端提示的英文表 |
-| `public/calendar.js`、`lib/market-calendar.mjs` | 美股休市日历（按规则推算 + 已知的临时休市日），网页和服务端共用一份 |
-| `engine/qlib_research/` | qlib 研究引擎（原 quant-strategy）：历史成分股、因子、LightGBM、检验、验证期。`docs/` 里是方法说明 |
-| `engine/qlib_bridge.py` | Helm 和研究引擎之间的桥：股票池导出到 LEAN、读研究结果、导出信号 |
-| `agents.json` | 5 个 agent 的定位和提示词，可以直接改 |
-| `workspace/CLAUDE.md` | 所有 agent 共用的工作规则 |
-| `projects/` | 你的策略项目。每次回测都保存代码快照、结果和日志 |
-| `data/threads/` | 对话记录 |
+| 总控（`mia`） | 写规则说明，把每个阶段交给专人；自己不跑回测、不写代码 |
+| 研究员 | 因子公式、想法检验、qlib 研究 |
+| 策略工程师 | LEAN 代码、修编译错误、跑回测 |
+| 回测分析师 | 统计检验，判断结果靠不靠谱 |
+| 风控官 | 回撤、仓位暴露、极端行情表现 |
 
-## 外部依赖（不在这个文件夹里）
+交接出去的任务会以单独的对话出现。停掉一个智能体时，它正在等的那个智能体也会一起停。
 
-| 位置 | 是什么 | 为什么在外面 |
-|---|---|---|
-| `~/.qlib/` | qlib 的美股日线、成分股名单、SEC 财报缓存、S&P 500 历史名单（选装，可能有几 GB） | qlib 的默认位置，可以和别的 qlib 项目共用 |
-| `~/.dotnet/` | 运行 LEAN 的 .NET | 装在用户目录，不用 sudo |
-| `~/Library/Application Support/Helm/` | 新安装时 AI 和 Alpaca 密钥的存放位置（`secrets/`） | 密钥不放在代码文件夹里；早期安装仍用 `data/secrets/` |
-| `~/.cache/quant-strategy/`、`~/.config/quant-strategy/` | 研究引擎的缓存和 SEC 请求设置 | 引擎沿用的旧目录名 |
+## 仓库
 
-## 接入 AI
-
-点网页顶栏的「AI」。每种方式保存前都会先测试一次，不通过不保存：
-
-- **自动（默认）**：沿用 `claude` 已登录的账号，或终端环境里的 `ANTHROPIC_API_KEY`，和以前一样。
-- **Claude 订阅（Pro / Max / Team）**：先在终端运行一次 `claude`，用订阅账号登录。用套餐额度，环境里的 API key 会被忽略。
-- **Anthropic API key**：console.anthropic.com 创建的 key，用不花钱的 `GET /v1/models` 验证。
-- **其它兼容接口**：填接口地址、key 和模型 ID，例如 `https://api.deepseek.com/anthropic` + `deepseek-chat`。必须是兼容 Anthropic Messages API 的地址（通常以 `/anthropic` 结尾），用 1 个 token 的请求验证。所有 agent 都用这个模型，对话里选的模型会被忽略。Helm 很依赖工具调用，能力弱的模型做多步任务容易失败。
-
-密钥只保存在本机的 `secrets/ai.json`（权限 0600；新安装在 `~/Library/Application Support/Helm/secrets/`，早期安装在 `data/secrets/`，见 [配置](docs/CONFIGURATION.md)），通过 Claude Code 的 `apiKeyHelper` 读取，不进环境变量；网页只拿到末 4 位，agent 跑的命令读不到这个文件，也看不到 key。
-
-## 安全
-
-- 服务只监听 127.0.0.1，所有请求都校验 Host。所有会改状态的请求（POST/DELETE）还必须同时满足：带上本次启动随机生成的页面令牌（`X-Helm-UI-Token`，只注入在网页 index.html 里，不进任何子进程的环境变量或文件）、Origin 必须是本站、浏览器发的 `Sec-Fetch-Site` 必须是 same-origin，否则返回 403。服务重启后旧页面要刷新一次。只读的 GET 接口不需要令牌。
-  这能挡住别的网站和不知道令牌的本机脚本，但本机进程仍可以先 GET 首页拿到令牌，所以它是纵深防御，不是对本机恶意程序的隔离。agent 交接用的 `/api/handoff` 用另一把只通过环境变量传给 MCP 的令牌。
-- 网页上能直接做的写操作只有：新建项目、语法检查、运行回测、改回测标签、参数敏感性、qlib 研究、模拟实盘；改代码和删除都要经过 agent。
-- 删除文件或回测默认禁止，要在输入框下方打开“允许删除”，而且只对那一条消息生效。
-- Agent 改文件、跑命令都要经过审批规则（见「agent 自己补功能」）。规则直接放行的命令（测试、只读 git / ls）和 agent 可以直接改的代码（研究引擎、新建测试）只在 macOS 沙盒里运行（`lib/exec-sandbox.mjs`）：读不到密钥和凭据、连不上正在运行的 Helm（拿不到网页令牌、不能自己批准自己）、改不了仓库。沙盒不可用时这些都改为要你批准。
-- Agent 的 Read/Glob/Grep 有敏感路径黑名单（`lib/agent-perms.mjs`，通过 `--disallowedTools` 的 `Read(...)` 规则，`~/` 和 `//绝对路径` 两种写法都加）：`~/.ssh`、`~/.aws`、`~/.gnupg`、`~/.config`、`~/.kube`、`~/.docker`、`~/.netrc`、`~/.npmrc`、`~/.pypirc`、`~/.git-credentials`、shell 历史、整个 `~/Library`（含钥匙串）、Claude 的凭据/设置/其它会话记录、任何位置的 `.env` / `.env.*` / `*.pem` / SSH 私钥，以及仓库里的 `data/secrets`、`data/threads`、`data/server.log`。仓库代码、`projects/`、`engine/`（含 LEAN 数据）、`data/qlib` 照常可读。这是黑名单不是白名单：其它位置仍可读，WebFetch 也没有限制域名。
-- Alpaca 密钥保存在 `secrets/alpaca.json`（权限 0600，位置同上）。网页接口从不返回 secret；agent 的 Read/Grep/Glob 被禁止访问这个目录；LEAN（会运行 agent 写的策略代码）跑在 macOS 沙盒（sandbox-exec）里，同样读不到这个目录；环境变量里的 `ALPACA_*` / `APCA_*` 不会传给 agent 和 LEAN。开始/停止模拟和连接 Alpaca 只能在网页上操作，agent 只能查看。
-- Agent 写的策略代码在 LEAN 里跑在 macOS 沙盒（sandbox-exec）中：不能联网（包括本机 127.0.0.1），不能读用户目录、仓库、别的项目和尝试记录，只能写本次回测的输出目录和一个用完即删的临时目录；环境变量只传白名单（不含任何密钥和 HELM_*）。回测前还有一道代码检查（`engine/lint_strategy.py`），拦下 os/requests/open/eval 之类的写法——它只是第一道关，真正的边界是沙盒。没有 `sandbox-exec`（不是 macOS，或沙盒规则用不了）时回测会拒绝运行；设置 `HELM_EXEC_SANDBOX=off` 可以强行运行，但策略代码就不在沙盒里了，只建议在你完全信任代码时用。
-
-- 页面带内容安全策略（CSP）：脚本只能来自本站的文件（没有内联脚本、不能 eval），只能连本站接口，不能被别的页面嵌进 iframe；所有响应带 `X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer`。页面令牌在 index.html 里，这一层是为了万一哪里漏了转义，注入的脚本也跑不起来。改页面时不要加内联 `<script>` 或 `onclick=` 这类属性（`server-auth.test.mjs` 会查）。
-- 所有接口的请求体都会校验（必填字段、projectId 必须是正整数、字符串长度、数字、布尔、数组大小）；不合格或 JSON 坏了返回 400 和一句中文原因，不会变成 500。
-
-## 网页
-
-- **离线渲染**：页面不依赖任何 CDN 或网络字体，图表是自己画的，规则说明里的 Markdown 用内置的渲染器；断网也能打开。
-- **规则说明**：agent 把想法写成项目里的 `spec.md`（股票池、进场出场、仓位、调仓、成本、基准）。项目页有「规则说明」标签，回测页也有一个，显示的是这次回测存档的那一份；早期回测没有存档就显示“还没有规则说明”。
-- **对比**：在回测列表里勾选 2–4 个已完成的回测，点「对比」并排看。
-- **想法记录**（`#/journal`）：想法检验 → 开发期回测 → 统计检验 → 验证期 → 模拟实盘，按时间排成一张表，只汇报已保存的数字，不算新的统计量。
-- **搬回 QuantConnect**：回测页的对话框，直接发到你的 QuantConnect 账户（建项目、上传、云端编译），或一键复制 `main.py` 和项目里其他 `.py` 文件；代码用到 `helm_data`（`HelmSignals` / `HelmUniverse` / `HelmMacro`）时会提示不能直接在 QC 上运行。
-
-## 语言（中文 / English）
-
-- 侧栏底部「外观」下面有「语言」：自动 / 中文 / English。自动 = 浏览器语言以 zh 开头用中文，否则 English。选择存在浏览器的 `localStorage`（`helm.lang`），不刷新页面就整页切换，同时设置 `<html lang>`，数字和日期也按语言格式化。
-- 网页上所有文字都走 `t(key, vars)`：`public/i18n-dict.js` 放中西两份（中文是源，键必须一一对应），`public/i18n.js` 是查表和切换。新增界面文字时两边都要加；`node test/i18n.test.mjs` 会查键一致、占位符一致、页面里不再有写死的汉字。
-- 发给 agent 的聊天 / 想法请求带 `lang`（`zh` 或 `en`，服务器校验）。英文时服务器给 agent 多加一句「用英文回复」；agent 的提示词（`agents.json`、`workspace/CLAUDE.md`）和交接用的内部文字仍是中文，不翻译。
-- 服务器和 MCP 返回给用户看的提示（校验错误、环境体检、模拟实盘的跳过原因、统计关卡说明等）按请求头 `X-Helm-Lang` 返回英文，表在 `lib/i18n.mjs`；没有对应英文的原样返回中文，不会出错。体检的每一项带英文名 `en` 和英文补救办法 `hintEn`。
-- 内容翻译：你和 agent 写的东西（项目名和说明、回测名、规则说明、想法、研究结论和报告、对话、模拟实盘的说明……）按界面语言显示，不认识中文的人也能用。用的是「接入 AI」里配好的模型（默认 haiku），在后台成批翻译，每段只翻一次，结果存在本机 `data/i18n/translations.json`；第一次打开时先显示原文，翻好后页面自动刷新。几百段文字大约几美分。原始文件不改；规则说明复制 / 下载时用原文。代码、工具调用的参数和结果、日志不翻。`HELM_TRANSLATE=0` 可以关掉。实现在 `lib/translate.mjs`。
-- 已知限制：没连 AI 时内容显示原文；代码注释不翻。
-
-## 从想法到策略
-
-项目页顶部的流程条：**想法检验 → 回测 → 统计检验 → 模拟实盘**。
-
-- **想法检验**（选股类想法的第一步）：研究员把一句话想法写成 1–3 个 qlib 因子公式（方向事先定好），`test_idea` 在历史成分股上**只用开发期**检验：各持有天数的 IC 和 Newey-West t 值、五分组收益（扣成本）、逐年稳定性、和已知因子（动量、反转、波动率、规模、E/P）的相关性，结论是「有信号 / 信号弱 / 没有信号」。每个检验过的公式都记进登记表，同一个股票池试得越多，显著性门槛越高；没有信号就到此为止。
-- 有信号：导出这个公式的每日打分（`HelmSignals`），写成 LEAN 策略，先回测开发期；回测会记下信号来自哪次检验，列表里点来源标签能跳回去。
-- **Qlib 研究**（原「完整研究」，只在还没有回测的空项目里出现）：没有具体想法时，系统扫描 Alpha158 / 基本面因子并训练 LightGBM。
-- **叠加 Qlib 选股**（已有策略的项目 ⋯ 菜单）：在现成的 LEAN 策略里（比如 GEM），把美股指数 ETF 那条腿换成 qlib 选出的个股，策略原来的择时规则不变。先做不花钱的预检（有没有 SPY / QQQ / DIA / IWM 这类可替换的腿、股票池是否准备好），再由智能体评估出 2–4 种叠加方式，以 Kahoot 式色块列出（每块写明要回答的问题、替换哪条腿、预计尝试次数、风险），另加一块「不加这一层」。你选了之后交给总控：只用开发期找信号，叠加版跑成候选，原策略原样跑一次做消融对照；主版本和模拟实盘不动，没跑的方案不计入尝试次数。
-- 少数 ETF 的择时想法不走 qlib，直接写 LEAN。
-
-## 稳健性与参数敏感性
-
-回测页的「稳健性」标签，全部只用这个回测已经保存的结果（权益曲线、基准、订单），不重跑 LEAN、不联网：
-
-- **分段稳定性**：按年、按三等份看收益和夏普是不是靠某一段撑起来的。
-- **成本压力**：按成交记录估算换手，加上额外成交成本（5 / 10 / 25 / 50 bp）后收益和夏普怎么变。
-- **市场状态**：按趋势 × 波动把交易日分类，各类状态下的表现；样本太少的状态不下结论。
-
-**参数敏感性**（同一个标签里，点按钮才运行）：策略里想让它微调的参数，要用 `self.get_parameter("名字", 默认值)` 声明（默认值必须是数字常量，默认值为 0 的没法按比例微调）。Helm 用这个回测冻结的代码快照，把每个参数分别 ×0.8、×1.2 各重跑一次（一次只改一个），最多 6 个参数，在独立进程里跑，关掉页面也不影响；结果判成「稳 / 敏感 / 方向翻转」。
-
-- 验证期的回测不允许做（对验证期重跑变体就是多看几次）。
-- 变体只是诊断：结果只放在 `backtests/<id>/sensitivity/`，不是回测记录，不进回测列表，不能标主版本，也不能开始模拟实盘，**不计入尝试次数**。挑最好看的变体来用，就是调参过拟合。
-- 每次运行有自己的任务编号；被新一轮运行替换后，旧进程不会再写文件。超过 25 分钟没更新的任务在读取时显示为中断，下一次运行会替换它。
-
-统计检验（`/api/data/backtests/validate`，每次约 100–200 ms）有一个最多 100 条的内存缓存，键里包含回测文件、尝试记录、验证期记录和项目声明的检验模式，任何一个变了就重算，结果和不缓存时完全一样。
-
-## 模拟实盘
-
-在一个跑完的回测页面点「开始模拟实盘」，选：
-
-- **Helm 内部模拟**：不需要账户，Helm 自己记账。
-- **Alpaca 模拟账户**：先在 app.alpaca.markets 切到 Paper 账户生成密钥，在弹窗里连接。之后每个交易日收盘后按策略的目标权重提交市价单（下一个交易日开盘成交）。一个 Alpaca 账户同时只跟一个模拟。安全规则：
-  - **只能从主版本（main）回测开始**：agent 标的主版本要通过统计检验；你在回测页点「设为主版本」选定的直接算（你的决定）。其他回测只能用内部模拟（已经在跑的模拟不受影响）。
-  - **只买卖这个模拟自己买入的仓位**（client_order_id 以 `<sessionId>-` 开头、有成交的订单），账户里其他持仓一律不动；开始时会列出这些持仓（“不会动这些持仓”）。
-  - **策略资金 = 起始资金 + 这个模拟自己的已实现和未实现盈亏** = 归属它的现金 + 它自己持仓的市值，不含账户里别的持仓。起始资金默认 = 开始时的账户净值 − 已有持仓市值；账户里只有这个模拟时，就等于账户净值。
-  - **数据下载失败或过期**（不是最新交易日、某个目标的日线没更新）的那天一笔都不下，只记录原因，3 小时后自动重试。
-  - Alpaca 显示不可交易的目标跳过，其他照常。
-
-模拟页有两块只读的信息：
-
-- **运行情况**：冻结日、冻结后的收益（和基准同期比）、上次运行、下次运行（估计值，已跳过周末和休市日）、最近 10 次运行（成功 / 跳过 / 失败和原因）。
-- **是否在预期内**：用来源回测的日收益做块自助法，看冻结后这 n 个交易日的累计收益落在回测可能范围的哪个位置：在预期范围内 / 低于 / 高于。冻结后不到 20 个交易日显示「太早，还看不出来」。它只检验“和回测是否一致”，不证明策略有效。
-
-代码在第一次运行那天冻结，冻结之后的收益才是样本外。Helm 每 10 分钟检查一次，交易日结束后（美东午夜过后）自动运行：LEAN 回测最多只跑到美东的昨天，收盘当晚还跑不到当天；订单本来就在下一个交易日开盘成交，不受影响（Helm 要开着；关着的话下次启动会补跑最新一天）。美股休市日（元旦、感恩节等，见 `public/calendar.js`）不算数据过期，也不会白跑；临时休市日历里没有，那天按“没拿到新数据”处理，3 小时后重试。每次运行的结果追加到 `projects/<id>/paper/<sessionId>/log.jsonl`：成功、跳过（`skipReason`）和失败（`failed: true` 加 `error`）都记，同一个原因连续失败只记第一条。
-
-## 研发汇报（一键生成幻灯片）
-
-项目页右上角「生成汇报」，或项目里的「汇报」标签。给团队或客户讲研发结果用：
-
-1. **先定模板**：内置的是咨询报告风格（白底、左上角结论式标题、黄色重点框、底部章节导航、深色封面）。也可以上传公司的 PowerPoint 模板（.pptx / .potx；16:9 的整份当母版用，logo 和背景都保留）或一份喜欢的 PDF 汇报做范例（取它的配色）。公司名、汇报人、logo、免责声明也在这里填，存在 `data/deck/`，只在本机。
-2. **再选内容**：给谁看（团队内部：坦率讲哪里没成；客户：不出现内部用语，必放验证期和尝试次数，最后附免责声明）、中文 / English、篇幅、质量（Sonnet / Opus）、用哪些回测（默认自动挑：主版本、验证期、夏普最高的几个）。
-3. **确认大纲**：策划先给出核心结论和每页的结论式标题，你确认或写一句修改意见重拟。
-4. 后台写稿 → 评审（按麦肯锡项目经理的标准打 绿 / 黄 / 红，给出前三处修改）→ 修改 → 排版 → 转 PDF。做完会通知；页面上有每页预览、评审意见、PowerPoint 和 PDF 下载。改了模板可以「重新排版」，不再调用模型。
-
-**数字不由模型写**：模型只写叙述和 `{{b1.cagr}}` 这样的占位符，数字由 Helm 从回测记录（`lib/deck/datapack.mjs`）填进去；模型自己写出、数据里找不到出处的数字，以及客户版正文里的内部代号（b1 / p2），会交给修改环节改掉，改不掉就在页面上列出来。图表都是原生 PowerPoint 图表（资金曲线、回撤、逐年收益、版本对比、超额拆解、月度热力表、统计检验表），在 PowerPoint 里可以直接改。附录自动列出每个回测的区间、代码和数据指纹。
-
-文件在 `projects/<id>/decks/<deckId>/`（deck.pptx、deck.pdf、大纲、评审、填好数字的 deck.json）。需要 `engine/.venv` 里的 python-pptx 和 pypdfium2（`scripts/setup.sh` 会装）；转 PDF 和预览要 LibreOffice（`brew install --cask libreoffice`，没装时只出 PowerPoint）。一份标准汇报大约 3–8 分钟，用 Sonnet 约 0.5 美元的用量。代码：`lib/deck/`、`engine/deck/`、`public/decks.js`。
-
-## 搬回 QuantConnect
-
-回测页的「搬回 QuantConnect」对话框可以把这次回测的代码**直接发到你自己的 QuantConnect 账户**：第一次填 QC 的 User ID 和 API token（QC 的接口没有 OAuth 登录；在 quantconnect.com 的 My Account → Security 里发邮件获取），保存在 Helm 的 secrets 目录（0600），不会返回给网页，agent 也读不到；请求里只带 QC 要求的签名哈希，不带 token 本身。Helm 会在 `Helm/` 文件夹下新建项目、上传全部 `.py`、在云端编译并显示结果和链接；不会开始云端回测，只调用项目 / 文件 / 编译接口，不碰实盘部署。每次发送记在 `projects/<id>/qc-exports.jsonl`。只有你能在网页上发送，agent 没有这个工具。也可以照旧手动复制：`main.py` 可以直接粘贴到 QuantConnect 网页 IDE 运行（对话框会列出要一起添加的文件）。用了 `HelmSignals` / `HelmUniverse` / `HelmMacro` 的策略读的是本机文件，不能直接在 QC 上运行。注意 QC 云端的数据是未复权的原始价格，结果会和本地有些差别。
-
-## 调参（防过拟合的超参数搜索）
-
-两个引擎各有一个调参工具，agent 要调参时只能用它们，不能自己手动反复改参数回测：
-
-| | LEAN 策略（`tune_backtest` / `read_tuning`，回测页「稳健性」也有按钮） | qlib 研究（`start_research` 的 `tune`） |
-|---|---|---|
-| 调什么 | `self.get_parameter` 声明的参数（默认值 ÷2 到 ×2） | LightGBM 的学习率、叶子数、深度、最小样本、L1/L2、采样比例 |
-| 怎么搜 | 拉丁超立方随机搜索（默认 16 组，6–40） | 拉丁超立方随机搜索 + 逐轮淘汰（全部候选先在 3 个分散的折上打分，前三分之一再上全部折） |
-| 用哪段数据打分 | 只用开发期回测 | 只用各折的验证年；测试年和验证期都不看 |
-| 怎么挑 | 参数平台：和最近几组取平均夏普，不挑单点最好 | 验证年平均 IC 最高 |
-| 过拟合检查 | CSCV 估计 PBO（开发期切 4–8 段） | CSCV 估计 PBO（按折） |
-| 什么时候保持原参数 | PBO > 0.5，或平台夏普提升不到 max(0.1, 10%) | PBO > 0.5，或 IC 提升不到 0.002，或没法估计 PBO |
-| 计数 | 每个候选都记进 `trials.jsonl`，去膨胀夏普门槛随之抬高 | 报告里写明调了几组、拟合了几次 |
-
-依据：Bergstra & Bengio (2012) 随机搜索；Li et al. (2018) Hyperband / 逐轮淘汰；Bailey, Borwein, López de Prado & Zhu (2017) PBO 与 CSCV；Bailey & López de Prado (2014) 去膨胀夏普。调参的规则代码（`lib/tune.mjs`、`qs_core.py` 里的 PBO 和选参）属于研究规则，agent 改它们要你批准。
-
-## agent 开工前先问你
-
-agent 需要你拍板的事（会明显改变结果的歧义、二选一的做法），在开始干活之前用 `ask_user` 一次问清：对话里出现问题卡片（最多 4 个问题，每个 2–4 个选项，第一个是它推荐的，带说明），选完点「回答并继续」它就接着做；也可以直接在输入框里写回答，或「跳过，按推荐的做」。15 分钟没回答就按推荐的继续，并在总结里说明。agent 不再把问题写在回复末尾等你回复。顶栏「等你处理」同时数待回答的问题和待批准的改动。
-
-## agent 自己补功能（要删东西时先问你）
-
-agent 遇到工具或引擎缺功能、有 bug 时，会先自己改代码补上，而不是只汇报「做不了」。每次改文件、跑命令都会先经过 Helm 的审批（`claude -p --permission-prompt-tool mcp__qc__approve` → `lib/change-policy.mjs`）：
-
-| | 范围 |
+| 路径 | 内容 |
 |---|---|
-| 直接做（只在沙盒里运行） | 改研究引擎 `engine/qlib_research/`（研究规则部分除外）、新建测试文件，写技能 `workspace/.claude/skills/<名字>/SKILL.md`（开头只有 name / description）；跑快速测试和只读 git / ls 命令 |
-| 先问你 | 删除 / 清空 / 移动文件；改在沙盒外运行的平台代码（`lib/`、`mcp/`、`engine/` 顶层脚本、`run.sh`）和已有的测试；要跑真实 LEAN 的测试（`npm test` 完整模式）；改 `server.mjs`、网页、`agents.json`、权限和安全代码、`workspace/CLAUDE.md`、`package.json`；改研究规则（统计门槛、多重检验登记、验证期、尝试次数，会给你看差异）；安装任何东西（pip、npm、插件、MCP）；其它命令 |
-| 不行 | Helm 文件夹以外、`.env` 和密钥、`data/`、`projects/`（项目代码走 `write_file`）、`.git/`；总控不改代码，交给策略工程师 |
+| `server.mjs`、`public/` | 本地服务和网页（没有 npm 依赖，不用 CDN） |
+| `mcp/qc-mcp.mjs` | 智能体用的工具 |
+| `lib/` | 引擎、统计、调参、模拟实盘、券商 / QC 客户端、安全策略 |
+| `engine/` | 数据下载、策略数据助手（`helm_data.py`）、静态检查、qlib 研究 |
+| `install.sh`、`scripts/setup.sh`、`macos/` | 安装程序、引擎安装、Mac App |
+| `projects/`、`data/` | 你的项目和对话（不进 git） |
 
-- 需要你批准时，对话里出现卡片（差异、命令、agent 刚才说的理由），顶栏显示「待你批准」。可以「允许」「本对话都允许」（同一个文件 / 同一条命令不再问）或「拒绝」并附一句话；15 分钟没处理自动拒绝。被拒绝后 agent 不会换办法绕过。
-- 安全网：改每个文件之前先存原文（`data/changes/`，不碰 git）；agent 改完调用 `verify_changes` 跑相关测试，没过就把这次的改动全部恢复，agent 读失败输出再修；运行结束时还有没检查的改动，Helm 自己再跑一次。
-- 「Agents → 改动」列出每次改动（差异、测试结果、审批记录），可以一键撤销。改到 `server.mjs` / `lib/` / `agents.json` 的要重启 Helm 才生效，会提示。
-- 规则管「改哪个文件」，沙盒管「改完的代码运行时能做什么」。agent 可以直接改的代码只会在沙盒里运行：agent 跑的测试、改完后的自动检查用 agent 沙盒（只能写临时目录，只能连本机、连不上 Helm）；qlib 研究、想法检验、股票池导出用研究沙盒（可以联网下载 SEC 数据，但只能写 `projects/<id>/research/`、缓存和导出目录，读不到密钥、连不上 Helm）。路径按真实路径、不分大小写比较（`lib/Stats.mjs` 和 `lib/stats.mjs` 是同一个文件）。启动时会用 `/usr/bin/true` 试一次沙盒规则，不能用（不是 macOS、规则编译失败、或设置了 `HELM_EXEC_SANDBOX=off`）时自动收紧为要你批准。
+测试：`npm test -- --fast`（不跑 LEAN）或 `npm test`（含真实 LEAN 回测）。测试用临时目录，不碰你的项目。
 
-## 测试
+[CONTRIBUTING.md](CONTRIBUTING.md) · [docs/ROADMAP.md](docs/ROADMAP.md) · [CHANGELOG.md](CHANGELOG.md) · [community/](community/README.md)
 
-- `npm test`：完整模式，每个测试文件一个进程。除了下面的快速模式内容，还会跑真实 LEAN：冒烟测试里的一次回测（约半分钟，覆盖验证期编号、尝试记录、删回测不减次数、main 关卡）、模拟实盘（内部模拟跑真实 LEAN，Alpaca 模式用假的模拟盘服务器，不联网）、指标一致性的两次真实回测、LEAN 沙盒测试（`sandbox.test.mjs`），以及参数敏感性的真实 LEAN 参数通路检查（`--parameters` 能不能真的改到策略里的参数）。**这一项只在完整模式跑。**
-- `npm test -- --fast`：不跑 LEAN。覆盖统计检验、一致性核对（合成数据）、回测指纹、Alpaca 客户端（假 fetch）和模拟实盘安全规则的纯函数、「是否在预期内」、想法记录、FRED 宏观、美股休市日历（和 NYSE 2019–2027 公布的休市日核对，网页和服务端逐小时一致）、稳健性分析、参数敏感性（用替身 LEAN：发现参数、变体取值、判定、拒绝情况、任务编号、读取无副作用）、统计检验缓存、服务鉴权与健壮性（400 而不是 500）、前后端契约（按 `app.js` 真实请求打后端；10 个有副作用的路由跳过不发）、静态检查、项目删除等。LEAN 沙盒测试在快速模式里跳过。
-- `node test/alpaca.test.mjs` 等任何测试文件可以单独跑。
-- 测试全程用临时目录，不会动真实项目和记录。
-
-## 许可
-
-[MIT](LICENSE)。LEAN（Apache 2.0，安装时下载）、yfinance（Apache 2.0）和 qlib（MIT）不在这个仓库里，按各自的许可证另行安装；Yahoo Finance 的数据受 Yahoo 的使用条款约束（仅限个人使用）。汇报流水线的角色分工和评审标准改编自 deck-pipeline / mckinsey-charts / mckinsey-critic 技能（MIT），见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+MIT 许可。LEAN、yfinance、qlib 不在这个仓库里（见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)）；Yahoo 数据按 Yahoo 条款仅限个人使用。

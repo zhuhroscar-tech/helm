@@ -25,6 +25,8 @@ agent 实际上是靠 Claude Code 跑的。但不一定要有 Claude 订阅：An
 
 ## 2. 下载代码，装好回测引擎
 
+捷径：`curl -fsSL https://raw.githubusercontent.com/zhuhroscar-tech/helm/main/install.sh | bash` 会替你做完第 2、3 步（还会提议安装 Claude Code、构建 App），每一步改动之前都会先问。手动步骤如下：
+
 ```
 git clone https://github.com/zhuhroscar-tech/helm.git
 cd helm

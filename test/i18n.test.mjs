@@ -63,7 +63,7 @@ const unknown = [...used.keys()].filter((k) => !(k in zh));
 check(`public/*.js 和 index.html 用到的 ${used.size} 个键都在字典里`, unknown.length === 0, unknown.slice(0, 5).map((k) => `${k}@${used.get(k)}`).join(','));
 const unusedDefault = kz.filter((k) => !used.has(k) && /^[khx]\d+$/.test(k));
 check('字典里没有没人用的自动编号键', unusedDefault.length === 0, unusedDefault.slice(0, 5).join(','));
-// 代码里除了字典、注释和语言无关的数据，不应再有汉字（见 README 的「语言」一节）
+// 代码里除了字典、注释和语言无关的数据，不应再有汉字（见 docs/ARCHITECTURE.md 的 Language 一节）
 const appSrc = await read('app.js');
 const codeCjk = appSrc.split('\n').filter((l) => CJK.test(l) && !/^\s*(\/\/|\/\*|\*)/.test(l) && CJK.test(l.replace(/\s\/\/.*$/, '').replace(/\/\*.*?\*\//g, '')));
 check('app.js 里剩下的汉字只在「服务器返回的中文数据」的匹配里', codeCjk.length <= 20, `${codeCjk.length} 行`);

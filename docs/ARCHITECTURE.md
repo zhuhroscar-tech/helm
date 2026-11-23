@@ -116,3 +116,25 @@ How Helm is put together, where it keeps state, and which mechanisms keep resear
 - **Point-in-time reads.** `HelmUniverse`, `HelmSignals`, `HelmMacro` and `HelmDataset` only return what was known strictly before the current day.
 
 See also [CONFIGURATION.md](CONFIGURATION.md) and [ROADMAP.md](ROADMAP.md).
+
+## Safety model
+
+- The server listens on 127.0.0.1 only and checks `Host`. State-changing requests need a per-start page token, a same-site Origin and `Sec-Fetch-Site: same-origin`; restart means refresh the page. This is defence in depth, not isolation from malicious local processes.
+- Strategy code runs in a macOS `sandbox-exec` sandbox: no network, no home directory, repo or other projects, no secrets or `HELM_*` environment variables. A static lint (`engine/lint_strategy.py`) runs first, but the sandbox is the real boundary. Without `sandbox-exec`, backtests refuse to run unless you set `HELM_EXEC_SANDBOX=off`, which runs strategy code unsandboxed.
+- Agents' file reads have a deny-list (SSH, cloud credentials, `.env`, `data/secrets`, `data/threads` and more). It is a deny-list, not an allow-list.
+- Agents that edit Helm's own code or run commands go through an approval policy. Research-rule code (statistical thresholds, trial counting, holdout log) needs your approval; changes are snapshotted and auto-reverted if tests fail. Deleting needs explicit permission per message.
+- Results, trial counts, holdout logs and paper logs are append-only. Deleting a backtest or starting a new project does not loosen the deflated-Sharpe threshold.
+- Alpaca keys live in `secrets/alpaca.json` (mode 0600, same folder as above), entered only on the web page, never returned by any API and never passed to agents or LEAN.
+- AI keys live in `secrets/ai.json` (mode 0600) and reach Claude Code only through `apiKeyHelper`; sandboxed agent commands also run with `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` removed from their environment.
+
+See also [SECURITY.md](../SECURITY.md).
+
+## Language (Chinese / English)
+
+The UI language is set in Settings: Auto / 中文 / English. Auto picks Chinese when the browser language starts with `zh`, otherwise English. The choice is stored in `localStorage` (`helm.lang`), the page re-renders without a reload, `<html lang>` is updated, and numbers and dates are formatted for the language.
+
+- All UI text goes through `t(key, vars)`. `public/i18n-dict.js` holds both languages (Chinese is the source; keys must match one to one), `public/i18n.js` does lookup and switching. `node test/i18n.test.mjs` checks key and placeholder parity and that no hard-coded Chinese is left in the page.
+- Chat and idea requests carry `lang` (`zh` | `en`, validated by the server). In English the server appends an instruction to reply in English to the agent's system prompt. Agent prompts (`agents.json`, `workspace/CLAUDE.md`) and internal hand-off text stay in Chinese on purpose.
+- User-facing server and MCP messages (validation errors, environment check, paper-trading skip reasons, statistical gate text, and so on) are returned in English when the request has `X-Helm-Lang: en`. The table is in `lib/i18n.mjs`; a message without an English entry falls back to Chinese. Each health component carries `en` and `hintEn`.
+- Content translation: what you and the agents write (project names and descriptions, backtest names, specs, ideas, research conclusions and reports, chat messages, paper-trading notes, …) is shown in the UI language, so people who don't read Chinese can use Helm. It uses the model set up under "Connecting an AI" ([CONFIGURATION.md](CONFIGURATION.md#connecting-an-ai)) (haiku by default), translates in background batches, translates each text once and caches the result locally in `data/i18n/translations.json`. The first view shows the original; the page refreshes by itself when translations arrive. A few hundred texts cost a few cents. Source files are never changed; copying or downloading a spec gives the original. Code, tool-call arguments and results, and logs are not translated. Set `HELM_TRANSLATE=0` to turn it off. Implementation: `lib/translate.mjs`.
+- Known limits: without a working AI connection content is shown untranslated; code comments are not translated.
