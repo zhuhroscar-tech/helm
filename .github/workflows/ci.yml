@@ -40,3 +40,4 @@ jobs:
           for t in test_qs_core test_qs_data test_qs_fund test_qs_idea test_qs_expr test_qs_light; do
             python engine/qlib_research/$t.py
           done
+          python engine/test_helm_vol.py

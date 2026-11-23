@@ -1,13 +1,34 @@
 # 更新记录
 
-## 2026-11-23
+## 未发布
+
+### 发布前审查（全面检查后修好的问题）
+- **安全**：股票池导出能写 LEAN 日线价格，但它执行的研究引擎目录 agent 不用批准就能改。现在导出跑「已提交版本」引擎代码的一份干净拷贝（`git archive HEAD` → 临时目录），工作区里的改动碰不到能写价格的进程（开发时可设 `HELM_ENGINE_LIVE=1`）。
+- **安全**：`HELM_QC_FILE` 指向别处时，QuantConnect 凭据也加进 agent 的读取禁区和沙盒禁区（和 Alpaca / AI 密钥一样）。
+- 自动选模型的那几十秒里点「停止」：以前不生效、之后照样启动 claude；现在停得住。
+- 叠加 Qlib 选股：连点 / 两个标签页不会起两次付费评估，也不会误报「评估被中断」；同一方案不会被选两次。基线不再拿基准 / 对照 / 调试回测。
+- 发到 QuantConnect：连点不会建出两个 QC 项目。「上次发送」按本地时间显示，只算编译成功的那次。
+- 改名后切换界面语言，不再显示另一种语言的旧名字。
+- 调参：原参数就是最好平台的峰时，结论是「保留原参数」，不再推荐邻居。
+- 想法检验：`Mean(2*3,5)` 这类只由数字组成的参数直接报错（以前要么崩、要么悄悄变成全空的「没有信号」并计入多重检验次数）；公式在每只股票上都算不出来时报错。研究数据缓存的键加上成分股和 `$mkt` / 基本面字段，成分股不同的两次运行不再共用、互相覆盖。导出到 LEAN 的缩放成交量四舍五入，不会变成 0。
+- 网页：叠加对话框的数字键不再吞掉 ⌘/Ctrl+0；对话框的 Tab 焦点循环跳过看不见的按钮；对话框开着时 ⌘J / ⌘K 不动作；黄色色块对比度达标。删掉 3 个没用的翻译。
+- Mac App：服务还在启动时退出 App，不再留下占着 4377 的 node；连着终端里启动的 Helm 时换文件夹会提示；换文件夹 / 重启时取消还在等待的启动；延迟 SIGKILL 不会误杀复用了 pid 的进程。
+- 安装脚本：中文系统下 `$REPO（` 在 macOS 自带的 bash 3.2 里报错退出（变量名后紧跟全角标点）；已装在别的分支上时不再替你切分支；更新下载失败时说明原因；卸载提示补上日志目录；说明 `--yes` 也会运行官方安装程序。`test/install.test.mjs` 在装了 Xcode 命令行工具的 Mac 上也能测到「没有 swift」。
+- 文档：qlib 只在完整研究时需要（入门指南、架构、贡献指南）；CI 加跑 `engine/test_helm_vol.py`。
+
+### 研究引擎不再依赖 qlib
+- 新增 `engine/qlib_research/qs_expr.py`：用 pandas 重写 qlib 的因子公式算子，用 qlib 0.9.7 自己的输出做对照（`fixtures/`、`test_qs_expr.py`）。
+- 想法检验、股票池导出、导出信号都跑在 `engine/.venv` 上，不需要 qlib；只有完整的 Qlib 研究（LightGBM、qlib 回测）还要装 qlib。CI 新增 `test_qs_light.py`（屏蔽 qlib 跑这条路径）。
+
+### 其他
+- 想法框、对话框可以选模型和思考深度，默认「自动」：开始前由一个小模型读任务挑选（`HELM_AUTO_MODEL`），出错或超时就用默认值。
+- 股票池数据已经到最近一个交易日时，显示「已是最新」，按钮变成不显眼的「重新准备」（以前一直显示「更新」，更新完还像在催你再更新）。
+- agent 的 MCP 配置直接内联传给 claude，不再读共享的 `data/mcp.json`（别的进程改写它时，agent 会报「没有 MCP 工具」）。
 
 ### 波动率目标（HelmVol）
 - `helm_data.HelmVol`：只用过去数据的波动率预测（HAR，历史不够用 EWMA），给出仓位系数 = min(上限, 目标波动率 / 预测波动率)。策略选什么、何时买卖不变，只改仓位大小，用来降回撤。
 - 代码检查允许 `from helm_data import HelmVol`；`engine/test_helm_vol.py` + `test/helm-vol.test.mjs`（无前视、预测比常数好、回撤下降、仓位上限、速度）。
 - `workspace/CLAUDE.md` 新增「波动率目标」一节：用法 + 事先定好的合格线和终止规则；工程师 / 总控 / 风控官提示词。网页没有改动。
-
-## 未发布
 
 ### 一行安装
 - 新增 `install.sh`：`curl -fsSL https://raw.githubusercontent.com/zhuhroscar-tech/helm/main/install.sh | bash`。检查 macOS / git / Node 20+（没有 Node 时提议 `brew install node`），没有 Claude Code 时提议用官方安装程序装，下载到 `~/Helm`（已装过就快进更新，有本地改动就不动），调用 `scripts/setup.sh`，提议构建并打开 Mac App。每一步改动前都问；不用 sudo；整个脚本包在 `main()` 里，下载到一半断开不会执行半截脚本；`curl | bash` 时从 /dev/tty 读回答。

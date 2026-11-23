@@ -1,6 +1,6 @@
 # Helm as a macOS app
 
-`macos/` holds a small native shell (Swift + the system WebKit, about 1 MB). It starts the Node server from this repository and shows the same web UI in a real Mac window. Projects, data, LEAN and settings all stay in the repository.
+`macos/` holds a small native shell (Swift + the system WebKit, about 1 MB). It starts the Node server from this repository and shows the same web UI in a real Mac window. Projects, data and LEAN stay in the repository; secrets live in `~/Library/Application Support/Helm/secrets` (new installs) and the app's server log in `~/Library/Logs/Helm`.
 
 There is no prebuilt app to download. You build it on your own Mac from this repository, after `scripts/setup.sh` has installed the engine, and it is ad-hoc signed for that Mac only.
 

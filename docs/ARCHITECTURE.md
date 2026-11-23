@@ -19,7 +19,7 @@ How Helm is put together, where it keeps state, and which mechanisms keep resear
     |                                              |   engine/fetch_data.py            LEAN launcher (.NET) in sandbox-exec
     |                                              |   (Yahoo -> LEAN daily zips)       + engine/.venv Python, strategy main.py
     |                                              |                                     imports engine/helm_data.py
-    |                                              +--> lib/qlib.mjs --> engine/qlib_research/run.sh (qlib Python, sandboxed)
+    |                                              +--> lib/qlib.mjs --> engine/qlib_research/run.sh (engine/.venv; qlib Python only for full research; sandboxed)
     |                                                        '-> engine/qlib_bridge.py: universes, signals -> LEAN format
     v
  read-only JSON endpoints: backtests, charts, orders, validation, robustness, journal, pipeline, health
@@ -31,7 +31,7 @@ How Helm is put together, where it keeps state, and which mechanisms keep resear
 - **MCP server (`mcp/qc-mcp.mjs`).** The agents' only way to create projects, write code, run backtests, validate and read results. Tool names follow QuantConnect conventions.
 - **Engine (`lib/engine.mjs`).** Project and file storage, compile/lint, launching LEAN, parsing results, trial and holdout ledgers, statistical validation. Backtests run in detached processes, so closing the page or the server does not stop them.
 - **LEAN.** QuantConnect's open-source engine, built locally from `engine/Lean` (.NET), executing the strategy with Python 3.11 from `engine/.venv`, inside a macOS sandbox.
-- **qlib research engine (`engine/qlib_research/`).** Idea tests, factor scans, LightGBM research, point-in-time universes and fundamentals. Runs under a separate Python that has qlib; Helm reads its output files and converts universes and signals to LEAN format.
+- **qlib research engine (`engine/qlib_research/`).** Idea tests, factor scans, LightGBM research, point-in-time universes and fundamentals. Idea tests, universe exports and signal exports run on `engine/.venv` (formulas are evaluated by `qs_expr.py`, a pandas re-implementation of qlib's operators checked against qlib's own output); only full research (LightGBM, qlib backtests) needs a separate Python with qlib. Universe exports, which write LEAN prices, run a clean copy of the committed engine code, not the working tree agents can edit. Helm reads the output files and converts universes and signals to LEAN format.
 - **Paper trading (`lib/paper.mjs`).** Freezes a backtest's code on the first run day and re-runs it after each US close using fresh daily data; `sim` mode keeps books internally, `alpaca` mode submits orders to an Alpaca paper account through `lib/alpaca.mjs`.
 
 ## Module map
@@ -85,7 +85,7 @@ How Helm is put together, where it keeps state, and which mechanisms keep resear
 | Location | Contents |
 |---|---|
 | `projects/<id>/` | `project.json`, `main.py` and other `.py` files, `spec.md`, `holdout_log.json`, `backtests/<bid>/` (code snapshot, `meta.json`, LEAN `out/`, `sensitivity/`), `paper/<sessionId>/log.jsonl`, `research/` |
-| `data/` | `trials.jsonl` (trial ledger), `threads/` (conversations), `secrets/` (AI and Alpaca keys on older installs; new installs keep them in `~/Library/Application Support/Helm/secrets`, see CONFIGURATION.md), `changes/` (agent edit snapshots), `mcp.json` (rewritten at each start), `qlib/`, `sandbox/`, `server.log`, `agents-backups/` |
+| `data/` | `trials.jsonl` (trial ledger), `threads/` (conversations), `secrets/` (AI and Alpaca keys on older installs; new installs keep them in `~/Library/Application Support/Helm/secrets`, see CONFIGURATION.md), `changes/` (agent edit snapshots), `mcp.json` (a copy of the agents' MCP config for reference; agents get it inline), `qlib/`, `sandbox/`, `server.log`, `agents-backups/` |
 | `engine/Lean/`, `engine/.venv/` | Local LEAN checkout and build, Python environment (git-ignored) |
 | `engine/Lean/Data/` | LEAN data folder: equity daily zips, plus Helm-written `helm/macro/` and `helm/custom/` |
 | `~/.qlib/` | qlib US data, constituents, SEC fundamentals cache (shared with the older Quant Strategy project) |
