@@ -232,8 +232,8 @@ const S = {
   status: null,
   agents: [],
   options: { models: [], efforts: [] },
-  model: store.get('model', ''),
-  effort: store.get('effort', ''),
+  model: store.get('model', '') || 'auto',   // 'auto' 自动挑 | 模型 id（没有「默认」这一项）
+  effort: store.get('effort', '') || 'auto',
   projects: null,
   route: { view: 'home' },
   project: null,
@@ -272,8 +272,8 @@ const S = {
   validation: null,    // 当前回测的统计检验
   universes: null,     // qlib 股票池
   route2: store.get('ideaRoute', 'auto'), // 首页想法的研究路线：auto | fast | deep
-  ideaModel: store.get('ideaModel', ''),   // 首页想法用的模型：'' 默认 | 'auto' 自动挑 | 模型 id
-  ideaEffort: store.get('ideaEffort', ''), // 首页想法用的思考深度：同上
+  ideaModel: store.get('ideaModel', '') || 'auto',   // 首页想法用的模型：'auto' 自动挑 | 模型 id
+  ideaEffort: store.get('ideaEffort', '') || 'auto', // 首页想法用的思考深度：同上
 };
 // agents.json 里的默认名字 / 定位 / 示例任务是中文；英文界面下换成字典里的英文。用户改过的（和默认不一样）原样显示。
 function localizeAgents(raw) {
@@ -2509,14 +2509,15 @@ const OPT_ICON = {
 };
 function ideaOptsHTML() {
   const { models = [], efforts = [] } = S.options || {};
-  const m = S.ideaModel === 'auto' || models.some((x) => x.id === S.ideaModel) ? S.ideaModel : '';
-  const e = S.ideaEffort === 'auto' || efforts.some((x) => x.id === S.ideaEffort) ? S.ideaEffort : '';
+  // 选项还没加载时保留存着的值（不改 S），加载后 renderMain 会重画
+  const m = S.ideaModel || 'auto';
+  const e = S.ideaEffort || 'auto';
   const opt = (v, label, cur) => `<option value="${esc(v)}"${v === cur ? ' selected' : ''}>${esc(label)}</option>`;
-  const ms = opt('', _t('k1530'), m) + opt('auto', _t('am_autoModel'), m) + models.map((x) => opt(x.id, x.label, m)).join('');
-  const es = opt('', _t('k1532'), e) + opt('auto', _t('am_autoEffort'), e) + efforts.map((x) => opt(x.id, _t('k1441', { v: x.label }), e)).join('');
+  const ms = opt('auto', _t('am_autoModel'), m) + models.map((x) => opt(x.id, x.label, m)).join('');
+  const es = opt('auto', _t('am_autoEffort'), e) + efforts.map((x) => opt(x.id, _t('k1441', { v: x.label }), e)).join('');
   return `<div class="run-opts idea-opts">
-      <label class="opt${m ? ' set' : ''}" title="${esc(m === 'auto' ? _t('am_autoTip') : _t('h031'))}">${OPT_ICON.model}<select id="ideaModelSel" aria-label="${esc(_t('h031'))}">${ms}</select></label>
-      <label class="opt${e ? ' set' : ''}" title="${esc(e === 'auto' ? _t('am_autoTip') : _t('h032'))}">${OPT_ICON.effort}<select id="ideaEffortSel" aria-label="${esc(_t('h032'))}">${es}</select></label>
+      <label class="opt set" title="${esc(m === 'auto' ? _t('am_autoTip') : _t('h031'))}">${OPT_ICON.model}<select id="ideaModelSel" aria-label="${esc(_t('h031'))}">${ms}</select></label>
+      <label class="opt set" title="${esc(e === 'auto' ? _t('am_autoTip') : _t('h032'))}">${OPT_ICON.effort}<select id="ideaEffortSel" aria-label="${esc(_t('h032'))}">${es}</select></label>
     </div>`;
 }
 // 消息底部：自动挑了什么、为什么（挑失败时说明用了默认值）
@@ -4347,8 +4348,8 @@ async function send(text, opts = {}) {
   S.sending = true;
   updateComposer();
   try {
-    const model = (opts.idea ? S.ideaModel : S.model) || null;
-    const effort = (opts.idea ? S.ideaEffort : S.effort) || null;
+    const model = (opts.idea ? S.ideaModel : S.model) || 'auto';
+    const effort = (opts.idea ? S.ideaEffort : S.effort) || 'auto';
     r = await post('/api/chat', { threadId: opts.idea ? undefined : S.thread && S.thread.id, agent: opts.idea ? 'mia' : S.thread ? S.thread.agent : S.agentId, message: text, context: ctx, allowDanger, model, effort, lang: HELM_I18N.lang() });
   } catch (e) {
     if (!opts.idea) { toast(`${_t('k1477', { message: e.message })}`); if (!input.value) { input.value = text; autosize(); } }
@@ -4890,17 +4891,19 @@ function toast(text, action) {
 
 /* ================= run options ================= */
 function renderRunOpts() {
-  const { models, efforts, envModel, envEffort } = S.options;
+  const { models, efforts } = S.options;
   const ms = $('#modelSel');
   const es = $('#effortSel');
-  ms.innerHTML = `<option value="">${envModel ? `${_t('k1529', { v: esc(modelLabel(envModel)) })}` : _t('k1530')}</option><option value="auto">${esc(_t('am_autoModel'))}</option>` + models.map((m) => `<option value="${esc(m.id)}">${esc(m.label)}</option>`).join('');
-  es.innerHTML = `<option value="">${envEffort ? `${_t('k1531')} ${esc((efforts.find((e) => e.id === envEffort) || {}).label || envEffort)}${_t('k0017')}` : _t('k1532')}</option><option value="auto">${esc(_t('am_autoEffort'))}</option>` + efforts.map((e) => `<option value="${esc(e.id)}">${_t('k1441', { v: esc(e.label) })}</option>`).join('');
-  if (S.model !== 'auto' && !models.some((m) => m.id === S.model)) S.model = '';
-  if (S.effort !== 'auto' && !efforts.some((e) => e.id === S.effort)) S.effort = '';
+  ms.innerHTML = `<option value="auto">${esc(_t('am_autoModel'))}</option>` + models.map((m) => `<option value="${esc(m.id)}">${esc(m.label)}</option>`).join('');
+  es.innerHTML = `<option value="auto">${esc(_t('am_autoEffort'))}</option>` + efforts.map((e) => `<option value="${esc(e.id)}">${_t('k1441', { v: esc(e.label) })}</option>`).join('');
+  if (!models.some((m) => m.id === S.model)) S.model = 'auto';
+  if (!efforts.some((e) => e.id === S.effort)) S.effort = 'auto';
+  if (!models.some((m) => m.id === S.ideaModel)) S.ideaModel = 'auto';
+  if (!efforts.some((e) => e.id === S.ideaEffort)) S.ideaEffort = 'auto';
   ms.value = S.model;
   es.value = S.effort;
-  ms.closest('.opt').classList.toggle('set', Boolean(S.model));
-  es.closest('.opt').classList.toggle('set', Boolean(S.effort));
+  ms.closest('.opt').classList.add('set');
+  es.closest('.opt').classList.add('set');
   const mSel = models.find((m) => m.id === S.model);
   const eSel = efforts.find((e) => e.id === S.effort);
   ms.closest('.opt').title = S.model === 'auto' ? _t('am_autoTip') : mSel ? `${_t('k1533', { label: mSel.label, desc: mSel.desc })}` : _t('k1534');
