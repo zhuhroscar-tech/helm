@@ -54,7 +54,8 @@ Project pages show the flow **idea test -> backtest -> statistical validation ->
    - Alpaca mode trades only positions that session itself opened, and only from a validated `main` backtest or one you explicitly marked `main`. On a day with failed or stale data it submits nothing and retries after 3 hours.
    - A "within expectations" panel compares forward returns with a block bootstrap of the source backtest; below 20 trading days it says "too early to tell".
    - Sessions run only while Helm is open and catch up at the next start.
-7. **Export to QuantConnect.** The backtest page has a dialog that copies `main.py` and the other `.py` files. 
+7. **Export to QuantConnect.** The backtest page has a dialog that sends the backtest's code straight to your own QuantConnect account, or copies `main.py` and the other `.py` files by hand.
+   - Sending: connect once with your QC User ID and API token (QC's API has no OAuth sign-in; request them under My Account → Security on quantconnect.com). They are stored in Helm's secrets folder (0600), never returned to the page and unreadable by agents; requests carry only QC's signed hash, never the token. Helm creates a new project under a `Helm/` folder, uploads every `.py` file, compiles it in the cloud and shows the build result with a link. It does not start a cloud backtest and only calls the project, file and compile endpoints (no live deployment). Each send is logged in `projects/<id>/qc-exports.jsonl`. Only you can send, from the web page; agents have no tool for it.
    - Strategies that use `helm_data` (`HelmSignals` / `HelmUniverse` / `HelmMacro` / `HelmDataset`) read local files and cannot run on QuantConnect as-is.
    - QC cloud uses unadjusted prices, so results will differ somewhat.
 

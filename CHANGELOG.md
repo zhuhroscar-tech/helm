@@ -2,6 +2,12 @@
 
 ## 未发布
 
+### 直接发到 QuantConnect
+- 回测页「搬回 QuantConnect」对话框新增「发送到 QuantConnect」：用 QC 的 User ID + API token 连接一次（QC 接口没有 OAuth），之后一键在你的 QC 账户 `Helm/` 文件夹下新建项目、上传全部 `.py`、云端编译，显示编译结果（失败时附日志）和项目链接。手动复制收进「或者手动复制文件」。
+- 凭据存 secrets 目录 `quantconnect.json`（0600，可用 `HELM_QC_FILE` 覆盖），只进不出；请求只带 `sha256(token:时间戳)` 签名。客户端 `lib/quantconnect.mjs` 只允许 authenticate / projects/create / files/* / compile/*，不建云端回测、不碰 live 接口。
+- 用了 `helm_data` 的策略：先提示，确认「仍然发送」才发。每次发送追加到 `projects/<id>/qc-exports.jsonl`。只有网页能发，agent 没有这个工具。
+- 新增 `test/quantconnect.test.mjs`（mock fetch）。**未验证**：没有连真实 QuantConnect 账户跑过（沙盒连不上 quantconnect.com）。
+
 ### 项目重命名
 - 项目可以改名了：项目页标题旁的「···」、侧栏和首页项目的右键菜单、Mac App「项目 → 重命名…」都能打开。回车保存，Esc 取消，空名不能提交，最长 120 字。改名不影响回测和尝试次数；侧栏、面包屑、窗口标题、首页列表立即更新。
 

@@ -22,6 +22,7 @@ import { loadJournal } from './lib/journal.mjs';
 import { listDatasets } from './lib/datasets.mjs';
 import * as Paper from './lib/paper.mjs';
 import * as Alpaca from './lib/alpaca.mjs';
+import * as QC from './lib/quantconnect.mjs';
 import * as AI from './lib/ai.mjs';
 import { sensitiveReadDenies } from './lib/agent-perms.mjs';
 import { effectiveTools, localTools, validateAgentPatch, saveAgentPatch, isQcTool } from './lib/agents.mjs';
@@ -279,16 +280,16 @@ async function readJsonRaw(req, limit = 2_000_000) {
 
 
 // ---- 请求体校验：所有 POST 接口在进业务代码之前先过这一关，类型不对 / 缺字段 / 太长一律 400 + 中文说明 ----
-const STR_MAX = { name: 120, description: 2000, template: 40, backtestId: 64, sessionId: 64, jobId: 64, index: 40, start: 10, role: 20, period: 20, mode: 20, title: 120, target: 40, benchmark: 20, features: 30, neutralize: 30, advanced: 30, idea: 4000, keyId: 200, secret: 400, message: 200000, threadId: 64, feature: 40, ideaFactor: 60, file: 120, model: 40, effort: 20, agent: 40, aiMode: 20, apiKey: 500, baseUrl: 300, aiModel: 120, nameEn: 120, nameZh: 120, deckId: 64, audience: 20, quality: 20, length: 20, note: 2000, notes: 2000, firm: 200, presenter: 200, disclaimer: 4000, disclaimerEn: 4000 };
+const STR_MAX = { name: 120, description: 2000, template: 40, backtestId: 64, sessionId: 64, jobId: 64, index: 40, start: 10, role: 20, period: 20, mode: 20, title: 120, target: 40, benchmark: 20, features: 30, neutralize: 30, advanced: 30, idea: 4000, keyId: 200, secret: 400, userId: 20, token: 200, message: 200000, threadId: 64, feature: 40, ideaFactor: 60, file: 120, model: 40, effort: 20, agent: 40, aiMode: 20, apiKey: 500, baseUrl: 300, aiModel: 120, nameEn: 120, nameZh: 120, deckId: 64, audience: 20, quality: 20, length: 20, note: 2000, notes: 2000, firm: 200, presenter: 200, disclaimer: 4000, disclaimerEn: 4000 };
 const NUM_FIELDS = ['costBps', 'holdoutYears', 'capital'];
-const BOOL_FIELDS = ['full', 'fresh', 'allowDanger', 'wait', 'reviewOutline', 'clearTemplate', 'clearLogo'];
+const BOOL_FIELDS = ['full', 'fresh', 'allowDanger', 'wait', 'reviewOutline', 'clearTemplate', 'clearLogo', 'confirmHelmData', 'verify'];
 const ARR_MAX = { tickers: 2000, factors: 20, horizons: 20, backtestIds: 6 };
 const REQUIRED = {
   '/api/actions/project': ['name'], '/api/actions/project-delete': ['projectId'], '/api/actions/project-rename': ['projectId', 'name'], '/api/actions/compile': ['projectId'], '/api/actions/backtest': ['projectId'],
   '/api/actions/backtest-tag': ['projectId', 'backtestId'], '/api/actions/backtest-main': ['projectId', 'backtestId'], '/api/actions/sensitivity': ['projectId', 'backtestId'], '/api/actions/tune': ['projectId', 'backtestId'], '/api/actions/universe': ['index'], '/api/actions/research': ['projectId'], '/api/actions/idea': ['projectId'],
   '/api/actions/research-stop': ['projectId', 'jobId'], '/api/actions/research-resume': ['projectId', 'jobId'],
   '/api/actions/paper-start': ['projectId', 'backtestId'], '/api/actions/paper-stop': ['projectId', 'sessionId'], '/api/actions/paper-run': ['projectId', 'sessionId'],
-  '/api/actions/alpaca-connect': ['keyId', 'secret'], '/api/actions/ai-save': ['aiMode'], '/api/actions/signals': ['projectId', 'jobId'], '/api/chat': ['message'], '/api/chat/stop': ['threadId'],
+  '/api/actions/alpaca-connect': ['keyId', 'secret'], '/api/actions/qc-connect': ['userId', 'token'], '/api/actions/qc-push': ['projectId', 'backtestId'], '/api/actions/ai-save': ['aiMode'], '/api/actions/signals': ['projectId', 'jobId'], '/api/chat': ['message'], '/api/chat/stop': ['threadId'],
   '/api/data/files/read': ['projectId'], '/api/data/files/update': ['projectId', 'name'], '/api/data/backtests/list': ['projectId'], '/api/data/backtests/read': ['projectId', 'backtestId'],
   '/api/data/backtests/chart/read': ['projectId', 'backtestId'], '/api/data/backtests/orders/read': ['projectId', 'backtestId'], '/api/data/backtests/log/read': ['projectId', 'backtestId'],
   '/api/data/backtests/code/read': ['projectId', 'backtestId'], '/api/data/backtests/validate': ['projectId', 'backtestId'],
@@ -324,6 +325,7 @@ const shortToolName = (name) => String(name || '').replace(/^mcp__.*?__/i, '');
 
 /* ---------------- status ---------------- */
 
+const qcPushing = new Set(); // 正在发到 QuantConnect 的项目：同一项目不并发发送
 let statusCache = null;
 let statusAt = 0;
 async function getStatus(force = false) {
@@ -1452,6 +1454,50 @@ const server = http.createServer(async (req, res) => {
       if (active.length) return sendJson(res, 200, { success: false, errors: [`还有 ${active.length} 个正在用 Alpaca 的模拟，先停掉再断开`] });
       await Alpaca.clearCreds();
       return sendJson(res, 200, { success: true, errors: [] });
+    }
+
+    /* ---- 发到 QuantConnect：用户自己的 QC 账户（User ID + API token），只建项目 / 上传 / 编译，不建云端回测、不碰实盘 ---- */
+    // token 只进不出：返回给网页的只有打码后的 User ID
+    if (p === '/api/qc/status' && req.method === 'POST') {
+      const b = await readJson(req);
+      return sendJson(res, 200, { success: true, errors: [], status: await QC.status({ verify: b.verify === true }) });
+    }
+    if (p === '/api/actions/qc-connect' && req.method === 'POST') {
+      const b = await readJson(req);
+      return sendJson(res, 200, await QC.saveCreds({ userId: String(b.userId || ''), token: String(b.token || '') }));
+    }
+    if (p === '/api/actions/qc-disconnect' && req.method === 'POST') {
+      await readJson(req);
+      return sendJson(res, 200, await QC.clearCreds());
+    }
+    if (p === '/api/actions/qc-exports' && req.method === 'POST') {
+      const b = await readJson(req);
+      const pid = Number(b.projectId);
+      if (!Number.isSafeInteger(pid) || pid <= 0) return sendJson(res, 400, { success: false, errors: ['projectId 不对'] });
+      const bid = b.backtestId ? String(b.backtestId).replace(/[^a-f0-9]/g, '') : undefined;
+      return sendJson(res, 200, { success: true, errors: [], exports: (await QC.listExports(PROJECTS_DIR, pid, bid)).slice(-10) });
+    }
+    if (p === '/api/actions/qc-push' && req.method === 'POST') {
+      const b = await readJson(req);
+      const pid = Number(b.projectId);
+      const bid = String(b.backtestId || '').replace(/[^a-f0-9]/g, '');
+      if (!Number.isSafeInteger(pid) || pid <= 0 || !bid) return sendJson(res, 400, { success: false, errors: ['projectId 或 backtestId 不对'] });
+      if (qcPushing.has(pid)) return sendJson(res, 200, { success: false, errors: ['这个项目正在发送到 QuantConnect，请等它完成'] });
+      const code = await READ_ENDPOINTS['backtests/code/read']({ projectId: pid, backtestId: bid });
+      if (!code.success) return sendJson(res, 200, code);
+      const hd = QC.helmDataUsage(code.files);
+      // helm_data 的策略在 QC 上跑不起来：网页先提示，用户确认「仍然发送」才放行
+      if (hd.uses && b.confirmHelmData !== true) return sendJson(res, 200, { success: false, needsConfirm: 'helm_data', helmData: hd, errors: ['代码用到了 helm_data，在 QuantConnect 上不能直接运行'] });
+      const proj = await READ_ENDPOINTS['projects/read']({ projectId: pid });
+      const pname = proj.success && proj.projects[0] ? (proj.projects[0].name || `Helm ${pid}`) : `Helm ${pid}`;
+      qcPushing.add(pid);
+      try {
+        const r = await QC.pushProject({ name: QC.qcProjectName(pname, bid), files: code.files });
+        if (r.project) {
+          await QC.logExport(PROJECTS_DIR, pid, { backtestId: bid, qcProjectId: r.project.projectId, qcName: r.project.name, url: r.project.url, files: r.uploaded || [], compile: r.compile ? r.compile.state : null, ok: r.success, helmData: hd.uses }).catch(() => {});
+        }
+        return sendJson(res, 200, { ...r, helmData: hd });
+      } finally { qcPushing.delete(pid); }
     }
 
     if (p === '/api/actions/signals' && req.method === 'POST') {

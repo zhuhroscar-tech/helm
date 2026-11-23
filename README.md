@@ -155,7 +155,7 @@ Helm 本身免费、开源（MIT）。但 agent 要调用 AI 模型，这部分�
 - **规则说明**：agent 把想法写成项目里的 `spec.md`（股票池、进场出场、仓位、调仓、成本、基准）。项目页有「规则说明」标签，回测页也有一个，显示的是这次回测存档的那一份；早期回测没有存档就显示“还没有规则说明”。
 - **对比**：在回测列表里勾选 2–4 个已完成的回测，点「对比」并排看。
 - **想法记录**（`#/journal`）：想法检验 → 开发期回测 → 统计检验 → 验证期 → 模拟实盘，按时间排成一张表，只汇报已保存的数字，不算新的统计量。
-- **搬回 QuantConnect**：回测页的对话框，一键复制 `main.py` 和项目里其他 `.py` 文件；代码用到 `helm_data`（`HelmSignals` / `HelmUniverse` / `HelmMacro`）时会提示不能直接在 QC 上运行。
+- **搬回 QuantConnect**：回测页的对话框，直接发到你的 QuantConnect 账户（建项目、上传、云端编译），或一键复制 `main.py` 和项目里其他 `.py` 文件；代码用到 `helm_data`（`HelmSignals` / `HelmUniverse` / `HelmMacro`）时会提示不能直接在 QC 上运行。
 
 ## 语言（中文 / English）
 
@@ -225,7 +225,7 @@ Helm 本身免费、开源（MIT）。但 agent 要调用 AI 模型，这部分�
 
 ## 搬回 QuantConnect
 
-项目里的 `main.py` 可以直接粘贴到 QuantConnect 网页 IDE 运行（回测页的「搬回 QuantConnect」对话框会帮你复制，并列出要一起添加的文件）。用了 `HelmSignals` / `HelmUniverse` / `HelmMacro` 的策略读的是本机文件，不能直接在 QC 上运行。注意 QC 云端的数据是未复权的原始价格，结果会和本地有些差别。
+回测页的「搬回 QuantConnect」对话框可以把这次回测的代码**直接发到你自己的 QuantConnect 账户**：第一次填 QC 的 User ID 和 API token（QC 的接口没有 OAuth 登录；在 quantconnect.com 的 My Account → Security 里发邮件获取），保存在 Helm 的 secrets 目录（0600），不会返回给网页，agent 也读不到；请求里只带 QC 要求的签名哈希，不带 token 本身。Helm 会在 `Helm/` 文件夹下新建项目、上传全部 `.py`、在云端编译并显示结果和链接；不会开始云端回测，只调用项目 / 文件 / 编译接口，不碰实盘部署。每次发送记在 `projects/<id>/qc-exports.jsonl`。只有你能在网页上发送，agent 没有这个工具。也可以照旧手动复制：`main.py` 可以直接粘贴到 QuantConnect 网页 IDE 运行（对话框会列出要一起添加的文件）。用了 `HelmSignals` / `HelmUniverse` / `HelmMacro` 的策略读的是本机文件，不能直接在 QC 上运行。注意 QC 云端的数据是未复权的原始价格，结果会和本地有些差别。
 
 ## 调参（防过拟合的超参数搜索）
 

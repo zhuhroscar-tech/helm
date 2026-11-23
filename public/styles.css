@@ -2131,11 +2131,23 @@ table.data td.mono, table.data td.r { font-variant-numeric: tabular-nums; }
 .chart-wrap svg.swg, .chart-read svg.swg { width: 22px; height: 8px; display: inline-block; vertical-align: middle; }
 .table-wrap { position: relative; } .chart-read .sr, .cmp-table .sr { position: absolute; }
 
-.qc-dlg { width: min(480px, calc(100vw - 32px)); }
 .qc-files { display: grid; gap: 6px; }
 .qc-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
 .qc-list { margin: 0; padding-left: 18px; color: var(--text-2); font-size: 13px; line-height: 1.7; }
 
+.qc-dlg { width: min(540px, calc(100vw - 32px)); }
+.qc-send { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg-2); margin-bottom: 12px; }
+.qc-send h3 { margin: 0; font-size: 14px; }
+.qc-send .meta { margin: 0; font-size: 12.5px; color: var(--text-2); line-height: 1.6; }
+.qc-form { display: grid; grid-template-columns: 1fr 2fr; gap: 8px; }
+@media (max-width: 520px) { .qc-form { grid-template-columns: 1fr; } }
+.qc-actions { display: flex; gap: 8px; }
+.qc-result { font-size: 13px; }
+.qc-ok { color: var(--up); font-weight: 600; }
+.qc-bad { color: var(--down); font-weight: 600; }
+.qc-logs { margin: 8px 0 0; max-height: 200px; overflow: auto; font: 12px/1.5 var(--mono); color: var(--text-2); white-space: pre-wrap; background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+.qc-manual { margin-bottom: 12px; font-size: 13px; }
+.qc-manual > summary { cursor: pointer; color: var(--text-2); margin-bottom: 8px; }
 /* 稳健性 tab */
 .rob-sec .panel-head { justify-content: flex-start; flex-wrap: wrap; }
 .rob-sec .panel-head .meta { margin-left: auto; }

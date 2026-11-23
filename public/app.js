@@ -141,19 +141,24 @@ function downloadText(name, text) {
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
-// 「搬回 QuantConnect」：复制 main.py、列出要一并添加的文件、提示 helm_data 依赖与差异
-function openQcDialog(files) {
+// 「搬回 QuantConnect」：直接发到用户自己的 QC 账户（建项目 + 上传 + 云端编译），或者手动复制 main.py 等文件；提示 helm_data 依赖与差异
+function openQcDialog(files, ctx = {}) {
   const py = files.filter((f) => /\.py$/i.test(f.name));
   const main = py.find((f) => f.name === 'main.py') || py[0];
   if (!main) { toast(_t('k0014')); return; }
   const others = py.filter((f) => f !== main);
-  const used = [...new Set(py.flatMap((f) => String(f.content).match(/\bHelm(?:Signals|Universe|Macro)\b/g) || []))];
+  const used = [...new Set(py.flatMap((f) => String(f.content).match(/\bHelm(?:Signals|Universe|Macro|Dataset)\b/g) || []))];
   const importsHd = py.some((f) => /^\s*(?:from|import)\s+helm_data\b/m.test(String(f.content)));
-  const warn = used.length || importsHd
+  const usesHd = Boolean(used.length || importsHd);
+  const warn = usesHd
     ? `<div class="error-box"><b>${_t('k0018')}</b><p style="margin:6px 0 0">${_t('k0019')}${used.length ? `${_t('k0016')}${used.map((u) => `<span class="mono">${esc(u)}</span>`).join(_t('k0015'))}${_t('k0017')}` : ''}${_t('k0020')}</p></div>`
     : '';
-  openModal({ cls: 'qc-dlg', labelId: 'qcT', html: `<div class="cd-body"><h2 id="qcT">${_t('k0023')}</h2>
+  const canSend = Boolean(ctx.projectId && ctx.backtestId);
+  const st = { status: null, busy: false, result: null, prev: null };
+  const { d } = openModal({ cls: 'qc-dlg', labelId: 'qcT', html: `<div class="cd-body"><h2 id="qcT">${_t('k0023')}</h2>
     ${warn}
+    ${canSend ? `<section class="qc-send" id="qcSend" aria-live="polite"><p class="meta">${_t('qc_checking')}</p></section>` : ''}
+    <details class="qc-manual"${canSend ? '' : ' open'}><summary>${_t('qc_manual')}</summary>
     <div class="qc-files"><div class="qc-row"><span class="mono">${esc(main.name)}</span><button type="button" class="btn primary sm" data-qc-copy="${esc(main.name)}">${_t('k0021', { v: esc(main.name) })}</button></div></div>
     ${others.length ? `<div class="cd-msg"><p>${_t('k0022', { n: others.length })}</p></div>
     <div class="qc-files">${others.map((f) => `<div class="qc-row"><span class="mono">${esc(f.name)}</span><button type="button" class="btn sm" data-qc-copy="${esc(f.name)}">${_t('k0021', { v: esc(f.name) })}</button></div>`).join('')}</div>` : ''}
@@ -162,13 +167,80 @@ function openQcDialog(files) {
       <li>${_t('k0025')}</li>
       <li>${_t('k0026')}</li>
       <li>${_t('k0027')}</li>
-    </ol>
+    </ol></details>
     <div class="modal-actions"><a class="btn" href="https://www.quantconnect.com/" target="_blank" rel="noopener noreferrer">${_t('k0028')}</a><button type="button" class="btn" data-qc-close>${_t('k0029')}</button></div></div>`,
-  onClick: (e, close) => {
+  onClick: async (e, close) => {
     if (e.target.closest('[data-qc-close]')) { close(); return; }
     const b = e.target.closest('[data-qc-copy]');
-    if (b) { const f = py.find((x) => x.name === b.dataset.qcCopy); if (f) copyText(f.content).then((ok) => toast(ok ? `${_t('k0030', { name: f.name })}` : _t('k0031'))); }
+    if (b) { const f = py.find((x) => x.name === b.dataset.qcCopy); if (f) copyText(f.content).then((ok) => toast(ok ? `${_t('k0030', { name: f.name })}` : _t('k0031'))); return; }
+    if (st.busy) return;
+    if (e.target.closest('[data-qc-connect]')) {
+      const userId = d.querySelector('#qcUid').value.trim(); const token = d.querySelector('#qcTok').value.trim();
+      if (!userId || !token) { toast(_t('qc_need')); return; }
+      st.busy = true; renderSend();
+      const r = await safePost('/api/actions/qc-connect', { userId, token });
+      st.busy = false;
+      if (!r.success) { renderSend(); d.querySelector('#qcTok').value = ''; d.querySelector('#qcUid').value = userId; toast(`${_t('qc_fail')}${(r.errors || []).join('; ')}`); return; }
+      st.status = r.status; renderSend(); toast(_t('qc_connected'));
+      return;
+    }
+    if (e.target.closest('[data-qc-disconnect]')) {
+      st.busy = true; renderSend();
+      await safePost('/api/actions/qc-disconnect', {});
+      st.busy = false; st.status = { connected: false }; st.result = null; renderSend();
+      return;
+    }
+    if (e.target.closest('[data-qc-push]')) {
+      let confirmHelmData = false;
+      if (usesHd) {
+        if (!await askConfirm({ title: _t('qc_hd_t'), message: _t('qc_hd_m'), ok: _t('qc_hd_ok') })) return;
+        confirmHelmData = true;
+      }
+      st.busy = true; st.result = null; renderSend();
+      const r = await safePost('/api/actions/qc-push', { projectId: ctx.projectId, backtestId: ctx.backtestId, confirmHelmData });
+      st.busy = false; st.result = r;
+      if (r.project) st.prev = { url: r.project.url, qcName: r.project.name, at: new Date().toISOString() };
+      if (!r.success && /QuantConnect 拒绝|rejected these credentials|还没有连接|No QuantConnect account/.test((r.errors || []).join(' '))) st.status = { connected: false };
+      renderSend();
+    }
   } });
+  function renderSend() {
+    const box = d.querySelector('#qcSend');
+    if (!box || !st.status) return;
+    const dis = st.busy ? ' disabled' : '';
+    let html = `<h3>${_t('qc_send_h')}</h3>`;
+    if (!st.status.connected) {
+      html += `<p class="meta">${_t('qc_send_p')}</p>
+        <div class="qc-form"><label class="field"><span>User ID</span><input id="qcUid" inputmode="numeric" autocomplete="off" spellcheck="false" placeholder="123456"></label>
+        <label class="field"><span>API token</span><input id="qcTok" type="password" autocomplete="off" spellcheck="false"></label></div>
+        <p class="meta">${_t('qc_help')} <a href="https://www.quantconnect.com/settings" target="_blank" rel="noopener noreferrer">quantconnect.com/settings</a></p>
+        <div class="qc-actions"><button type="button" class="btn primary sm" data-qc-connect${dis}>${st.busy ? _t('qc_checking') : _t('qc_connect')}</button></div>`;
+    } else {
+      html += `<p class="meta">${_t('qc_as', { v: esc(st.status.userIdMasked || '') })} · <button type="button" class="linkish" data-qc-disconnect${dis}>${_t('qc_disc')}</button></p>
+        <p class="meta">${_t('qc_what')}</p>
+        <div class="qc-actions"><button type="button" class="btn primary sm" data-qc-push${dis}>${st.busy ? _t('qc_sending') : _t('qc_send')}</button></div>`;
+      const r = st.result;
+      if (r && !r.success && !r.needsConfirm) html += `<div class="error-box"><p style="margin:0">${esc((r.errors || []).join('; '))}</p>${r.project ? `<p style="margin:6px 0 0"><a href="${esc(r.project.url)}" target="_blank" rel="noopener noreferrer">${_t('qc_open')}</a></p>` : ''}</div>`;
+      if (r && r.success) {
+        const c = r.compile || {};
+        const line = c.state === 'BuildSuccess' ? `<span class="qc-ok">${_t('qc_build_ok')}</span>` : c.state === 'BuildError' ? `<span class="qc-bad">${_t('qc_build_err')}</span>` : `<span class="meta">${esc(c.error || _t('qc_build_q'))}</span>`;
+        html += `<div class="qc-result"><p style="margin:0">${_t('qc_done', { n: (r.uploaded || []).length })} <a href="${esc(r.project.url)}" target="_blank" rel="noopener noreferrer">${_t('qc_open')}</a></p><p style="margin:6px 0 0">${line}</p>
+          ${c.state === 'BuildError' && c.logs && c.logs.length ? `<pre class="qc-logs">${esc(c.logs.join('\n'))}</pre>` : ''}
+          <p class="meta" style="margin:6px 0 0">${_t('qc_next')}</p></div>`;
+      } else if (st.prev && !r) {
+        html += `<p class="meta">${_t('qc_prev', { v: esc(String(st.prev.at || '').slice(0, 16).replace('T', ' ')) })} <a href="${esc(st.prev.url)}" target="_blank" rel="noopener noreferrer">${_t('qc_open')}</a></p>`;
+      }
+    }
+    box.innerHTML = html;
+  }
+  if (canSend) {
+    Promise.all([safePost('/api/qc/status', {}), safePost('/api/actions/qc-exports', { projectId: ctx.projectId, backtestId: ctx.backtestId })]).then(([s1, s2]) => {
+      st.status = s1.success ? s1.status : { connected: false };
+      const ex = s2.success ? s2.exports.filter((x) => x.url) : [];
+      st.prev = ex.length ? ex[ex.length - 1] : null;
+      renderSend();
+    });
+  }
 }
 
 // 应用内对话框的公共骨架（确认框、搬回 QuantConnect 共用）：原生 <dialog>.showModal()，页面其余部分自动不可聚焦；
@@ -5182,7 +5254,7 @@ function wire() {
       renderMain();
       return;
     }
-    if (e.target.closest('[data-qc-export]')) { if (Array.isArray(S.code)) openQcDialog(S.code); return; }
+    if (e.target.closest('[data-qc-export]')) { if (Array.isArray(S.code)) openQcDialog(S.code, { projectId: S.route.projectId, backtestId: S.route.backtestId }); return; }
     const cb = e.target.closest('[data-code-copy], [data-code-dl]');
     if (cb) {
       const list = cb.dataset.src === 'bt' ? S.code : S.files;
