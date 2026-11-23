@@ -2914,7 +2914,7 @@ dialog.sc-dlg { width: min(620px, calc(100vw - 32px)); }
 .ly-tile.dim:hover { opacity: 0.85; filter: none; }
 .ly-red { --ly: #e21b3c; }
 .ly-blue { --ly: #1368ce; }
-.ly-yellow { --ly: #c48a00; }
+.ly-yellow { --ly: #9a6c00; } /* 白字对比度 ≥ 4.5:1（原来的 #c48a00 只有 3:1） */
 .ly-green { --ly: #26890c; }
 .ly-tile.ly-none { --ly: var(--bg-2); color: var(--text); min-height: 0; padding: 12px 16px; border: 1px dashed var(--line-2); box-shadow: none; }
 .ly-tile.ly-none.sel { box-shadow: 0 0 0 3px var(--text-2); }

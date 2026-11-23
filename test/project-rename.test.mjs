@@ -70,13 +70,14 @@ try {
   const p = r.json && r.json.projects && r.json.projects[0];
   check('改名成功：200 + success', r.status === 200 && r.json.success === true, JSON.stringify(r.json));
   check('改名：空白被压缩、首尾去掉，写进 name 和 nameZh', p && p.name === '新名字 GEM' && p.nameZh === '新名字 GEM', JSON.stringify(p));
-  check('改名（中文界面）：英文名不动', p && p.nameEn === 'Old name');
+  // 另一种语言的旧名字清掉：否则切到英文界面还显示 Old name，像是没改成（英文界面这时显示 name，也就是新名字）
+  check('改名（中文界面）：旧的英文名清掉，英文界面也显示新名字', p && !p.nameEn);
   const disk = JSON.parse(await readFile(pj, 'utf8'));
   check('改名：写进 project.json，编号、创建时间、说明不变', disk.name === '新名字 GEM' && disk.projectId === before.projectId && disk.created === before.created && disk.description === before.description);
   const en = (await rename({ projectId, name: 'Dual momentum', lang: 'en' })).json.projects[0];
-  check('英文界面改名：写进 nameEn，中文名不动', en.nameEn === 'Dual momentum' && en.nameZh === '新名字 GEM' && en.name === 'Dual momentum');
+  check('英文界面改名：写进 nameEn，旧的中文名清掉', en.nameEn === 'Dual momentum' && !en.nameZh && en.name === 'Dual momentum');
   const listed = (await req('POST', '/api/data/projects/read', { headers: good, body: {} })).json.projects.find((x) => x.projectId === projectId);
-  check('项目列表拿到新名字', listed && listed.nameEn === 'Dual momentum' && listed.nameZh === '新名字 GEM');
+  check('项目列表拿到新名字', listed && listed.nameEn === 'Dual momentum' && !listed.nameZh && listed.name === 'Dual momentum');
 
   /* ---- 被拒绝 ---- */
   for (const [label, name] of [['空名', ''], ['只有空白', '   \t '], ['超过 120 字', 'x'.repeat(121)], ['不是字符串', 123]]) {

@@ -331,6 +331,8 @@ const shortToolName = (name) => String(name || '').replace(/^mcp__.*?__/i, '');
 /* ---------------- status ---------------- */
 
 const layerRunning = new Map(); // projectId → layerId：正在评估「叠加 Qlib 选股」的项目（一次一个）
+const layerStarting = new Set(); // 正在准备评估（读回测、代码、股票池）的项目：同步占位，防连点 / 两个标签页各起一次付费评估
+const layerChoosing = new Set(); // 正在处理选择的 layerId：防两次选择都把任务交给总控
 const qcPushing = new Set(); // 正在发到 QuantConnect 的项目：同一项目不并发发送
 let statusCache = null;
 let statusAt = 0;
@@ -715,6 +717,17 @@ async function startRun(thread, { message, context = null, allowDanger = false, 
     assistant.effort = opts.effort;
     assistant.auto = { model: pick.model || null, effort: pick.effort || null, reason: pick.reason || '', error: pick.error || null };
   }
+  // 自动选模型最多要几十秒，这期间还没有 claude 进程：用户点了停止（stopRunTree 只能记下来），就不再启动
+  if (run.stopRequested) {
+    assistant.stopped = true;
+    await saveThread(thread).catch(() => {});
+    runs.delete(thread.id);
+    send({ type: 'end', stopped: true });
+    for (const res of run.subs) if (!res.writableEnded) res.end();
+    broadcast({ type: 'run_end', threadId: thread.id, agent: agent.id, title: thread.title, error: null, stopped: true });
+    resolveDone({ text: '', error: null, stopped: true });
+    return run;
+  }
   child = spawn(CLAUDE_BIN, buildArgs(agent, thread, context, allowDanger, { ...opts, forceModel: launch.model, extraArgs: launch.args }), {
     cwd: WORKSPACE,
     env: {
@@ -1062,6 +1075,7 @@ function stopRunTree(threadId, seen = new Set()) {
   let n = 0;
   for (const childId of r.waitingOn || []) n += stopRunTree(childId, seen);
   if (r.child && !r.child.killed) r.child.kill('SIGTERM');
+  else if (!r.child) r.stopRequested = true; // 还在自动选模型、没启动进程：startRun 看到这个就不启动了
   return n + 1;
 }
 
@@ -1516,6 +1530,8 @@ const server = http.createServer(async (req, res) => {
       const bid = String(b.backtestId || '').replace(/[^a-f0-9]/g, '');
       if (!Number.isSafeInteger(pid) || pid <= 0 || !bid) return sendJson(res, 400, { success: false, errors: ['projectId 或 backtestId 不对'] });
       if (qcPushing.has(pid)) return sendJson(res, 200, { success: false, errors: ['这个项目正在发送到 QuantConnect，请等它完成'] });
+      qcPushing.add(pid); // 检查之后立刻占位：中间有 await，连点两次会建出两个 QC 项目
+      try {
       const code = await READ_ENDPOINTS['backtests/code/read']({ projectId: pid, backtestId: bid });
       if (!code.success) return sendJson(res, 200, code);
       const hd = QC.helmDataUsage(code.files);
@@ -1523,13 +1539,13 @@ const server = http.createServer(async (req, res) => {
       if (hd.uses && b.confirmHelmData !== true) return sendJson(res, 200, { success: false, needsConfirm: 'helm_data', helmData: hd, errors: ['代码用到了 helm_data，在 QuantConnect 上不能直接运行'] });
       const proj = await READ_ENDPOINTS['projects/read']({ projectId: pid });
       const pname = proj.success && proj.projects[0] ? (proj.projects[0].name || `Helm ${pid}`) : `Helm ${pid}`;
-      qcPushing.add(pid);
-      try {
+      {
         const r = await QC.pushProject({ name: QC.qcProjectName(pname, bid), files: code.files });
         if (r.project) {
           await QC.logExport(PROJECTS_DIR, pid, { backtestId: bid, qcProjectId: r.project.projectId, qcName: r.project.name, url: r.project.url, files: r.uploaded || [], compile: r.compile ? r.compile.state : null, ok: r.success, helmData: hd.uses }).catch(() => {});
         }
         return sendJson(res, 200, { ...r, helmData: hd });
+      }
       } finally { qcPushing.delete(pid); }
     }
 
@@ -1546,7 +1562,11 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { success: true, errors: [], layer: j });
       }
       if (p === '/api/actions/layer-choose') {
-        const j = await Layer.readLayer(PROJECTS_DIR, pid, String(b.layerId));
+        const lid = String(b.layerId);
+        if (layerChoosing.has(lid)) return sendJson(res, 200, { success: false, errors: ['这次叠加评估还没完成，或已经选过了'] });
+        layerChoosing.add(lid);
+        try {
+        const j = await Layer.readLayer(PROJECTS_DIR, pid, lid);
         if (!j || j.status !== 'ready') return sendJson(res, 200, { success: false, errors: ['这次叠加评估还没完成，或已经选过了'] });
         const opt = (j.result?.options || []).find((o) => o.id === String(b.optionId));
         if (!opt) return sendJson(res, 200, { success: false, errors: ['没有这个方案'] });
@@ -1555,7 +1575,15 @@ const server = http.createServer(async (req, res) => {
         await Layer.saveLayer(PROJECTS_DIR, j);
         if (opt.kind === 'none') return sendJson(res, 200, { success: true, errors: [], declined: true });
         return sendJson(res, 200, { success: true, errors: [], agent: 'mia', message: Layer.taskMessage({ option: opt, backtest: j.backtest || {}, lang: j.lang || lang }) });
+        } finally { layerChoosing.delete(lid); }
       }
+      const assess = p === '/api/actions/layer-assess';
+      if (assess) {
+        if (layerRunning.has(pid)) return sendJson(res, 200, { success: true, errors: [], layerId: layerRunning.get(pid) });
+        if (layerStarting.has(pid)) return sendJson(res, 200, { success: false, errors: ['正在开始评估，请稍等'] });
+        layerStarting.add(pid);
+      }
+      try {
       // 预检 / 评估都要先读：回测列表、主版本代码快照、股票池状态
       const bl = await READ_ENDPOINTS['backtests/list']({ projectId: pid });
       if (!bl.success) return sendJson(res, 200, bl);
@@ -1586,10 +1614,11 @@ const server = http.createServer(async (req, res) => {
           .catch((e) => { job.status = 'error'; job.error = `评估失败：${String(e && e.message || e).slice(0, 300)}`; })
           .then(() => Layer.saveLayer(PROJECTS_DIR, job))
           .catch(() => {})
-          .finally(() => { layerRunning.delete(pid); broadcast({ type: 'layer_updated', projectId: pid, layerId: job.layerId, status: job.status }); });
+          .finally(() => { if (layerRunning.get(pid) === job.layerId) layerRunning.delete(pid); broadcast({ type: 'layer_updated', projectId: pid, layerId: job.layerId, status: job.status }); });
         return sendJson(res, 200, { success: true, errors: [], layerId: job.layerId });
       }
       return sendJson(res, 404, { success: false, errors: ['没有这个接口'] });
+      } finally { if (assess) layerStarting.delete(pid); }
     }
 
     if (p === '/api/actions/signals' && req.method === 'POST') {

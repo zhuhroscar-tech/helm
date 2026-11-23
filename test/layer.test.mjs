@@ -38,6 +38,9 @@ try {
   {
     check('选基准回测：主版本优先，跳过验证期 / 出错的', L.pickBacktest(BTS).backtestId === 'm1');
     check('没有主版本：用候选', L.pickBacktest(BTS.filter((b) => b.backtestId !== 'm1')).backtestId === 'c1');
+    const onlyBench = [{ backtestId: 'b1', role: 'benchmark', status: 'Completed.' }, { backtestId: 'd1', role: 'debug', status: 'Completed.' }];
+    check('只有基准 / 调试回测：不拿来当基线', L.pickBacktest(onlyBench) === null);
+    check('没有角色的回测仍然可以当基线', L.pickBacktest([...onlyBench, { backtestId: 'x1', status: 'Completed.' }]).backtestId === 'x1');
     const pc = L.precheck({ files: GEM, backtests: BTS });
     check('GEM：可以叠加，只有 SPY 一条腿', pc.ok && pc.legs.length === 1 && pc.legs[0].etf === 'SPY' && pc.legs[0].universe === 'sp500' && pc.legs[0].pit === 'pit');
     check('没有回测：不行', !L.precheck({ files: GEM, backtests: [] }).ok);

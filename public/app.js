@@ -228,7 +228,7 @@ function openQcDialog(files, ctx = {}) {
           ${c.state === 'BuildError' && c.logs && c.logs.length ? `<pre class="qc-logs">${esc(c.logs.join('\n'))}</pre>` : ''}
           <p class="meta" style="margin:6px 0 0">${_t('qc_next')}</p></div>`;
       } else if (st.prev && !r) {
-        html += `<p class="meta">${_t('qc_prev', { v: esc(String(st.prev.at || '').slice(0, 16).replace('T', ' ')) })} <a href="${esc(st.prev.url)}" target="_blank" rel="noopener noreferrer">${_t('qc_open')}</a></p>`;
+        html += `<p class="meta">${_t('qc_prev', { v: esc(st.prev.at && parseDate(st.prev.at) ? parseDate(st.prev.at).toLocaleString(LOC(), { dateStyle: 'short', timeStyle: 'short' }) : '—') })} <a href="${esc(st.prev.url)}" target="_blank" rel="noopener noreferrer">${_t('qc_open')}</a></p>`;
       }
     }
     box.innerHTML = html;
@@ -236,7 +236,7 @@ function openQcDialog(files, ctx = {}) {
   if (canSend) {
     Promise.all([safePost('/api/qc/status', {}), safePost('/api/actions/qc-exports', { projectId: ctx.projectId, backtestId: ctx.backtestId })]).then(([s1, s2]) => {
       st.status = s1.success ? s1.status : { connected: false };
-      const ex = s2.success ? s2.exports.filter((x) => x.url) : [];
+      const ex = s2.success ? s2.exports.filter((x) => x.url && x.ok) : []; // 只算成功编译的那次
       st.prev = ex.length ? ex[ex.length - 1] : null;
       renderSend();
     });
@@ -266,7 +266,7 @@ function openLayerModal() {
   const box = d.querySelector('.ly-body');
   const opts = () => (st.layer && st.layer.result ? st.layer.result.options : []);
   function onKey(e) {
-    if (!d.open || st.phase !== 'pick' || st.busy || e.target.closest('input, textarea')) return;
+    if (!d.open || st.phase !== 'pick' || st.busy || e.metaKey || e.ctrlKey || e.altKey || e.target.closest('input, textarea')) return; // ⌘/Ctrl+0 是复位缩放，别吞掉
     const list = opts();
     if (/^[1-4]$/.test(e.key)) { const o = list.filter((x) => x.kind === 'layer')[Number(e.key) - 1]; if (o) { st.sel = o.id; render(); e.preventDefault(); } }
     else if (e.key === '0') { st.sel = 'none'; render(); e.preventDefault(); }
@@ -388,7 +388,9 @@ function openModal({ cls = '', labelId, describedBy, role, html, onClick, onClos
   d.addEventListener('cancel', (e) => { e.preventDefault(); close(false); }); // Esc
   d.addEventListener('keydown', (e) => {
     if (e.key !== 'Tab') return;
-    const f = [...d.querySelectorAll('input:not([type=hidden]), textarea, select, button:not([disabled]), a[href]')];
+    // 只算真的能拿到焦点的：收起的 <details> 里的按钮看不见，<summary> 自己可以聚焦
+    const f = [...d.querySelectorAll('input:not([type=hidden]), textarea, select, button:not([disabled]), a[href], summary')].filter((el) => el.getClientRects().length);
+    if (!f.length) return;
     const i = f.indexOf(document.activeElement);
     if (e.shiftKey && i <= 0) { e.preventDefault(); f[f.length - 1].focus(); } else if (!e.shiftKey && i === f.length - 1) { e.preventDefault(); f[0].focus(); }
   });
@@ -5418,8 +5420,9 @@ function wire() {
       if (m) { e.preventDefault(); if (m.hidden) toggleMenu(m, true); else { const f = m.querySelector('button:not([disabled])'); if (f) f.focus(); } return; }
     }
     const mod = e.metaKey || e.ctrlKey;
-    if (mod && e.key.toLowerCase() === 'j') { e.preventDefault(); $('#chatToggle').click(); }
-    if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); openChat(); input.focus(); }
+    const dlg = Boolean(document.querySelector('dialog[open]')); // 对话框开着时，对话面板在它后面、拿不到焦点
+    if (mod && !dlg && e.key.toLowerCase() === 'j') { e.preventDefault(); $('#chatToggle').click(); }
+    if (mod && !dlg && e.key.toLowerCase() === 'k') { e.preventDefault(); openChat(); input.focus(); }
     if (e.key === 'Escape') {
       if (!$('#threadMenu').hidden) { $('#threadMenu').hidden = true; $('#threadBtn').focus(); return; }
       if (document.querySelector('dialog[open]')) return;
