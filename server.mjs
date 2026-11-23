@@ -84,9 +84,13 @@ const safeEqual = (a, b) => {
 // 会把正在运行的 Helm 的 agent 指到测试环境的 node 和路径上
 const MCP_CONFIG = process.env.HELM_MCP_CONFIG || path.join(ROOT, 'data', 'mcp.json');
 mkdirSync(path.dirname(MCP_CONFIG), { recursive: true });
-writeFileSync(MCP_CONFIG, JSON.stringify({
+// 交给 claude 的 MCP 配置直接以 JSON 字符串传（--mcp-config 接受文件或 JSON）：不依赖共享的 data/mcp.json。
+// 以前读文件时，别的进程（比如在沙盒里跑的测试服务）改写了它，正在运行的 Helm 的 agent 就连不上 qc 工具
+// （报错 "mcp__qc__approve ... not found. Available MCP tools: none"）。文件仍然写一份，只供查看。
+const MCP_INLINE = JSON.stringify({
   mcpServers: { [MCP_NAME]: { type: 'stdio', command: process.execPath, args: [path.join(ROOT, 'mcp', 'qc-mcp.mjs')] } },
-}, null, 2));
+});
+writeFileSync(MCP_CONFIG, JSON.stringify(JSON.parse(MCP_INLINE), null, 2));
 
 const MODELS = [
   { id: 'fable', label: 'Fable 5.1', desc: '最强，账号不支持时 Claude 会自动换成别的模型' },
@@ -643,7 +647,7 @@ function buildArgs(agent, thread, context, allowDanger, opts) {
 
   const args = ['-p', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
     '--append-system-prompt', sys, '--permission-mode', 'default',
-    '--mcp-config', MCP_CONFIG, '--strict-mcp-config', '--permission-prompt-tool', `mcp__${MCP_NAME}__approve`];
+    '--mcp-config', MCP_INLINE, '--strict-mcp-config', '--permission-prompt-tool', `mcp__${MCP_NAME}__approve`];
   // 用兼容接口时只能用对方的模型：忽略网页上选的 Claude 模型
   const model = opts.forceModel || opts.model || agent.model || process.env.CLAUDE_MODEL;
   if (model) args.push('--model', model);
