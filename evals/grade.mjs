@@ -102,8 +102,16 @@ export const USER_CHORE_RE = /(请你|你来|你可以|需要你|麻烦你|建�
 // 回复最后一句是问句（应该在开工前用 ask_user 问）
 export const TRAILING_Q_RE = /[?？]\s*[)）」"]?\s*$/;
 
-/** 跑一条检查，返回 { pass, evidence } */
-export function runCheck(c, events) {
+const ZH_NUM = ['零', '一', '两|二', '三', '四', '五', '六', '七', '八', '九', '十'];
+/** 回答里写到了「n 个 / n 次」：阿拉伯数字或中文数字，后面跟量词，或英文 n ideas / versions…；「第 n 个」是序数，不算 */
+export function mentionsCount(text, n) {
+  const zh = n >= 0 && n <= 10 ? `|(?:${ZH_NUM[n]})` : '';
+  const re = new RegExp(`(?<!第\\s*)(?:(?<![\\d.])${n}(?![\\d.%])${zh})\\s*(?:个|次|项|种|轮)|(?<![\\d.])${n}\\s+(?:ideas?|versions?|variants?|attempts?|trials?|backtests?|candidates?)`, 'i');
+  return re.test(String(text || ''));
+}
+
+/** 跑一条检查，返回 { pass, evidence }。extras：{ questions: 弹给用户的问题 } */
+export function runCheck(c, events, extras = {}) {
   const tools = events.filter((e) => e.kind === 'tool');
   const finals = (agent, opts = {}) => events.filter((e) => e.kind === 'final' && e.text && (!agent || (Array.isArray(agent) ? agent.includes(e.agent) : e.agent === agent)) && (opts.depth === undefined || e.depth === opts.depth));
   switch (c.type) {
@@ -177,6 +185,21 @@ export function runCheck(c, events) {
       const bad = tools.find((e) => e.tool === 'handoff' && e.fromAgent === orch && !(c.allow || []).includes(e.args.agent));
       return { pass: !bad, evidence: bad ? `交接来的 agent 自己又交接：${describe(bad)}` : '交接来的 agent 都没有再往下交接' };
     }
+    case 'noUserQuestions': {
+      // 自动研究：问题都由服务端自动回答，一个也不该弹给用户
+      const qs = extras.questions || [];
+      return { pass: !qs.length, evidence: qs.length ? `${qs.length} 组问题弹给了用户：${qs.map((q) => `${q.agent}「${clipText((q.questions || [])[0], 60)}」`).join('；')}` : '没有问题弹给用户' };
+    }
+    case 'reportsCount': {
+      // 账本对得上：数一数 match 命中了几次（distinct 按某个参数去重），最终回答里要写出这个数
+      let hits = tools.filter((e) => eventMatches(e, c.match));
+      if (c.distinct) hits = [...new Map(hits.map((e) => [asText(e.args[c.distinct]), e])).values()];
+      const n = hits.length;
+      const f = finals(c.agent, { depth: c.agent ? undefined : 0 }).slice(-1)[0];
+      if (!f) return { pass: false, evidence: `没有最终回答（实际 ${n} 次）` };
+      const ok = mentionsCount(f.text, n);
+      return { pass: ok, evidence: ok ? `回答写了 ${n}（${c.what || '次数'}）` : `${c.what || '次数'}实际是 ${n}，回答里没写这个数：「${clipText(f.text, 160)}」` };
+    }
     case 'completed': {
       const bad = events.find((e) => e.kind === 'final' && e.error);
       return { pass: !bad, evidence: bad ? `${bad.agent} 运行出错：${clipText(bad.error)}` : '所有对话正常结束' };
@@ -194,12 +217,18 @@ export const DEFAULT_CHECKS = [
   { id: 'delegated-no-forward', rule: 'delegated-stays-in-lane', type: 'noOwnForward', desc: '总控交接来的 agent 只做自己那一段，不自己往下交接' },
 ];
 
-/** 给一次运行打分 */
-export function gradeRun(scenario, events) {
-  const checks = [...(scenario.defaultChecks === false ? [] : DEFAULT_CHECKS.filter((d) => !(scenario.skipDefaults || []).includes(d.id))), ...scenario.checks];
+// 自动研究的场景再加一条：没有问题弹给用户
+export const AUTOPILOT_CHECKS = [
+  { id: 'no-user-questions', rule: 'autopilot-no-user-questions', type: 'noUserQuestions', desc: '没有问题弹给用户（自动研究里全部自动回答）' },
+];
+
+/** 给一次运行打分。extras：{ questions } */
+export function gradeRun(scenario, events, extras = {}) {
+  const defs = [...DEFAULT_CHECKS, ...(scenario.suite === 'autopilot' ? AUTOPILOT_CHECKS : [])];
+  const checks = [...(scenario.defaultChecks === false ? [] : defs.filter((d) => !(scenario.skipDefaults || []).includes(d.id))), ...scenario.checks];
   const results = checks.map((c) => {
     let r;
-    try { r = runCheck(c, events); } catch (e) { r = { pass: false, evidence: `检查出错：${e.message}` }; }
+    try { r = runCheck(c, events, extras); } catch (e) { r = { pass: false, evidence: `检查出错：${e.message}` }; }
     return { id: c.id, rule: c.rule, desc: c.desc, ...r };
   });
   const unscripted = events.filter((e) => e.kind === 'tool' && e.result.startsWith(UNSCRIPTED)).map((e) => `${e.agent}:${e.tool}`);

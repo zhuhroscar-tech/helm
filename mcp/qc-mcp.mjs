@@ -882,10 +882,10 @@ async function onMessage(msg) {
     }
     if (method === 'ping') return write({ jsonrpc: '2.0', id, result: {} });
     if (method === 'tools/list') {
-      return write({ jsonrpc: '2.0', id, result: { tools: TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) } });
+      return write({ jsonrpc: '2.0', id, result: { tools: (EVAL ? EVAL.tools(TOOLS) : TOOLS).map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) } });
     }
     if (method === 'tools/call') {
-      const tool = TOOLS.find((t) => t.name === params.name);
+      const tool = (EVAL ? EVAL.tools(TOOLS) : TOOLS).find((t) => t.name === params.name);
       if (!tool) return write({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: LANG === 'en' ? `Unknown tool ${params.name}` : `未知工具 ${params.name}` }], isError: true } });
       const bad = validateArgs(tool.inputSchema, params.arguments === undefined || params.arguments === null ? {} : params.arguments);
       if (bad) return write({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: userText(`错误：${bad}`) }], isError: true } });

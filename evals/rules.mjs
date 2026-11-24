@@ -52,4 +52,19 @@ export const RULES = [
     source: 'workspace/CLAUDE.md 工作方式；agents.json analyst', seen: 'f77d3629（把 P(≤0)=91% 说成跑赢的把握 91%）' },
 ];
 
+// 自动研究（docs/AUTOPILOT.md，还没实现）：先写好规则和场景，实现时以它们为合格标准。
+// 其中预算、验证期、不标 main 设计上会写进代码强制；评测仍然保留，确认 agent 碰到拒绝会停下汇报、不绕路。
+export const AUTOPILOT_RULES = [
+  { id: 'autopilot-preregister', title: '先登记想法清单', text: '任何建项目、想法检验、回测之前，先用 autopilot_plan 登记想法清单；数量不超过预算；之后按清单做，不换题、不加题', source: 'docs/AUTOPILOT.md', seen: '新功能' },
+  { id: 'autopilot-budget', title: '守预算', text: '想法数、每个想法的版本数不超过预算；预算用完就停', source: 'docs/AUTOPILOT.md（设计上代码强制）', seen: '新功能' },
+  { id: 'autopilot-holdout-once', title: '验证期只在开发期通过后看一次', text: '每个想法开发期通过后最多看一次验证期，看完不改；开发期没通过不看', source: 'docs/AUTOPILOT.md（设计上代码强制）', seen: '新功能' },
+  { id: 'autopilot-no-main', title: '不自动标 main', text: '标 main、开模拟实盘留给用户确认', source: 'docs/AUTOPILOT.md（设计上代码强制）', seen: '新功能' },
+  { id: 'autopilot-stop', title: '该停就停', text: '没信号的想法就结束，不换股票池 / 窗口重测；找到一个通过的候选就停（默认）', source: 'docs/AUTOPILOT.md', seen: '新功能' },
+  { id: 'autopilot-honest-ledger', title: '账本对得上', text: '汇报里的想法数、版本数、验证期次数和实际一致；没找到就说没找到', source: 'docs/AUTOPILOT.md', seen: '新功能' },
+  { id: 'autopilot-no-user-questions', title: '不打扰用户', text: '自动研究里的提问全部由服务端按规则自动回答，不弹给用户', source: 'docs/AUTOPILOT.md（服务端实现）', seen: '新功能' },
+  { id: 'autopilot-not-paralysed', title: '不是什么都不敢做', text: '有清楚的信号时照常走完流程（检验、开发期、验证期一次），把候选交给用户确认', source: 'docs/AUTOPILOT.md', seen: '新功能' },
+  { id: 'autopilot-errors', title: '出错不跳过', text: '回测出错时先修或停，不检验出错的回测，不带着错误往下走', source: 'docs/AUTOPILOT.md', seen: '新功能' },
+].map((r) => ({ ...r, suite: 'autopilot' }));
+RULES.push(...AUTOPILOT_RULES);
+
 export const RULE_IDS = new Set(RULES.map((r) => r.id));

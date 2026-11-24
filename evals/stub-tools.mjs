@@ -17,6 +17,48 @@
 import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 
 export const PASSTHROUGH = new Set(['handoff', 'ask_user']);
+
+// 设计好了、还没实现的工具和参数（docs/AUTOPILOT.md）。只在 fixtures 里 autopilot 为真时加进工具列表，
+// 让评测场景先于实现写好；真正实现之后，同名的真实工具优先，这里的定义自动不再使用。
+export const PLANNED_TOOLS = [{
+  name: 'autopilot_plan',
+  description: '自动研究：在任何建项目、想法检验、回测之前，先登记这一轮要试的想法清单。每个想法写一句话、经济逻辑、预计机制、怎样算失败。想法数量不能超过预算；登记后按顺序做，不能换题或加题。',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      ideas: {
+        type: 'array', description: '想法清单（按要做的顺序）',
+        items: { type: 'object', properties: { title: { type: 'string', description: '一句话想法' }, logic: { type: 'string', description: '经济逻辑：为什么应该有效' }, kind: { type: 'string', enum: ['stock', 'timing'], description: 'stock=选股，timing=ETF 择时' }, failIf: { type: 'string', description: '怎样算失败' } }, required: ['title', 'logic'] },
+      },
+    },
+    required: ['ideas'],
+  },
+}];
+const PLANNED_PROPS = {
+  create_project: { planIdea: { type: 'integer', description: '自动研究：这个项目对应 autopilot_plan 里的第几个想法（从 1 开始）' } },
+};
+const PLANNED_ASK = {
+  question: { category: { type: 'string', enum: ['spec', 'trial', 'holdout', 'promotion', 'other'], description: '自动研究：spec=规则说明的歧义；trial=会增加尝试次数；holdout=涉及验证期；promotion=标 main / 开模拟；other' } },
+  option: { conservative: { type: 'boolean', description: '自动研究：不增加尝试、不碰验证期的那个选项' } },
+};
+
+/** 评测时的工具列表：真实工具 + 设计好但还没实现的（只在 autopilot 场景）。返回新的数组，不改原来的 */
+export function plannedTools(tools, fx) {
+  if (!fx || !fx.autopilot) return tools;
+  const names = new Set(tools.map((t) => t.name));
+  const out = tools.map((t) => {
+    let schema = t.inputSchema;
+    const add = PLANNED_PROPS[t.name];
+    if (add) schema = { ...schema, properties: { ...Object.fromEntries(Object.entries(add).filter(([k]) => !(k in (schema.properties || {})))), ...schema.properties } };
+    if (t.name === 'ask_user') {
+      const qs = schema.properties.questions;
+      const opt = qs.items.properties.options;
+      schema = { ...schema, properties: { ...schema.properties, questions: { ...qs, items: { ...qs.items, properties: { ...PLANNED_ASK.question, ...qs.items.properties, options: { ...opt, items: { ...opt.items, properties: { ...PLANNED_ASK.option, ...opt.items.properties } } } } } } } };
+    }
+    return schema === t.inputSchema ? t : { ...t, inputSchema: schema };
+  });
+  return [...out, ...PLANNED_TOOLS.filter((t) => !names.has(t.name))];
+}
 // 没有预设结果的工具返回这个前缀，评分时会列出来（说明场景没覆盖到 agent 走的路）
 export const UNSCRIPTED = '（评测环境）';
 
@@ -47,8 +89,9 @@ export function createStub(fixturesPath) {
       projects: fx.projects || [],
       backtests: fx.backtests || [],
       research: fx.research || [],
+      plan: null,
       counts: {},
-      seq: 0,
+      made: { projects: 0, backtests: 0, research: 0 }, // 本次评测里新建的个数：给新记录编 seq（第几个）
     };
   };
   const save = (st) => {
@@ -80,9 +123,19 @@ export function createStub(fixturesPath) {
       const files = Object.entries(p.files || {}).map(([n, c]) => `### ${n}\n\`\`\`python\n${c}\n\`\`\``).join('\n\n');
       return `项目：${p.name}（projectId=${p.projectId}）${p.description ? `\n说明：${p.description}` : ''}\n\n${files}`;
     },
+    autopilot_plan: (st, a) => {
+      const max = fx.autopilot && fx.autopilot.budget ? fx.autopilot.budget.ideas : null;
+      const ideas = Array.isArray(a.ideas) ? a.ideas : [];
+      if (st.plan) return '错误：这一轮已经登记过想法清单，不能改。';
+      if (!ideas.length) return '错误：想法清单是空的。';
+      if (max && ideas.length > max) return `错误：想法数 ${ideas.length} 超过预算 ${max}。`;
+      st.plan = ideas;
+      return `已登记 ${ideas.length} 个想法${max ? `（预算 ${max} 个）` : ''}：\n${ideas.map((x, i) => `${i + 1}. ${x.title}`).join('\n')}\n按顺序做；建项目时 create_project 带 planIdea。`;
+    },
     create_project: (st, a) => {
       const id = st.nextProjectId++;
-      st.projects.push({ projectId: id, name: a.name, description: a.description || '', files: a.code ? { 'main.py': a.code } : {} });
+      st.made.projects += 1;
+      st.projects.push({ projectId: id, name: a.name, description: a.description || '', files: a.code ? { 'main.py': a.code } : {}, seq: st.made.projects, planIdea: a.planIdea ?? null });
       return `已创建项目「${a.name}」，projectId=${id}${a.code ? '\n编译 BuildSuccess' : ''}`;
     },
     update_project: (st, a) => `已更新项目 ${a.projectId}`,
@@ -107,7 +160,10 @@ export function createStub(fixturesPath) {
     create_backtest: (st, a) => {
       const n = st.backtests.filter((b) => Number(b.projectId) === Number(a.projectId)).length + 1;
       const id = `ev${String(a.projectId)}${a.period || 'x'}${n}${Math.random().toString(16).slice(2, 8)}`;
-      st.backtests.push({ projectId: a.projectId, backtestId: id, name: a.name || `回测 ${n}`, role: a.role || null, period: a.period || null, file: a.file || 'main.py', created: new Date().toISOString() });
+      st.made.backtests += 1;
+      // ver：这个项目里第几个同角色、同时间段的回测（「第 2 个开发期候选版本」）
+      const ver = st.backtests.filter((b) => Number(b.projectId) === Number(a.projectId) && (b.role || null) === (a.role || null) && (b.period || null) === (a.period || null)).length + 1;
+      st.backtests.push({ projectId: a.projectId, backtestId: id, name: a.name || `回测 ${n}`, role: a.role || null, period: a.period || null, file: a.file || 'main.py', created: new Date().toISOString(), seq: st.made.backtests, ver });
       return `已开始回测「${a.name || `回测 ${n}`}」，backtestId=${id}（projectId=${a.projectId}）。网站会自动显示进度。`;
     },
     wait_for_backtest: (st, a) => {
@@ -131,7 +187,8 @@ export function createStub(fixturesPath) {
       const n = st.research.length + 1;
       const id = `rev${n}${Math.random().toString(16).slice(2, 10)}`;
       const factorsText = JSON.stringify(a.factors || []);
-      st.research.push({ projectId: a.projectId, jobId: id, title: a.title || a.idea, idea: a.idea, factorsText, verdict: null });
+      st.made.research += 1;
+      st.research.push({ projectId: a.projectId, jobId: id, title: a.title || a.idea, idea: a.idea, factorsText, verdict: null, seq: st.made.research });
       return `已开始想法检验 jobId=${id}「${a.title || a.idea}」：${(a.factors || []).map((f) => f.label || f.name).join('、')}。一般几分钟，网站「研究」标签实时显示；用 research_status(waitSec) 等完成，再用 read_research 读结果。`;
     },
     research_status: (st, a) => {
@@ -151,28 +208,41 @@ picks = sig.top(self.time, k=10)`,
   };
 
   return {
+    tools: (real) => plannedTools(real, fx),
     handles: (name) => !PASSTHROUGH.has(name),
     async call(name, args = {}) {
       const st = load();
       st.counts[name] = (st.counts[name] || 0) + 1;
       const b = args.backtestId ? bt(st, args.backtestId) : null;
       const j = args.jobId ? job(st, args.jobId) : null;
+      const pOf = (pid) => (pid != null ? proj(st, pid) : null);
+      const p = pOf(args.projectId ?? (b && b.projectId) ?? (j && j.projectId));
+      // 可匹配的序号：btN / jobN / projN = 本次评测里第几个新建的回测 / 想法检验 / 项目；ver = 项目里第几个同角色同时间段的回测；planIdea = 项目对应第几个登记的想法
       const ctx = {
-        ...(b ? { period: b.period, role: b.role, name: b.name, file: b.file } : {}),
-        ...(j ? { idea: j.idea, title: j.title, factorsText: j.factorsText } : {}),
+        ...(b ? { period: b.period, role: b.role, name: b.name, file: b.file, btN: b.seq, ver: b.ver } : {}),
+        ...(j ? { idea: j.idea, title: j.title, factorsText: j.factorsText, jobN: j.seq } : {}),
+        ...(p ? { projN: p.seq, planIdea: p.planIdea } : {}),
         ...args,
         n: st.counts[name],
         factorsText: args.factors ? JSON.stringify(args.factors) : (j ? j.factorsText : undefined),
       };
+      // 出错的回测不能检验（和真实的 validate_backtest 一样）
+      if (name === 'validate_backtest' && b && b.status === 'error') {
+        save(st);
+        return { text: '错误：这个回测没有成功跑完（Runtime Error），不能做统计检验。先修好代码重新回测。', isError: true };
+      }
       // 先按默认逻辑更新状态（建项目、记下回测和研究），再看场景有没有覆盖结果
       const fn = defaults[name];
       let text = fn ? fn(st, args) : null;
-      // create_backtest / test_idea 新生成的 id 要能在场景结果里用
-      if (name === 'create_backtest') ctx.backtestId = st.backtests[st.backtests.length - 1].backtestId;
-      if (name === 'test_idea') ctx.jobId = st.research[st.research.length - 1].jobId;
+      // create_backtest / test_idea / create_project 新生成的记录要能在场景结果里用、按序号匹配
+      if (name === 'create_backtest') { const nb = st.backtests[st.backtests.length - 1]; Object.assign(ctx, { backtestId: nb.backtestId, btN: nb.seq, ver: nb.ver }); }
+      if (name === 'test_idea') { const nj = st.research[st.research.length - 1]; Object.assign(ctx, { jobId: nj.jobId, jobN: nj.seq }); }
+      if (name === 'create_project' && /projectId=/.test(text || '')) { const np = st.projects[st.projects.length - 1]; Object.assign(ctx, { projectId: np.projectId, projN: np.seq, planIdea: np.planIdea }); }
       const s = scripted(st, name, ctx);
       // 研究结论写回记录，research_status 列表里能看到
       if (s && name === 'read_research' && j) { const m = s.text.match(/结论：(有信号|信号弱|没有信号)/); if (m) j.verdict = m[1]; }
+      // 回测报错：记下来，之后不能检验
+      if (s && b && /wait_for_backtest|read_backtest/.test(name) && /Runtime Error/.test(s.text)) b.status = 'error';
       save(st);
       if (s) return s;
       if (text !== null) return { text, isError: /^错误：/.test(text) };

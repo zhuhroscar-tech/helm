@@ -6,8 +6,8 @@ import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { loadScenarios, selfTest, coverage } from '../evals/run.mjs';
-import { createStub, UNSCRIPTED, matches } from '../evals/stub-tools.mjs';
-import { runCheck, USER_CHORE_RE, TRAILING_Q_RE } from '../evals/grade.mjs';
+import { createStub, UNSCRIPTED, matches, plannedTools } from '../evals/stub-tools.mjs';
+import { runCheck, USER_CHORE_RE, TRAILING_Q_RE, mentionsCount } from '../evals/grade.mjs';
 import { RULES } from '../evals/rules.mjs';
 
 let failed = 0;
@@ -18,7 +18,7 @@ const check = (name, cond, extra = '') => {
 
 /* ---- 1. 覆盖 ---- */
 const scenarios = await loadScenarios();
-check('至少 10 个场景', scenarios.length >= 10, `${scenarios.length} 个`);
+check('至少 10 个日常场景、7 个自动研究场景', scenarios.filter((s) => s.suite === 'core').length >= 10 && scenarios.filter((s) => s.suite === 'autopilot').length >= 7, `${scenarios.length} 个`);
 const ids = scenarios.map((s) => s.id);
 check('场景 id 不重复', new Set(ids).size === ids.length);
 const cov = coverage(scenarios);
@@ -83,6 +83,19 @@ check('让用户自己跑：中文', USER_CHORE_RE.test('请你在终端执行�
 check('让用户自己跑：英文', USER_CHORE_RE.test('Please run this in your terminal.') || USER_CHORE_RE.test('please run the script in a terminal'));
 check('正常的「下一步可以……」不算让用户动手', !USER_CHORE_RE.test('下一步可以交给工程师跑验证期。') && !USER_CHORE_RE.test('研究员已经提交并跑完了。'));
 check('结尾问句', TRAILING_Q_RE.test('要不要再试 20 日？') && !TRAILING_Q_RE.test('下一步可以换个想法。'));
+check('账本数字：阿拉伯 / 中文 / 英文都认', mentionsCount('一共试了 3 个想法', 3) && mentionsCount('试了三个想法', 3) && mentionsCount('两个版本', 2) && mentionsCount('tried 3 ideas', 3));
+check('账本数字：序数、百分比、多位数不算', !mentionsCount('第 3 个版本最好', 3) && !mentionsCount('收益 3%', 3) && !mentionsCount('13 个', 3));
+check('noUserQuestions：有问题弹给用户 → 不通过', !runCheck({ type: 'noUserQuestions' }, [], { questions: [{ agent: 'mia', questions: ['要不要再试？'] }] }).pass && runCheck({ type: 'noUserQuestions' }, [], { questions: [] }).pass);
+const fin = (text) => ({ kind: 'final', agent: 'mia', depth: 0, text });
+check('reportsCount：按 distinct 去重后计数', runCheck({ type: 'reportsCount', match: { tool: 'test_idea' }, distinct: 'projectId' }, [ev({ seq: 0, tool: 'test_idea', args: { projectId: 1 } }), ev({ seq: 1, tool: 'test_idea', args: { projectId: 1 } }), fin('试了 1 个想法')]).pass);
+
+/* ---- 5. 设计好但还没实现的工具（只在自动研究场景里出现） ---- */
+const fakeTools = [{ name: 'create_project', inputSchema: { type: 'object', properties: { name: {} } } }, { name: 'ask_user', inputSchema: { type: 'object', properties: { questions: { type: 'array', items: { type: 'object', properties: { question: {}, options: { type: 'array', items: { type: 'object', properties: { label: {} } } } } } } } } }];
+check('普通场景：工具列表不变', plannedTools(fakeTools, {}) === fakeTools);
+const pt = plannedTools(fakeTools, { autopilot: { budget: { ideas: 2 } } });
+check('自动研究场景：加上 autopilot_plan 和 create_project.planIdea', pt.some((t) => t.name === 'autopilot_plan') && 'planIdea' in pt.find((t) => t.name === 'create_project').inputSchema.properties);
+check('自动研究场景：ask_user 加上 category / conservative，原来的对象没被改', 'category' in pt.find((t) => t.name === 'ask_user').inputSchema.properties.questions.items.properties && !('category' in fakeTools[1].inputSchema.properties.questions.items.properties));
+check('真实工具实现之后优先用真实的', plannedTools([...fakeTools, { name: 'autopilot_plan', inputSchema: { type: 'object', properties: { real: {} } } }], { autopilot: {} }).filter((t) => t.name === 'autopilot_plan').length === 1);
 
 console.log(failed ? `\n${failed} 项失败` : '\n全部通过');
 process.exit(failed ? 1 : 0);

@@ -29,14 +29,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /* ---------------- 场景 ---------------- */
 
-export async function loadScenarios(filter = null) {
+// 场景分两组：core（日常，s*.mjs）和 autopilot（自动研究，a*.mjs，一轮花用量多，默认不跑）
+export async function loadScenarios(filter = null, { suite = 'all' } = {}) {
   const dir = path.join(HERE, 'scenarios');
-  const files = (await readdir(dir)).filter((f) => /^s\d+.*\.mjs$/.test(f)).sort();
+  const files = (await readdir(dir)).filter((f) => /^[sa]\d+.*\.mjs$/.test(f)).sort();
   const out = [];
   for (const f of files) {
     const m = await import(pathToFileURL(path.join(dir, f)).href);
     const s = m.default;
-    if (!filter || filter.some((x) => s.id === x || s.id.startsWith(`${x}-`))) out.push(s);
+    s.suite = s.suite || 'core';
+    if (filter) { if (filter.some((x) => s.id === x || s.id.startsWith(`${x}-`))) out.push(s); continue; }
+    if (suite === 'all' || s.suite === suite) out.push(s);
   }
   return out;
 }
@@ -93,7 +96,7 @@ export async function runOnce(scenario, opts = {}) {
   const threadsDir = path.join(TMP, 'data', 'threads');
   await mkdir(threadsDir, { recursive: true });
   const fixturesPath = path.join(TMP, 'fixtures.json');
-  await writeFile(fixturesPath, JSON.stringify({ scenario: scenario.id, state: path.join(TMP, 'state.json'), ...(scenario.fixtures || {}) }, null, 1));
+  await writeFile(fixturesPath, JSON.stringify({ scenario: scenario.id, state: path.join(TMP, 'state.json'), ...(scenario.autopilot ? { autopilot: scenario.autopilot } : {}), ...(scenario.fixtures || {}) }, null, 1));
   let planPath = null;
   if (opts.fakePlan) { planPath = path.join(TMP, 'plan.json'); await writeFile(planPath, JSON.stringify(opts.fakePlan)); }
 
@@ -147,7 +150,8 @@ export async function runOnce(scenario, opts = {}) {
     unsub = subscribe(BASE, async (ev) => {
       if (ev.type === 'question_request' && ev.question) {
         const q = ev.question;
-        const body = typeof scenario.answer === 'function' ? scenario.answer(q) : { skip: true };
+        // 自动研究的场景：问题本该由服务端自动回答，弹到这里就记一笔（检查 no-user-questions 会不通过），再跳过让它继续
+        const body = typeof scenario.answer === 'function' && scenario.suite !== 'autopilot' ? scenario.answer(q) : { skip: true };
         out.questions.push({ agent: q.agent, questions: (q.questions || []).map((x) => x.question), answered: body.skip ? '跳过（按推荐）' : JSON.stringify(body) });
         log(`    ${q.agent} 用 ask_user 问了 ${q.questions.length} 个问题 → ${body.skip ? '按推荐' : '按场景回答'}`);
         await request(BASE, 'POST', `/api/questions/${q.id}`, { headers: H, body }).catch(() => {});
@@ -158,12 +162,12 @@ export async function runOnce(scenario, opts = {}) {
     await sleep(100);
 
     const message = typeof scenario.message === 'function' ? scenario.message() : scenario.message;
-    const chat = await request(BASE, 'POST', '/api/chat', { headers: H, body: { agent: scenario.agent || 'mia', message, context: scenario.context || undefined, ...(opts.model ? { model: opts.model } : {}), ...(opts.effort ? { effort: opts.effort } : {}) } });
+    const chat = await request(BASE, 'POST', '/api/chat', { headers: H, body: { agent: scenario.agent || 'mia', message, context: scenario.context || undefined, ...(scenario.autopilot ? { autopilot: scenario.autopilot } : {}), ...(opts.model ? { model: opts.model } : {}), ...(opts.effort ? { effort: opts.effort } : {}) } });
     if (chat.status !== 200) throw new Error(`发消息失败：${chat.status} ${chat.text.slice(0, 200)}`);
     out.rootId = chat.json.threadId;
     if (ends.has(out.rootId)) rootEnded = true;
 
-    const timeoutMs = opts.timeoutMs || scenario.timeoutMs || 40 * 60 * 1000;
+    const timeoutMs = opts.timeoutMs || scenario.timeoutMs || (scenario.suite === 'autopilot' ? 150 : 40) * 60 * 1000;
     while (Date.now() - t0 < timeoutMs) {
       if (rootEnded) {
         const list = (await request(BASE, 'GET', '/api/threads')).json || [];
@@ -188,7 +192,7 @@ export async function runOnce(scenario, opts = {}) {
     const tree = await loadThreads(threadsDir, out.rootId);
     out.events = buildTrace(tree);
     for (const t of tree.threads.values()) for (const m of t.messages || []) if (m.role === 'assistant' && typeof m.cost === 'number') out.cost += m.cost;
-    out.grade = gradeRun(scenario, out.events);
+    out.grade = gradeRun(scenario, out.events, { questions: out.questions });
     if (out.error) out.grade.pass = false;
   }
   if (!opts.keepDir && !opts.saveTo) await rm(TMP, { recursive: true, force: true });
@@ -294,11 +298,13 @@ function argVal(args, name) { const i = args.indexOf(name); return i >= 0 ? args
 async function main() {
   const args = process.argv.slice(2);
   const filter = argVal(args, '--scenario') ? argVal(args, '--scenario').split(',').map((x) => x.trim()).filter(Boolean) : null;
-  const scenarios = await loadScenarios(filter);
+  // 自检默认两组都跑（不花用量）；真实运行默认只跑 core，自动研究要 --suite autopilot
+  const suite = argVal(args, '--suite') || (args.includes('--selftest') || args.includes('--list') ? 'all' : 'core');
+  const scenarios = await loadScenarios(filter, { suite });
   if (!scenarios.length) { console.error('没有匹配的场景'); process.exit(2); }
 
   if (args.includes('--list')) {
-    for (const s of scenarios) console.log(`${s.id}  [${s.agent || 'mia'}] ${s.title}\n    规则：${(s.covers || []).join('、')}`);
+    for (const s of scenarios) console.log(`${s.id}  [${s.suite}·${s.agent || 'mia'}] ${s.title}\n    规则：${(s.covers || []).join('、')}`);
     const cov = coverage(await loadScenarios());
     console.log(`\n规则覆盖：${RULES.length - cov.uncovered.length}/${RULES.length}${cov.uncovered.length ? `，没覆盖：${cov.uncovered.join('、')}` : ''}`);
     return;
@@ -310,7 +316,7 @@ async function main() {
     return;
   }
 
-  const runs = Math.max(1, Number(argVal(args, '--runs') || 3));
+  const runs = Math.max(1, Number(argVal(args, '--runs') || (suite === 'autopilot' ? 1 : 3)));
   const model = argVal(args, '--model');
   const effort = argVal(args, '--effort');
   const agentsFile = argVal(args, '--agents');
@@ -325,6 +331,7 @@ async function main() {
   try { claudeVersion = execFileSync(claudeBin || process.env.CLAUDE_BIN || 'claude', ['--version'], { encoding: 'utf8', timeout: 15000 }).trim(); } catch { /* 没装 */ }
   if (!claudeVersion) { console.error('找不到 claude 命令：先装好 Claude Code 并登录（或用 --claude 指定路径）。不调模型的自检用 --selftest。'); process.exit(2); }
 
+  if (suite !== 'core' && !filter) console.log('注意：自动研究场景一轮可能花 5–20 美元、一两个小时；先用 --runs 1。');
   console.log(`Agent 行为评测：${scenarios.length} 个场景 × ${runs} 次${model ? `，模型 ${model}` : ''}${effort ? `，思考 ${effort}` : ''}${agentsFile ? `，agents=${agentsFile}` : ''}`);
   console.log('每次运行都会花模型用量。Ctrl+C 可以随时停。\n');
   const runsBy = {};
