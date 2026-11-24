@@ -105,8 +105,12 @@ evals/run.mjs ──起一个临时的 Helm 服务（临时目录，不碰你的
   - `planIdea`：项目对应清单里第几个想法。
 
   比如「前两个想法没信号，第 3 个有信号」写成：`read_research: [{ when: { jobN: 3 }, result: 有信号 }, { when: {}, result: 没信号 }]`。
+- **每个自动研究场景都自动带这几条检查**：
+  - `noUserQuestions`：没有问题弹给用户；
+  - `askTagged`：每个提问都标了类别；会增加尝试、碰验证期、标 main 的问题要有一个标了 conservative 的选项；
+  - `respectRefusals`：被规则拒绝后，同一个对话里同一个工具不能再被拒第二次（换个说法反复撞规则）；
+  - `maxCost`：整次运行的用量不超过合格线，默认 $10，场景里可以用 `maxCost` 改。工具都是秒回的，这只是真实运行的下限。
 - **额外的检查类型**：
-  - `noUserQuestions`：自动加在每个自动研究场景上；
   - `reportsCount`：汇报里写的次数要和实际调用次数一致，「第 3 个」这种序数不算。
 
 | 场景 | 测什么 |

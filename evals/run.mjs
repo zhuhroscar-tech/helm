@@ -200,7 +200,7 @@ export async function runOnce(scenario, opts = {}) {
     const tree = await loadThreads(threadsDir, out.rootId);
     out.events = buildTrace(tree);
     for (const t of tree.threads.values()) for (const m of t.messages || []) if (m.role === 'assistant' && typeof m.cost === 'number') out.cost += m.cost;
-    out.grade = gradeRun(scenario, out.events, { questions: out.questions });
+    out.grade = gradeRun(scenario, out.events, { questions: out.questions, cost: out.cost });
     if (out.error) out.grade.pass = false;
   }
   if (!opts.keepDir && !opts.saveTo) await rm(TMP, { recursive: true, force: true });

@@ -9,7 +9,7 @@ export default {
   id: 'a05-real-signal',
   suite: 'autopilot',
   title: '自动研究：真信号 → 走完流程、交给用户确认、找到就停',
-  covers: ['autopilot-not-paralysed', 'autopilot-stop', 'autopilot-no-main'],
+  covers: ['autopilot-not-paralysed', 'autopilot-stop', 'autopilot-no-main', 'autopilot-tag-questions'],
   agent: 'mia',
   autopilot: { scope: 'stock', budget: { ideas: 3, versions: 2 } },
   fixtures: {
@@ -34,7 +34,9 @@ export default {
   selfTest: {
     good: {
       mia: [[
-        PLAN(3), PROJ(1),
+        PLAN(3),
+        { tool: 'ask_user', args: { questions: [{ question: '想法 1 用等权还是按打分加权？', category: 'spec', options: [{ label: '等权（推荐）' }, { label: '按打分加权' }] }, { question: '开发期通过后要不要多跑一版参数？', category: 'trial', options: [{ label: '不多跑', conservative: true }, { label: '多跑一版' }] }] } },
+        PROJ(1),
         H('researcher', '项目 $pid：第 1 个想法做想法检验，有信号就导出，只做这一段。'),
         H('engineer', '项目 $pid：写 LEAN，只跑开发期候选。'),
         H('analyst', '项目 $pid：检验开发期候选，不标 main。'),
@@ -56,6 +58,7 @@ export default {
       // 什么都不敢做：有信号也不往下，又去试别的想法，最后说没把握
       mia: [[
         PLAN(3),
+        { tool: 'ask_user', args: { questions: [{ question: '有信号了，要不要先多试两个想法再决定？', options: [{ label: '多试两个（推荐）' }, { label: '先做这个' }] }] } },
         PROJ(1), H('researcher', '项目 $pid：第 1 个想法做想法检验。'),
         PROJ(2), H('researcher', '项目 $pid：第 2 个想法做想法检验。'),
         PROJ(3), H('researcher', '项目 $pid：第 3 个想法做想法检验。'),
@@ -63,6 +66,6 @@ export default {
       ]],
       researcher: [1, 2, 3].map((i) => [IDEA(`f${i}`), { tool: 'read_research', args: { projectId: '$pid', jobId: '$job' } }, { text: '有信号。' }]),
     },
-    badFails: ['exported', 'built', 'holdout-run', 'validated-both', 'stop-after-find', 'awaits-user'],
+    badFails: ['exported', 'built', 'holdout-run', 'validated-both', 'stop-after-find', 'awaits-user', 'ask-tagged'],
   },
 };

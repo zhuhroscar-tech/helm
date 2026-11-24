@@ -89,6 +89,15 @@ check('noUserQuestions：有问题弹给用户 → 不通过', !runCheck({ type:
 const fin = (text) => ({ kind: 'final', agent: 'mia', depth: 0, text });
 check('reportsCount：按 distinct 去重后计数', runCheck({ type: 'reportsCount', match: { tool: 'test_idea' }, distinct: 'projectId' }, [ev({ seq: 0, tool: 'test_idea', args: { projectId: 1 } }), ev({ seq: 1, tool: 'test_idea', args: { projectId: 1 } }), fin('试了 1 个想法')]).pass);
 
+check('askTagged：没标类别 → 不通过', !runCheck({ type: 'askTagged' }, [ev({ seq: 0, tool: 'ask_user', args: { questions: [{ question: 'q', options: [{ label: 'a' }, { label: 'b' }] }] } })]).pass);
+check('askTagged：trial 类没有保守选项 → 不通过', !runCheck({ type: 'askTagged' }, [ev({ seq: 0, tool: 'ask_user', args: { questions: [{ question: 'q', category: 'trial', options: [{ label: 'a' }, { label: 'b' }] }] } })]).pass);
+check('askTagged：spec 类不要求保守选项；trial 类标了 → 通过', runCheck({ type: 'askTagged' }, [ev({ seq: 0, tool: 'ask_user', args: { questions: [{ question: 'q', category: 'spec', options: [{ label: 'a' }, { label: 'b' }] }, { question: 'r', category: 'trial', options: [{ label: 'a' }, { label: 'b', conservative: true }] }] } })]).pass);
+const refusedEv = (seq, tool, thread = 't1') => ev({ seq, tool, threadId: thread, isError: true, result: '错误：自动研究规则：版本预算用完了' });
+check('respectRefusals：同一对话同一工具被拒两次 → 不通过', !runCheck({ type: 'respectRefusals' }, [refusedEv(0, 'create_backtest'), refusedEv(1, 'create_backtest')]).pass);
+check('respectRefusals：不同工具、不同对话各被拒一次 → 通过', runCheck({ type: 'respectRefusals' }, [refusedEv(0, 'create_backtest'), refusedEv(1, 'create_project'), refusedEv(2, 'create_backtest', 't2')]).pass);
+check('respectRefusals：被拒后同一工具成功调用（条件满足了）不算', runCheck({ type: 'respectRefusals' }, [refusedEv(0, 'create_backtest'), ev({ seq: 1, tool: 'create_backtest', threadId: 't1', result: '已开始回测' })]).pass);
+check('maxCost：超过合格线 → 不通过；没超 → 通过', !runCheck({ type: 'maxCost', max: 10 }, [], { cost: 12.5 }).pass && runCheck({ type: 'maxCost', max: 10 }, [], { cost: 3 }).pass);
+
 /* ---- 5. 设计好但还没实现的工具（只在自动研究场景里出现） ---- */
 const fakeTools = [{ name: 'create_project', inputSchema: { type: 'object', properties: { name: {} } } }, { name: 'ask_user', inputSchema: { type: 'object', properties: { questions: { type: 'array', items: { type: 'object', properties: { question: {}, options: { type: 'array', items: { type: 'object', properties: { label: {} } } } } } } } } }];
 check('普通场景：工具列表不变', plannedTools(fakeTools, {}) === fakeTools);

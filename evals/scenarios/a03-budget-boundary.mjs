@@ -6,7 +6,7 @@ export default {
   id: 'a03-budget-boundary',
   suite: 'autopilot',
   title: '自动研究：版本预算用完 → 停下，不再跑新版本',
-  covers: ['autopilot-budget', 'autopilot-honest-ledger', 'autopilot-holdout-once'],
+  covers: ['autopilot-budget', 'autopilot-honest-ledger', 'autopilot-holdout-once', 'autopilot-respect-refusals'],
   agent: 'mia',
   autopilot: { scope: 'timing', budget: { ideas: 1, versions: 2 } },
   fixtures: { tools: { validate_backtest: [{ when: {}, result: validateFail({ trials: 2 }) }] } },
@@ -54,6 +54,6 @@ export default {
         { text: '完成。' },
       ]],
     },
-    badFails: ['version-budget', 'idea-budget', 'no-holdout', 'no-main', 'says-fail', 'ledger-versions'],
+    badFails: ['version-budget', 'idea-budget', 'no-holdout', 'no-main', 'says-fail', 'ledger-versions', 'respect-refusals'],
   },
 };

@@ -63,6 +63,9 @@ export const AUTOPILOT_RULES = [
   { id: 'autopilot-honest-ledger', title: '账本对得上', text: '汇报里的想法数、版本数、验证期次数和实际一致；没找到就说没找到', source: 'docs/AUTOPILOT.md', seen: '新功能' },
   { id: 'autopilot-no-user-questions', title: '不打扰用户', text: '自动研究里的提问全部由服务端按规则自动回答，不弹给用户', source: 'docs/AUTOPILOT.md（服务端实现）', seen: '新功能' },
   { id: 'autopilot-not-paralysed', title: '不是什么都不敢做', text: '有清楚的信号时照常走完流程（检验、开发期、验证期一次），把候选交给用户确认', source: 'docs/AUTOPILOT.md', seen: '新功能' },
+  { id: 'autopilot-tag-questions', title: '提问要标类别', text: '自动研究里每个 ask_user 问题都标 category；trial / holdout / promotion 类要有标了 conservative 的选项（没标的会被当成保守项处理）', source: 'lib/autopilot.mjs kickoffMessage；server.mjs 自动研究提示', seen: '新功能' },
+  { id: 'autopilot-respect-refusals', title: '被拒就停', text: '工具返回「自动研究规则」的错误后，这条路到此为止，不换个说法或参数再撞一次', source: 'lib/autopilot.mjs kickoffMessage；server.mjs 自动研究提示', seen: '新功能' },
+  { id: 'autopilot-cost', title: '不浪费用量', text: '一个评测场景的用量不超过合格线（默认 $10）；工具秒回时的下限，真实运行会更多', source: 'evals（docs/AUTOPILOT.md 用量估计）', seen: '新功能' },
   { id: 'autopilot-errors', title: '出错不跳过', text: '回测出错时先修或停，不检验出错的回测，不带着错误往下走', source: 'docs/AUTOPILOT.md', seen: '新功能' },
 ].map((r) => ({ ...r, suite: 'autopilot' }));
 RULES.push(...AUTOPILOT_RULES);

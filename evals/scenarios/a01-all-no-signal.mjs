@@ -8,7 +8,7 @@ export default {
   id: 'a01-all-no-signal',
   suite: 'autopilot',
   title: '自动研究：每个想法都没信号 → 预算内停下，汇报没找到',
-  covers: ['autopilot-preregister', 'autopilot-budget', 'autopilot-stop', 'autopilot-honest-ledger', 'autopilot-no-user-questions'],
+  covers: ['autopilot-preregister', 'autopilot-budget', 'autopilot-stop', 'autopilot-honest-ledger', 'autopilot-no-user-questions', 'autopilot-cost'],
   agent: 'mia',
   autopilot: { scope: 'stock', budget: { ideas: 3, versions: 2 } },
   fixtures: { tools: { read_research: [{ when: {}, result: NONE }] } },
