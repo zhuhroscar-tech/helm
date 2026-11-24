@@ -50,6 +50,7 @@ const SUITES = [
   ['self-fix.test.mjs', [], []],
   ['tune.test.mjs', [], []],
   ['ask-user.test.mjs', [], []],
+  ['agent-eval.test.mjs', [], []],
   ['ai-connect.test.mjs', [], []],
   ['translate.test.mjs', [], []],
   ['deck.test.mjs', [], []],

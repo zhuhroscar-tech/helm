@@ -130,6 +130,8 @@ Hand-offs between agents appear as separate conversations. Stopping an agent als
 
 Tests: `npm test -- --fast` (no LEAN) or `npm test` (includes real LEAN backtests). Tests use temporary folders and don't touch your projects.
 
+Agent behaviour evals: `npm run eval` runs 14 scenarios with the real claude and checks whether the agents follow the rules that only live in their prompts. Run it after changing a prompt or the model; it uses model usage. See [evals/README.md](evals/README.md) (Chinese).
+
 [CONTRIBUTING.md](CONTRIBUTING.md) · [docs/ROADMAP.md](docs/ROADMAP.md) · [CHANGELOG.md](CHANGELOG.md) (Chinese) · [community/](community/README.md)
 
 MIT licence. LEAN, yfinance and qlib are not part of this repository ([THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)); Yahoo data is for personal use under Yahoo's terms.

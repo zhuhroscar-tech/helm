@@ -129,6 +129,8 @@ npm start                  # 打开 http://localhost:4377
 
 测试：`npm test -- --fast`（不跑 LEAN）或 `npm test`（含真实 LEAN 回测）。测试用临时目录，不碰你的项目。
 
+Agent 行为评测：`npm run eval` 用真实的 claude 跑 14 个场景，检查 agent 有没有守只写在提示词里的规则。改了提示词或换了模型时跑一次，会花模型用量。见 [evals/README.md](evals/README.md)。
+
 [CONTRIBUTING.md](CONTRIBUTING.md) · [docs/ROADMAP.md](docs/ROADMAP.md) · [CHANGELOG.md](CHANGELOG.md) · [community/](community/README.md)
 
 MIT 许可。LEAN、yfinance、qlib 不在这个仓库里（见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)）；Yahoo 数据按 Yahoo 条款仅限个人使用。

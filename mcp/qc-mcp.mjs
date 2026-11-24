@@ -19,7 +19,11 @@ const LANG = process.env.HELM_LANG === 'en' ? 'en' : 'zh';
 const userText = (text) => (LANG === 'en' && typeof text === 'string' && text.startsWith('错误：')
   ? `Error: ${text.slice(3).split('; ').map((x) => localize('en', x)).join('; ')}` : text);
 
-const AGENTS = JSON.parse(readFileSync(path.join(E.ROOT, 'agents.json'), 'utf8'));
+const AGENTS = JSON.parse(readFileSync(process.env.HELM_AGENTS_FILE || path.join(E.ROOT, 'agents.json'), 'utf8'));
+
+// 行为评测（evals/run.mjs）：设置了 HELM_EVAL_FIXTURES 时，除 handoff / ask_user 以外的工具都返回场景里写好的结果，
+// 不碰真实的引擎和项目。正常使用 Helm 时不会设置这个变量。
+const EVAL = process.env.HELM_EVAL_FIXTURES ? (await import('../evals/stub-tools.mjs')).createStub(process.env.HELM_EVAL_FIXTURES) : null;
 
 const int = { type: 'integer' };
 const str = { type: 'string' };
@@ -885,6 +889,10 @@ async function onMessage(msg) {
       if (!tool) return write({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: LANG === 'en' ? `Unknown tool ${params.name}` : `未知工具 ${params.name}` }], isError: true } });
       const bad = validateArgs(tool.inputSchema, params.arguments === undefined || params.arguments === null ? {} : params.arguments);
       if (bad) return write({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: userText(`错误：${bad}`) }], isError: true } });
+      if (EVAL && EVAL.handles(tool.name)) {
+        const r = await EVAL.call(tool.name, params.arguments || {});
+        return write({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: userText(r.text) }], isError: r.isError } });
+      }
       const text = await tool.run(params.arguments || {});
       return write({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: userText(text) }], isError: /^错误：|^没有运行回测|^下载失败/.test(text) } });
     }

@@ -2,6 +2,19 @@
 
 ## 未发布
 
+### Agent 行为评测（evals/）
+- 以前的测试用假 claude，只测流程（交接、停止、提问）能跑通，不测 agent 做的决定。很多规则只写在提示词里：按阶段派活、「没有信号」就停、开发期没过不跑验证期、开工前问。改了提示词或换了模型，agent 不守这些规则，测试也不会失败。
+- `npm run eval`：在临时目录起真实的 Helm 服务和真实的 claude，跑 14 个场景（总控 8 个，研究员、工程师、分析师各 2 个）。回测、想法检验、统计检验等工具返回场景写好的结果（`evals/stub-tools.mjs`，由 `mcp/qc-mcp.mjs` 在 `HELM_EVAL_FIXTURES` 设置时加载，平时不加载），handoff 和 ask_user 走真实服务。评分是确定的规则，不用模型打分（`evals/grade.mjs`）：工具调没调、调用顺序、参数、最终回答里的关键词。每个场景默认跑 3 次，报告分 pass / flaky / fail。
+- 规则目录 `evals/rules.mjs`：16 条只靠提示词约束的规则，每条写明出处和在真实对话里见过的违反。场景来自翻 21 个真实对话找到的 11 次违反，再补上从没出现过的路径（完整的派活链、风控、互补策略、波动率目标的停止规则）。
+- 对比：`--baseline` 和上一次比，标出通过率降了的检查；`--agents` 用另一份 agents.json（比如 `data/agents-backups/` 里改之前的版本）；`--model` / `--effort`。报告里记了 agents.json、workspace/CLAUDE.md 的哈希、模型和 claude 版本。
+- Agents 页保存提示词后，提示跑 `npm run eval`。
+- `mcp/qc-mcp.mjs` 也按 `HELM_AGENTS_FILE` 读 agents.json，以前固定读仓库里那份，服务端已经支持这个变量。
+- `test/agent-eval.test.mjs`（在 `npm test` 里，不调模型，约半分钟）：
+  - 每条规则至少有一个场景覆盖；
+  - 每个场景用假 claude 走一遍守规则的做法，检查全部通过；走一遍违规的做法，列出的检查都没通过；
+  - 工具替身和评分的边界情况。
+- **未验证**：用真实模型跑。沙盒里的 claude 没登录，目前只用假 claude 验证过整条链路。真实模型的通过率、文字类检查的误判率要在 Mac 上跑过才知道。
+
 ### qlib 这一层不只选股：因子归因 + 市场宽度择时
 - **因子归因**（回测页稳健性里新的一节，agent 工具 `attribute_backtest`）：策略日收益减无风险利率，对 Fama-French 五因子 + 动量（Kenneth R. French 数据库，日度，`lib/factors.mjs` 下载并缓存 7 天、零依赖解 zip）回归，Newey-West 标准误；给出每个因子的 β 和 t、年化 alpha 和 t、R²、收益拆解，以及一段话结论。只读诊断，不计入尝试次数。因子都是美股的，结论里写明 R² 低不代表有 alpha。
 - **市场宽度**（`engine/qlib_research/qs_timing.py`，agent 工具 `build_breadth`）：用股票池导出的历史成分股和 LEAN 日线算三条每日序列：站上 200 日均线的比例、52 周新高减新低、21 日收益分化。股票池导出时自动算一次。策略里 `from helm_data import HelmBreadth`，`value(self.time, 字段)` 只给日期严格早于今天的行；代码检查、数据指纹都已覆盖。
