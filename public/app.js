@@ -280,15 +280,16 @@ function openLayerModal() {
     if (o.kind === 'none') return `<button type="button" class="ly-tile ly-none${st.sel === o.id ? ' sel' : ''}${st.sel && st.sel !== o.id ? ' dim' : ''}" data-ly-opt="none" aria-pressed="${st.sel === o.id}"><span class="ly-key">0</span><span class="ly-shape" aria-hidden="true">✕</span><span class="ly-tx"><b>${esc(o.title)}</b><i>${esc(o.tests)}</i></span></button>`;
     const [color, shape] = LY_TILES[i % 4];
     const what = o.kind === 'timing' ? _t('ly_k_timing') : o.kind === 'vol' ? _t('ly_k_vol') : o.kind === 'portfolio' ? _t('ly_k_port', { n: (o.peers || []).length + 1 }) : o.kind === 'complement' ? _t('ly_k_comp') : `${esc(o.replaces)} → ${esc(o.universeLabel || o.universe)}`;
-    return `<button type="button" class="ly-tile ly-${color}${st.sel === o.id ? ' sel' : ''}${st.sel && st.sel !== o.id ? ' dim' : ''}" data-ly-opt="${esc(o.id)}" aria-pressed="${st.sel === o.id}">
+    return `<button type="button" class="ly-tile ly-${color}${st.sel === o.id ? ' sel' : ''}${(st.sel && st.sel !== o.id) || (o.review && o.review.verdict === 'drop' && st.sel !== o.id) ? ' dim' : ''}" data-ly-opt="${esc(o.id)}" aria-pressed="${st.sel === o.id}">
       <span class="ly-key">${i + 1}</span><span class="ly-shape" aria-hidden="true">${shape}</span>
       <span class="ly-tx"><b>${o.recommended ? `<span class="ly-rec">${_t('ly_rec')}</span>` : ''}${esc(o.title)}</b><i>${esc(o.tests)}</i>
-      <span class="ly-badges"><em>${what}</em><em>${_t('ly_trials', { n: o.trials })}</em><em>${riskLabel(o.risk)}</em></span></span></button>`;
+      <span class="ly-badges"><em>${what}</em><em>${_t('ly_trials', { n: o.trials })}</em><em>${riskLabel(o.risk)}</em>${o.review ? `<em class="ly-cr ly-cr-${esc(o.review.verdict)}">${_t(CRITIC_V[o.review.verdict] ? CRITIC_V[o.review.verdict][1] : 'cr_caution')}</em>` : ''}</span></span></button>`;
   }
   function detailHTML(o) {
     if (o.kind === 'none') return `<div class="ly-detail"><p>${_t('ly_none_d')}</p><div class="modal-actions"><button type="button" class="btn" data-ly-back>${_t('ly_back')}</button><button type="button" class="btn primary" data-ly-go>${_t('ly_keep')}</button></div></div>`;
     return `<div class="ly-detail"><h3>${esc(o.title)}</h3>
       ${o.how ? `<p>${esc(o.how)}</p>` : ''}
+      ${o.review ? `<p class="ly-crd">${criticTag(o.review)}</p>` : ''}
       <dl class="ly-dl">
         <dt>${_t('ly_d_signal')}</dt><dd>${o.kind === 'layer' ? `${o.signalType === 'full' ? _t('ly_sig_full') : _t('ly_sig_idea')}${o.signal ? ` · ${esc(o.signal)}` : ''}` : esc(o.signal || '')}</dd>
         ${o.holdings ? `<dt>${_t('ly_d_hold')}</dt><dd>${esc(o.holdings)}</dd>` : ''}
@@ -327,6 +328,7 @@ function openLayerModal() {
       const R = st.layer.result;
       h = `${R.summary ? `<p class="ly-sum">${esc(R.summary)}</p>` : ''}
         ${R.recommendAlt && R.why && R.why.length ? `<p class="meta">${_t('ly_why', { v: R.why.map(esc).join(_t('k0007')) })}</p>` : ''}
+        ${R.review ? criticBanner({ status: 'done', ...R.review }) : ''}
         ${layers.length ? '' : `<p class="meta">${_t('ly_nofit')}</p>`}
         <div class="ly-grid${layers.length === 1 ? ' one' : ''}">${layers.map((o, i) => tileHTML(o, i)).join('')}</div>
         ${none ? tileHTML(none, 4) : ''}
@@ -3925,15 +3927,30 @@ function qDraft(q) {
   if (!S.qDraft.has(q.id)) S.qDraft.set(q.id, { sel: q.questions.map(() => []), other: q.questions.map(() => '') });
   return S.qDraft.get(q.id);
 }
+// 审核员的结论（选项上的小标签）：值得做 / 有保留 / 筛掉，附问题和一句理由
+const CRITIC_V = { keep: ['cr-keep', 'cr_keep'], caution: ['cr-caution', 'cr_caution'], drop: ['cr-drop', 'cr_drop'] };
+function criticTag(r) {
+  if (!r) return '';
+  const [cls, key] = CRITIC_V[r.verdict] || CRITIC_V.caution;
+  return `<span class="cr-tag ${cls}">${_t(key)}${r.flags && r.flags.length ? ` · ${r.flags.map((f) => esc(_t(`cr_f_${f}`))).join(' · ')}` : ''}</span>${r.reason ? `<span class="cr-why">${esc(r.reason)}</span>` : ''}`;
+}
+function criticBanner(rv) {
+  if (!rv) return '';
+  if (rv.status === 'running') return `<p class="cr-note">${_t('cr_running')}</p>`;
+  if (rv.status !== 'done') return '';
+  if (rv.noneWorth) return `<div class="cr-none"><b>${_t('cr_none')}</b>${rv.summary ? ` ${esc(rv.summary)}` : ''}${rv.fix ? `<br>${_t('cr_fix')}${esc(rv.fix)}` : ''}</div>`;
+  return rv.summary ? `<p class="cr-note">${_t('cr_summary')}${esc(rv.summary)}</p>` : '';
+}
 function questionCardHTML(q) {
   const d = qDraft(q); const ag = agentOf(q.agent);
   const left = Math.max(0, Math.round((q.expiresAt - Date.now()) / 60000));
+  const rv = q.review && q.review.status === 'done' ? q.review : null;
   const items = q.questions.map((qq, i) => `<fieldset class="qq"><legend>${qq.header ? `<span class="qq-h">${esc(qq.header)}</span>` : ''}${esc(qq.question)}${qq.multiSelect ? _t('k1331') : ''}</legend>
-    <div class="qq-opts">${qq.options.map((o) => { const on = d.sel[i].includes(o.label); return `<button type="button" class="qq-opt ${on ? 'on' : ''}" data-q-opt="${i}" data-label="${esc(o.label)}" aria-pressed="${on}"><b>${esc(o.label)}</b>${o.description ? `<i>${esc(o.description)}</i>` : ''}</button>`; }).join('')}</div>
+    <div class="qq-opts">${qq.options.map((o) => { const on = d.sel[i].includes(o.label); const r = rv && rv.questions[i] && rv.questions[i].applicable ? rv.questions[i].options[o.label] : null; return `<button type="button" class="qq-opt ${on ? 'on' : ''}${r && r.verdict === 'drop' ? ' cr-dim' : ''}" data-q-opt="${i}" data-label="${esc(o.label)}" aria-pressed="${on}"><b>${esc(o.label)}</b>${o.description ? `<i>${esc(o.description)}</i>` : ''}${criticTag(r)}</button>`; }).join('')}</div>
     <input type="text" class="qq-other" data-q-other="${i}" value="${esc(d.other[i])}" placeholder="${_t('k1332')}" maxlength="1000" aria-label="${_t('k1333')}"></fieldset>`).join('');
   return `<form class="qcard" data-q="${esc(q.id)}">
     <div class="qc-top">${_t('k1334', { v: esc(ag.glyph), v2: esc(ag.name), left })}</div>
-    ${q.intro ? `<p class="qc-intro">${esc(q.intro)}</p>` : ''}${items}
+    ${q.intro ? `<p class="qc-intro">${esc(q.intro)}</p>` : ''}${criticBanner(q.review)}${items}
     <div class="ap-act"><button type="submit" class="btn sm primary">${_t('k1335')}</button><button type="button" class="btn sm" data-q-skip>${_t('k1336')}</button></div>
   </form>`;
 }
@@ -4868,6 +4885,8 @@ function connectBus() {
       if (!(S.thread && S.thread.id === ev.question.threadId && $('#app').classList.contains('chat-open'))) {
         toast(`${_t('k1493', { name: agentOf(ev.question.agent).name, n: ev.question.questions.length })}`, { label: _t('k1494'), run: () => openThread(ev.question.threadId), sticky: true });
       }
+    } else if (ev.type === 'question_reviewed') {
+      const x = S.questions.get(ev.id); if (x) { x.review = ev.review; onApprovalsChanged(); }
     } else if (ev.type === 'question_settled') {
       const x = S.questions.get(ev.id); if (x) x.state = ev.state;
       onApprovalsChanged();

@@ -25,6 +25,7 @@ import * as Alpaca from './lib/alpaca.mjs';
 import * as QC from './lib/quantconnect.mjs';
 import * as Layer from './lib/layer.mjs';
 import { loadAttribution } from './lib/attribution.mjs';
+import * as Critic from './lib/critic.mjs';
 import * as AI from './lib/ai.mjs';
 import { sensitiveReadDenies } from './lib/agent-perms.mjs';
 import { effectiveTools, localTools, validateAgentPatch, saveAgentPatch, isQcTool } from './lib/agents.mjs';
@@ -186,16 +187,42 @@ function settleQuestion(q, { answers = null, freeText = '', skipped = false, by 
 }
 // 给 agent 的文字版回答
 function answerText(q) {
+  const rv = q.review && q.review.status === 'done' ? q.review : null;
   if (q.state === 'skipped') {
-    return q.by === 'timeout' ? `用户 ${Math.round(QUESTION_WAIT_MS / 60000)} 分钟没有回答。按你推荐的选项（每题第一个）继续，并在最终总结里说明用了哪些默认。`
-      : q.by === 'system' ? '对话已经结束，问题作废。' : '用户跳过了提问，让你按推荐的选项（每题第一个）继续。在最终总结里说明用了哪些默认。';
+    if (q.by === 'system') return '对话已经结束，问题作废。';
+    const { note, defaults } = Critic.agentNote(q, rv, { skipped: true });
+    const head = q.by === 'timeout' ? `用户 ${Math.round(QUESTION_WAIT_MS / 60000)} 分钟没有回答。` : '用户跳过了提问。';
+    if (rv && rv.noneWorth) return `${head}\n${note}`;
+    const picks = defaults.some((d, i) => d !== (q.questions[i].options[0] && q.questions[i].options[0].label))
+      ? `按这些默认继续：${q.questions.map((qq, i) => `${i + 1}.「${defaults[i] || '（没有可用的选项）'}」`).join('；')}`
+      : '按你推荐的选项（每题第一个）继续';
+    return `${head}${picks}，并在最终总结里说明用了哪些默认。${note ? `\n${note}` : ''}`;
   }
   const lines = q.questions.map((qq, i) => {
     const a = q.answers[i];
     const pick = a.selected.length ? a.selected.join('、') : '（没选）';
     return `${i + 1}. ${qq.question}\n   → ${pick}${a.other ? `；补充：${a.other}` : ''}`;
   });
-  return `用户回答了：\n${lines.join('\n')}${q.freeText ? `\n用户另外说：${q.freeText}` : ''}\n\n照这些回答继续做，不用再确认。`;
+  const { note } = Critic.agentNote(q, rv);
+  return `用户回答了：\n${lines.join('\n')}${q.freeText ? `\n用户另外说：${q.freeText}` : ''}\n\n照这些回答继续做，不用再确认。${note ? `\n\n${note}` : ''}`;
+}
+
+// 审核员的材料：用户的原话（这个对话的第一条和最近一条消息）、项目说明和规则说明、之前的想法检验结论
+async function criticForQuestion(thread, q) {
+  const users = (thread.messages || []).filter((m) => m.role === 'user');
+  const request = [users[0] && users[0].text, users.length > 1 ? users[users.length - 1].text : ''].filter(Boolean).join('\n---\n');
+  const pid = Number((users.map((m) => m.context && m.context.projectId).filter(Boolean).pop()) || 0);
+  let project = null; let spec = ''; let priorIdeas = [];
+  if (Number.isSafeInteger(pid) && pid > 0) {
+    const pr = await READ_ENDPOINTS['projects/read']({ projectId: pid }).catch(() => null);
+    project = pr && pr.success ? pr.projects[0] : null;
+    spec = await readFile(path.join(PROJECTS_DIR, String(pid), 'spec.md'), 'utf8').catch(() => '');
+    const rj = await Q.listResearch({ projectId: pid }).catch(() => null);
+    priorIdeas = Layer.priorIdeaResults(rj && rj.success ? rj.jobs : []);
+  }
+  const items = q.questions.map((qq) => ({ header: qq.header, question: qq.question, options: qq.options }));
+  const lang = thread.lang === 'en' ? 'en' : 'zh';
+  return Critic.review({ input: Critic.buildInput({ kind: 'ask', intro: q.intro, items, request, project, spec, priorIdeas }), items, lang, runModel: runModelOnce });
 }
 async function handleAsk(req, res) {
   if (!safeEqual(req.headers['x-helm-token'], HANDOFF_TOKEN)) return sendJson(res, 403, { error: 'bad token' });
@@ -213,6 +240,14 @@ async function handleAsk(req, res) {
   q.timer = setTimeout(() => settleQuestion(q, { skipped: true, by: 'timeout' }), QUESTION_WAIT_MS);
   questions.set(q.id, q);
   for (const [k, v] of questions) if (v.state !== 'pending' && Date.now() - v.at > 24 * 3600 * 1000) questions.delete(k);
+  // 审核员：独立地逐个审这些选项（不挡流程；审完再推一次，用户在审完之前就能回答）
+  if (Critic.enabled()) {
+    q.review = { status: 'running' };
+    criticForQuestion(run.thread, q).then((rv) => {
+      q.review = rv ? { status: 'done', ...rv } : { status: 'failed' };
+      broadcast({ type: 'question_reviewed', id: q.id, threadId: q.threadId, review: q.review });
+    });
+  }
   broadcast({ type: 'question_request', question: questionView(q) });
   // 用 res 的 close：请求体读完之后 req 的 close 在 Node 22 上不一定触发，MCP 进程崩了卡片会一直挂 15 分钟
   res.on('close', () => { if (q.state === 'pending' && !res.writableFinished) settleQuestion(q, { skipped: true, by: 'system' }); });
@@ -1639,7 +1674,17 @@ const server = http.createServer(async (req, res) => {
         await Layer.saveLayer(PROJECTS_DIR, job);
         layerRunning.set(pid, job.layerId);
         Layer.runAssessment({ context, legs: pc.legs, lang, runModel: runModelOnce })
-          .then((r) => { job.status = 'ready'; job.result = Layer.composeOptions({ qlib: r, alts, priorIdeas, qlibBlocked: pc.qlibBlocked, lang }); })
+          .then(async (r) => {
+            let result = Layer.composeOptions({ qlib: r, alts, priorIdeas, qlibBlocked: pc.qlibBlocked, lang });
+            // 审核员逐个审这些方案：被筛掉的排到后面；全部被筛掉时推荐「不加这一层」
+            const live = result.options.filter((o) => o.kind !== 'none');
+            if (Critic.enabled() && live.length) {
+              const items = [{ header: lang === 'en' ? 'Layer' : '叠加一层', question: lang === 'en' ? 'Which layer is worth adding to this strategy?' : '这个策略值得加哪一层？', options: live.map((o) => ({ label: o.title, description: `${o.tests} ${o.how || ''}`.trim() })) }];
+              const rv = await Critic.review({ input: Critic.buildInput({ kind: 'layer', items, project, spec, priorIdeas, facts: { attribution: attribution ? attribution.summary : null, qlibBlocked: pc.qlibBlocked || null } }), items, lang, runModel: runModelOnce });
+              result = Critic.applyToOptions(result, rv);
+            }
+            job.status = 'ready'; job.result = result;
+          })
           .catch((e) => { job.status = 'error'; job.error = `评估失败：${String(e && e.message || e).slice(0, 300)}`; })
           .then(() => Layer.saveLayer(PROJECTS_DIR, job))
           .catch(() => {})

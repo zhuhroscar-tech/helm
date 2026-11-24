@@ -24,6 +24,7 @@ const SUITES = [
   ['layer.test.mjs', [], []],
   ['attribution.test.mjs', [], []],
   ['timing.test.mjs', [], []],
+  ['critic.test.mjs', [], []],
   ['install.test.mjs', [], []],
   ['server-auth.test.mjs', [], []],
   ['i18n.test.mjs', [], []],
