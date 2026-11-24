@@ -243,8 +243,9 @@ function openQcDialog(files, ctx = {}) {
   }
 }
 
-// 「叠加 Qlib 选股」：预检 → 智能体评估出 2–4 个方案 → Kahoot 式色块让用户选 → 交给总控。
-// 色块颜色 + 形状一起区分（不只靠颜色）；键盘 1–4 选方案、0 选「不加这一层」、Enter 确认、Esc 关闭。
+// 「叠加一层」：预检 → 智能体评估 qlib 选股方案，再加上不选股的方案（仓位层、策略组合 / 互补策略）→ Kahoot 式色块让用户选 → 交给总控。
+// 选股层前景弱或之前没有信号时，不选股的方案排前面并标「推荐」。
+// 色块颜色 + 形状一起区分（不只靠颜色）；键盘 1–9 选方案、0 选「不加这一层」、Enter 确认、Esc 关闭。
 const LY_TILES = [['red', '▲'], ['blue', '◆'], ['yellow', '●'], ['green', '■']];
 function openLayerModal() {
   const projectId = S.route.projectId;
@@ -268,7 +269,7 @@ function openLayerModal() {
   function onKey(e) {
     if (!d.open || st.phase !== 'pick' || st.busy || e.metaKey || e.ctrlKey || e.altKey || e.target.closest('input, textarea')) return; // ⌘/Ctrl+0 是复位缩放，别吞掉
     const list = opts();
-    if (/^[1-4]$/.test(e.key)) { const o = list.filter((x) => x.kind === 'layer')[Number(e.key) - 1]; if (o) { st.sel = o.id; render(); e.preventDefault(); } }
+    if (/^[1-9]$/.test(e.key)) { const o = list.filter((x) => x.kind !== 'none')[Number(e.key) - 1]; if (o) { st.sel = o.id; render(); e.preventDefault(); } }
     else if (e.key === '0') { st.sel = 'none'; render(); e.preventDefault(); }
     else if (e.key === 'Enter' && st.sel && !e.target.closest('button')) { choose(); e.preventDefault(); }
   }
@@ -278,19 +279,21 @@ function openLayerModal() {
   function tileHTML(o, i) {
     if (o.kind === 'none') return `<button type="button" class="ly-tile ly-none${st.sel === o.id ? ' sel' : ''}${st.sel && st.sel !== o.id ? ' dim' : ''}" data-ly-opt="none" aria-pressed="${st.sel === o.id}"><span class="ly-key">0</span><span class="ly-shape" aria-hidden="true">✕</span><span class="ly-tx"><b>${esc(o.title)}</b><i>${esc(o.tests)}</i></span></button>`;
     const [color, shape] = LY_TILES[i % 4];
+    const what = o.kind === 'vol' ? _t('ly_k_vol') : o.kind === 'portfolio' ? _t('ly_k_port', { n: (o.peers || []).length + 1 }) : o.kind === 'complement' ? _t('ly_k_comp') : `${esc(o.replaces)} → ${esc(o.universeLabel || o.universe)}`;
     return `<button type="button" class="ly-tile ly-${color}${st.sel === o.id ? ' sel' : ''}${st.sel && st.sel !== o.id ? ' dim' : ''}" data-ly-opt="${esc(o.id)}" aria-pressed="${st.sel === o.id}">
       <span class="ly-key">${i + 1}</span><span class="ly-shape" aria-hidden="true">${shape}</span>
-      <span class="ly-tx"><b>${esc(o.title)}</b><i>${esc(o.tests)}</i>
-      <span class="ly-badges"><em>${esc(o.replaces)} → ${esc(o.universeLabel || o.universe)}</em><em>${_t('ly_trials', { n: o.trials })}</em><em>${riskLabel(o.risk)}</em></span></span></button>`;
+      <span class="ly-tx"><b>${o.recommended ? `<span class="ly-rec">${_t('ly_rec')}</span>` : ''}${esc(o.title)}</b><i>${esc(o.tests)}</i>
+      <span class="ly-badges"><em>${what}</em><em>${_t('ly_trials', { n: o.trials })}</em><em>${riskLabel(o.risk)}</em></span></span></button>`;
   }
   function detailHTML(o) {
     if (o.kind === 'none') return `<div class="ly-detail"><p>${_t('ly_none_d')}</p><div class="modal-actions"><button type="button" class="btn" data-ly-back>${_t('ly_back')}</button><button type="button" class="btn primary" data-ly-go>${_t('ly_keep')}</button></div></div>`;
     return `<div class="ly-detail"><h3>${esc(o.title)}</h3>
       ${o.how ? `<p>${esc(o.how)}</p>` : ''}
       <dl class="ly-dl">
-        <dt>${_t('ly_d_signal')}</dt><dd>${o.signalType === 'full' ? _t('ly_sig_full') : _t('ly_sig_idea')}${o.signal ? ` · ${esc(o.signal)}` : ''}</dd>
+        <dt>${_t('ly_d_signal')}</dt><dd>${o.kind === 'layer' ? `${o.signalType === 'full' ? _t('ly_sig_full') : _t('ly_sig_idea')}${o.signal ? ` · ${esc(o.signal)}` : ''}` : esc(o.signal || '')}</dd>
         ${o.holdings ? `<dt>${_t('ly_d_hold')}</dt><dd>${esc(o.holdings)}</dd>` : ''}
-        <dt>${_t('ly_d_data')}</dt><dd>${esc(o.universeLabel || o.universe)} · ${pitLabel(o.pit)}${o.dataReady === false ? ` · ${_t('ly_prep')}` : ''}</dd>
+        ${o.kind === 'layer' ? `<dt>${_t('ly_d_data')}</dt><dd>${esc(o.universeLabel || o.universe)} · ${pitLabel(o.pit)}${o.dataReady === false ? ` · ${_t('ly_prep')}` : ''}</dd>` : ''}
+        ${o.kind === 'portfolio' ? `<dt>${_t('ly_d_peers')}</dt><dd><ul>${(o.peers || []).map((p) => `<li>${esc(p.name)}${p.sharpe != null ? ` · ${_t('ly_sharpe')} ${esc(Number(p.sharpe).toFixed(2))}` : ''}</li>`).join('')}</ul></dd>` : ''}
         <dt>${_t('ly_d_trials')}</dt><dd>${_t('ly_trials', { n: o.trials })} · ${_t('ly_trials_d')}</dd>
         ${o.risks && o.risks.length ? `<dt>${_t('ly_d_risks')}</dt><dd><ul>${o.risks.map((r) => `<li>${esc(r)}</li>`).join('')}</ul></dd>` : ''}
       </dl>
@@ -303,7 +306,10 @@ function openLayerModal() {
     else if (st.phase === 'fail') h = `<div class="error-box"><p style="margin:0">${esc(st.err || '')}</p></div><div class="modal-actions"><button type="button" class="btn" data-ly-close>${_t('k0029')}</button></div>`;
     else if (st.phase === 'intro') {
       const legs = st.pc.legs.map((l) => `<span class="ly-chip"><b>${esc(l.etf)}</b> → ${esc(l.label)} <i>${pitLabel(l.pit)}${l.ready === false ? ` · ${_t('ly_prep')}` : ''}</i></span>`).join('');
-      h = `<p>${_t('ly_intro', { v: esc(st.pc.backtest ? st.pc.backtest.name : '') })}</p><div class="ly-chips">${legs}</div>
+      const notes = [st.pc.qlibBlocked ? esc(st.pc.qlibBlocked) : '', st.pc.noSignal ? _t('ly_nosig', { n: st.pc.noSignal }) : ''].filter(Boolean);
+      h = `<p>${_t('ly_intro', { v: esc(st.pc.backtest ? st.pc.backtest.name : '') })}</p>
+        ${legs ? `<p class="meta">${_t('ly_legs')}</p><div class="ly-chips">${legs}</div>` : ''}
+        ${notes.length ? `<p class="ly-sum">${notes.join('<br>')}${_t('ly_alt_first')}</p>` : ''}
         <ol class="qc-list"><li>${_t('ly_s1')}</li><li>${_t('ly_s2')}</li><li>${_t('ly_s3')}</li></ol>
         <p class="meta">${_t('ly_cost')}</p>
         <div class="modal-actions">${st.ready ? `<button type="button" class="btn" data-ly-prev>${_t('ly_prev')}</button>` : ''}<button type="button" class="btn" data-ly-close>${_t('k0033')}</button><button type="button" class="btn primary" data-ly-start>${_t('ly_start')}</button></div>`;
@@ -314,10 +320,12 @@ function openLayerModal() {
       h = `<div class="error-box"><p style="margin:0">${esc(st.err || '')}</p></div><div class="modal-actions"><button type="button" class="btn" data-ly-close>${_t('k0029')}</button><button type="button" class="btn primary" data-ly-retry>${_t('ly_retry')}</button></div>`;
     } else if (st.phase === 'pick') {
       const list = opts();
-      const layers = list.filter((o) => o.kind === 'layer');
+      const layers = list.filter((o) => o.kind !== 'none');
       const none = list.find((o) => o.kind === 'none');
       const sel = list.find((o) => o.id === st.sel);
-      h = `${st.layer.result.summary ? `<p class="ly-sum">${esc(st.layer.result.summary)}</p>` : ''}
+      const R = st.layer.result;
+      h = `${R.summary ? `<p class="ly-sum">${esc(R.summary)}</p>` : ''}
+        ${R.recommendAlt && R.why && R.why.length ? `<p class="meta">${_t('ly_why', { v: R.why.map(esc).join(_t('k0007')) })}</p>` : ''}
         ${layers.length ? '' : `<p class="meta">${_t('ly_nofit')}</p>`}
         <div class="ly-grid${layers.length === 1 ? ' one' : ''}">${layers.map((o, i) => tileHTML(o, i)).join('')}</div>
         ${none ? tileHTML(none, 4) : ''}

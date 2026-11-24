@@ -2945,3 +2945,4 @@ dialog.sc-dlg { width: min(620px, calc(100vw - 32px)); }
 .ly-shapes span:nth-child(4) { animation-delay: 0.45s; }
 @keyframes ly-bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-8px); } }
 @media (prefers-reduced-motion: reduce) { .ly-shapes span { animation: none; } .ly-tile { transition: none; } .ly-tile:hover { transform: none; } }
+.ly-rec { display: inline-block; margin-right: 8px; padding: 1px 7px; border-radius: 999px; background: #fff; color: #1d1d1f; font-size: 11.5px; font-weight: 700; vertical-align: 2px; }

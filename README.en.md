@@ -62,7 +62,13 @@ Each project shows four stages: **idea test → backtest → statistical check �
 
 ## Other features
 
-- **Layer up Qlib.** On an existing strategy (say, ETF momentum), an agent proposes 2–4 ways to replace its US index ETF with qlib-picked stocks. The options appear as colour blocks, plus a "No layer" block. Whatever you pick runs as a candidate against the unchanged original; your main version and paper trading are not touched.
+- **Add a layer.** On an existing strategy (say, ETF momentum), choose from colour blocks:
+  - qlib stock picking for its US index ETF (an agent proposes the options);
+  - volatility-based position sizing (`HelmVol`);
+  - a fixed-weight mix with your other validated strategies, or, if you have none yet, building a low-correlation one;
+  - "No layer".
+
+  Stock-picking layers often find no signal. When earlier idea tests found nothing, or the agent rates the outlook as weak, the other options come first, marked "Recommended". Whatever you pick runs as a candidate against the unchanged original; your main version and paper trading are not touched.
 - **Qlib research.** For projects with no idea yet: scans Alpha158 and fundamental factors and trains LightGBM, with a single holdout check. Needs qlib.
 - **Volatility targeting** (`HelmVol`). Scales position size by a forecast volatility using past data only. It aims to lower drawdowns, not to raise returns.
 - **Send to QuantConnect.** Connect once with your QC User ID and API token. Helm creates a project in your account, uploads the code and compiles it in the cloud. It doesn't start cloud backtests or live trading. Strategies that read Helm's local data (`helm_data`) need changes to run on QC, and QC's unadjusted prices give somewhat different results.

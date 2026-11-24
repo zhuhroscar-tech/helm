@@ -44,8 +44,11 @@ try {
     const pc = L.precheck({ files: GEM, backtests: BTS });
     check('GEM：可以叠加，只有 SPY 一条腿', pc.ok && pc.legs.length === 1 && pc.legs[0].etf === 'SPY' && pc.legs[0].universe === 'sp500' && pc.legs[0].pit === 'pit');
     check('没有回测：不行', !L.precheck({ files: GEM, backtests: [] }).ok);
-    check('只有 EFA/EEM/AGG：不行', !L.precheck({ files: [{ name: 'main.py', content: 't = ["EFA","EEM","AGG"]' }], backtests: BTS }).ok);
-    check('已用 HelmSignals：不行', !L.precheck({ files: [{ name: 'main.py', content: 'from helm_data import HelmSignals\nx="SPY"' }], backtests: BTS }).ok);
+    const noLeg = L.precheck({ files: [{ name: 'main.py', content: 't = ["EFA","EEM","AGG"]' }], backtests: BTS });
+    check('只有 EFA/EEM/AGG：仍可叠加（不选股的层），但不给选股层', noLeg.ok && noLeg.legs.length === 0 && /没有地方叠加/.test(noLeg.qlibBlocked));
+    const sig = L.precheck({ files: [{ name: 'main.py', content: 'from helm_data import HelmSignals\nx="SPY"' }], backtests: BTS });
+    check('已用 HelmSignals：仍可叠加，但不再给选股层', sig.ok && sig.legs.length === 0 && /HelmSignals/.test(sig.qlibBlocked));
+    check('识别已经用了 HelmVol', L.precheck({ files: [{ name: 'main.py', content: 'from helm_data import HelmVol\nx="SPY"' }], backtests: BTS }).usesVol === true);
     const uni = [{ key: 'sp500', label: 'S&P 500', kind: 'point-in-time', exported: null }, { key: 'nasdaq100', label: 'NDX', kind: 'partial-point-in-time', exported: { end: '2026-11-20' } }];
     const pc2 = L.precheck({ files: [{ name: 'main.py', content: 'a="SPY"; b="QQQ"; c="QQQ"' }], backtests: BTS, universes: uni });
     check('多条腿 + 股票池状态', pc2.ok && pc2.legs.length === 2 && pc2.legs.find((l) => l.etf === 'SPY').ready === false && pc2.legs.find((l) => l.etf === 'QQQ').pit === 'partial');
@@ -71,6 +74,41 @@ try {
     const snapLegs = [{ etf: 'DIA', universe: 'dia', label: 'Dow 30', pit: 'snapshot', ready: true }];
     const r3 = L.sanitizeOptions({ options: [{ title: 'Dow', tests: 't', replaces: 'DIA', universe: 'dia', risk: 'low' }] }, snapLegs, 'en');
     check('没有历史成分股：自动写上幸存者偏差，风险至少中', /survivorship/i.test(r3.options[0].risks[0]) && r3.options[0].risk === 'medium');
+  }
+
+  /* ---------- 不选股的方案 + 什么时候推荐 ---------- */
+  {
+    const alts0 = L.alternativeOptions({ peers: [], lang: 'zh' });
+    check('没有别的策略：仓位层 + 先做互补策略', alts0.map((o) => o.kind).join(',') === 'vol,complement');
+    const peers = [{ projectId: 2, name: '债券趋势', backtestId: 'b2', sharpe: 0.6 }, { projectId: 3, name: '均值回归', backtestId: 'b3', sharpe: 0.5 }];
+    const alts1 = L.alternativeOptions({ peers, usesVol: true, lang: 'en' });
+    check('有别的策略、已用 HelmVol：只给策略组合', alts1.length === 1 && alts1[0].kind === 'portfolio' && alts1[0].peers.length === 2 && /债券趋势/.test(alts1[0].tests));
+    const q = L.sanitizeOptions(RAW, legs, 'zh');
+    const good = L.composeOptions({ qlib: { ...q, outlook: 'promising' }, alts: alts0, priorIdeas: [], lang: 'zh' });
+    check('选股前景好：选股方案在前（最多 3 个），不标推荐', !good.recommendAlt && good.options[0].kind === 'layer' && good.options.filter((o) => o.kind === 'layer').length === 3 && good.options.every((o) => !o.recommended) && good.options.at(-1).kind === 'none');
+    const prior = L.priorIdeaResults([
+      { mode: 'idea', idea: '动量', ideaResult: { factors: [{ label: '12-1 动量', verdict: 'none' }] } },
+      { mode: 'full', title: 'x' },
+      { mode: 'idea', idea: '低波', ideaResult: { factors: [{ label: 'a', verdict: 'none' }, { label: 'b', verdict: 'weak' }] } },
+    ]);
+    check('读出之前的想法检验结论', prior.length === 2 && prior[0].best === 'none' && prior[1].best === 'weak');
+    const bad = L.composeOptions({ qlib: { ...q, outlook: 'promising' }, alts: alts0, priorIdeas: prior, lang: 'zh' });
+    check('之前没有信号：不选股的方案排前面并标推荐，选股最多留 2 个', bad.recommendAlt && bad.options[0].kind === 'vol' && bad.options[0].recommended && bad.options.filter((o) => o.kind === 'layer').length === 2 && /1 次想法检验没有信号/.test(bad.why.join()));
+    const poor = L.composeOptions({ qlib: { ...q, outlook: 'poor' }, alts: alts0, priorIdeas: [], lang: 'en' });
+    check('模型判断前景差：也推荐不选股的方案', poor.recommendAlt && poor.options[0].recommended && /weak/.test(poor.why.join()));
+    const blocked = L.composeOptions({ qlib: { summary: '', options: L.sanitizeOptions(null, [], 'zh').options }, alts: alts0, qlibBlocked: '没有可换的腿', lang: 'zh' });
+    check('qlib 放不进去：只有不选股的方案 + 不加', blocked.recommendAlt && blocked.options.map((o) => o.kind).join(',') === 'vol,complement,none');
+    check('「不加这一层」永远在最后', [good, bad, poor, blocked].every((r) => r.options.at(-1).kind === 'none'));
+    let called = 0;
+    const nr = await L.runAssessment({ context: {}, legs: [], lang: 'zh', runModel: async () => { called += 1; return '{}'; } });
+    check('没有可换的腿：不调用模型', called === 0 && nr.options.length === 1 && nr.options[0].kind === 'none');
+    const tv = L.taskMessage({ option: alts0[0], backtest: { backtestId: 'm1', name: 'main' }, lang: 'zh' });
+    check('仓位层任务：一个事先定好的版本 + 停止条件 + 不动主版本', /HelmVol\(target=0\.10/.test(tv) && /-25%/.test(tv) && /0\.05/.test(tv) && /不改当前主版本/.test(tv) && /m1/.test(tv));
+    const tp = L.taskMessage({ option: alts1[0], backtest: { backtestId: 'm1' }, lang: 'en' });
+    check('组合任务：先确认组成策略通过检验、权重事先定、和最好的单个策略对照', /validate_backtest/.test(tp) && /fixed in advance/.test(tp) && /best single component as the ablation/.test(tp) && /project 2, backtest b2/.test(tp) && /Never optimise weights/.test(tp));
+    const tc = L.taskMessage({ option: alts0[1], backtest: {}, lang: 'zh' });
+    check('互补策略任务：先 ask_user 再动手，新项目，汇报相关性', /ask_user/.test(tc) && /新项目/.test(tc) && /相关性/.test(tc));
+    check('提示词：不重复已经没有信号的因子、要给前景判断', /priorIdeaTests/.test(L.assessPrompt('en')) && /"outlook"/.test(L.assessPrompt('en')));
   }
 
   /* ---------- 提示词和任务 ---------- */

@@ -1593,8 +1593,18 @@ const server = http.createServer(async (req, res) => {
       const pc = Layer.precheck({ files: code.files || [], backtests: bl.backtests, universes: uni && uni.success ? uni.universes : null });
       const running = layerRunning.get(pid) || null;
       if (p === '/api/actions/layer-precheck') {
+      // 之前的想法检验（有没有信号）和其他项目的主版本（能不能组合）：都很便宜，预检和评估都用
+      const rj = await Q.listResearch({ projectId: pid }).catch(() => null);
+      const priorIdeas = Layer.priorIdeaResults(rj && rj.success ? rj.jobs : []);
+      const peers = [];
+      for (const pr of await listProjects().catch(() => [])) {
+        if (Number(pr.projectId) === pid || peers.length >= 8) continue;
+        const l = await READ_ENDPOINTS['backtests/list']({ projectId: pr.projectId }).catch(() => null);
+        const m = l && l.success ? l.backtests.find((x) => x.role === 'main' && !x.error && x.period !== 'holdout') : null;
+        if (m) peers.push({ projectId: pr.projectId, name: String(pr.name || pr.projectId).slice(0, 60), backtestId: m.backtestId, sharpe: m.sharpeRatio ?? null });
+      }
         const prior = (await Layer.listLayers(PROJECTS_DIR, pid)).filter((x) => x.status === 'ready' && x.backtest?.backtestId === pc.backtest?.backtestId).pop() || null;
-        return sendJson(res, 200, { success: true, errors: [], precheck: { ok: pc.ok, reason: pc.reason || null, legs: pc.legs, backtest: pc.backtest ? { backtestId: pc.backtest.backtestId, name: pc.backtest.name, role: pc.backtest.role } : null }, running, ready: prior ? prior.layerId : null });
+        return sendJson(res, 200, { success: true, errors: [], precheck: { ok: pc.ok, reason: pc.reason || null, legs: pc.legs, qlibBlocked: pc.qlibBlocked || null, usesVol: Boolean(pc.usesVol), noSignal: priorIdeas.filter((x) => x.best === 'none').length, peers: peers.length, backtest: pc.backtest ? { backtestId: pc.backtest.backtestId, name: pc.backtest.name, role: pc.backtest.role } : null }, running, ready: prior ? prior.layerId : null });
       }
       if (p === '/api/actions/layer-assess') {
         if (!pc.ok) return sendJson(res, 200, { success: false, errors: [pc.reason] });
@@ -1605,12 +1615,13 @@ const server = http.createServer(async (req, res) => {
           || await readFile(path.join(PROJECTS_DIR, String(pid), 'backtests', pc.backtest.backtestId, 'code', 'spec.md'), 'utf8').catch(() => '')
           || await readFile(path.join(PROJECTS_DIR, String(pid), 'spec.md'), 'utf8').catch(() => '');
         const holdout = JSON.parse(await readFile(path.join(PROJECTS_DIR, String(pid), 'holdout_log.json'), 'utf8').catch(() => '[]') || '[]');
-        const context = Layer.buildContext({ project, spec, files: code.files || [], backtest: pc.backtest, holdoutRuns: Array.isArray(holdout) ? holdout.length : 0, legs: pc.legs, lang });
+        const context = Layer.buildContext({ project, spec, files: code.files || [], backtest: pc.backtest, holdoutRuns: Array.isArray(holdout) ? holdout.length : 0, legs: pc.legs, priorIdeas, lang });
+        const alts = Layer.alternativeOptions({ usesVol: pc.usesVol, peers, lang });
         const job = { layerId: Layer.newLayerId(), projectId: pid, status: 'running', lang, createdAt: new Date().toISOString(), backtest: { backtestId: pc.backtest.backtestId, name: pc.backtest.name, role: pc.backtest.role }, legs: pc.legs, result: null, error: null, choice: null };
         await Layer.saveLayer(PROJECTS_DIR, job);
         layerRunning.set(pid, job.layerId);
         Layer.runAssessment({ context, legs: pc.legs, lang, runModel: runModelOnce })
-          .then((r) => { job.status = 'ready'; job.result = r; })
+          .then((r) => { job.status = 'ready'; job.result = Layer.composeOptions({ qlib: r, alts, priorIdeas, qlibBlocked: pc.qlibBlocked, lang }); })
           .catch((e) => { job.status = 'error'; job.error = `评估失败：${String(e && e.message || e).slice(0, 300)}`; })
           .then(() => Layer.saveLayer(PROJECTS_DIR, job))
           .catch(() => {})
