@@ -19,6 +19,17 @@ const emit = (o) => process.stdout.write(`${JSON.stringify(o)}\n`);
 let prompt = '';
 for await (const c of process.stdin) prompt += c;
 
+// 一次性的模型调用（审核员、自动选模型、翻译：没有 --mcp-config，--output-format json）：
+// EVAL_FAKE_ONESHOT 文件里 { "<系统提示里的一段字>": <回复（字符串或对象）> }，按顺序找第一个匹配的；没有就报错（调用方会当作「不审」）
+if (!argv.includes('--mcp-config')) {
+  const sys = argv[argv.indexOf('--system-prompt') + 1] || '';
+  let map = {};
+  try { map = process.env.EVAL_FAKE_ONESHOT ? JSON.parse(readFileSync(process.env.EVAL_FAKE_ONESHOT, 'utf8')) : {}; } catch { map = {}; }
+  const hit = Object.entries(map).find(([k]) => sys.includes(k));
+  process.stdout.write(JSON.stringify(hit ? { type: 'result', is_error: false, result: typeof hit[1] === 'string' ? hit[1] : JSON.stringify(hit[1]) } : { type: 'result', is_error: true, result: 'fake: no one-shot reply' }));
+  process.exit(0);
+}
+
 const agent = process.env.HELM_AGENT;
 const planFile = process.env.EVAL_FAKE_PLAN;
 const plan = planFile ? JSON.parse(readFileSync(planFile, 'utf8')) : {};

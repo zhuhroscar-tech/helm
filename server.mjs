@@ -303,6 +303,20 @@ async function answerAutopilot(run, q, res) {
   apTouch(ap);
   return sendJson(res, 200, { id: null, state: 'autopilot', text: a.text, answers: a.answers });
 }
+// 开工背景：已经试过的（想法记录）、可以用的数据（股票池、财报字段、宏观、宽度、自建数据集）。每样都有超时，拿不到就省略
+async function apContext(lang) {
+  const soon = (p, ms, dflt) => Promise.race([p.catch(() => dflt), new Promise((r) => setTimeout(() => r(dflt), ms))]);
+  const [journal, uni, ds] = await Promise.all([
+    soon(loadJournal(), 20_000, null),
+    soon(Q.listUniverses(), 20_000, null),
+    soon(listDatasets({ dataDir: DATA_DIR }), 5_000, null),
+  ]);
+  const universes = uni && uni.success ? uni.universes.map((u) => ({ key: u.key, kind: u.kind })) : [];
+  return {
+    tested: Autopilot.testedText((journal && journal.entries) || [], { lang }),
+    menu: Autopilot.dataMenu({ universes, fundFields: Q.FUND_FIELDS || {}, datasets: (ds && ds.datasets) || [], breadth: existsSync(path.join(DATA_DIR, 'helm', 'breadth', 'sp500.csv')), lang }),
+  };
+}
 async function startAutopilot(body, lang) {
   if ([...apRuns.values()].some((x) => x.status === 'running')) throw httpError(409, localize(lang, '已经有一轮自动研究在跑，等它结束或先停掉。'));
   const ap = Autopilot.newRun(body || {}, { lang });
@@ -319,7 +333,9 @@ async function startAutopilot(body, lang) {
   if (timer.unref) timer.unref();
   apTimers.set(ap.runId, timer);
   try {
-    await startRun(thread, { message: seeded ? Autopilot.progressMessage(ap, body.note) : Autopilot.kickoffMessage(ap), model: body && body.model, effort: body && body.effort });
+    const ctx = await apContext(ap.lang);
+    if (process.env.HELM_EVAL_FIXTURES && body && typeof body.tested === 'string') ctx.tested = body.tested.slice(0, 6000); // 评测：给定「已经试过的」
+    await startRun(thread, { message: seeded ? Autopilot.progressMessage(ap, body.note, ctx) : Autopilot.kickoffMessage(ap, ctx), model: body && body.model, effort: body && body.effort });
   } catch (e) { apEnd(ap, 'error', e.message); throw e; }
   apTouch(ap);
   return { runId: ap.runId, threadId: thread.id };
@@ -346,14 +362,23 @@ async function handleAutopilotTool(req, res, kind) {
   const tool = String(body.tool || '');
   const args = body.args && typeof body.args === 'object' ? body.args : {};
   if (kind === 'guard') {
-    const g = Autopilot.guard(ap, tool, args);
+    let g = Autopilot.guard(ap, tool, args);
+    // 登记一批想法：硬规则过了之后，再交给独立审核员（已知因子换个名字、已经测过、事后挑选、数据不够的会被筛掉；最多等 90 秒，出错就放行）
+    if (g.allow && tool === 'autopilot_plan' && Critic.enabled()) {
+      const items = Autopilot.planReviewItems(args, ap.lang);
+      const ctx = await apContext(ap.lang).catch(() => ({}));
+      const input = Critic.buildInput({ kind: 'autopilot-plan', items, request: [ap.direction ? `用户指定的方向：${ap.direction}` : '', `范围：${ap.scope}，股票池：${ap.universe}`].filter(Boolean).join('\n'), facts: { alreadyTested: ctx.tested || '', availableData: ctx.menu || '' } });
+      const rv = await Promise.race([Critic.review({ input, items, lang: ap.lang, runModel: runModelOnce }).catch(() => null), new Promise((r) => setTimeout(() => r(null), 90_000))]);
+      g = Autopilot.planReviewVerdict(rv, items, ap.lang);
+      if (rv) ap.planReviews = [...(ap.planReviews || []), { at: Date.now(), ideas: items[0].options.map((o) => o.label), verdicts: Object.fromEntries(Object.entries((rv.questions[0] || {}).options || {}).map(([k, v]) => [k, v.verdict])), summary: rv.summary || '' }];
+    }
     if (!g.allow) { ap.refusals.push({ at: Date.now(), agent: run.thread.agent, tool, message: g.message }); apTouch(ap); }
     return sendJson(res, 200, g);
   }
   const r = Autopilot.record(ap, tool, args, String(body.result || ''), { isError: body.isError === true });
   if (r.found) ap.awaiting = [...(ap.awaiting || []), { at: Date.now(), projectId: r.found.projectId, backtestId: r.found.backtestId, devBacktestId: r.found.devBacktestId, what: 'main' }];
   apTouch(ap);
-  return sendJson(res, 200, { ok: true });
+  return sendJson(res, 200, { ok: true, note: r.note || '' });
 }
 
 /* ---------------- utils ---------------- */

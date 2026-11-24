@@ -2989,3 +2989,6 @@ dialog.sc-dlg { width: min(620px, calc(100vw - 32px)); }
 .ap-more ul { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 4px; }
 .ap-more li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 @media (max-width: 640px) { .ap-acts { margin-left: 0; width: 100%; } }
+.ap-form .ap-dir { flex: 1 1 260px; }
+.ap-form .ap-dir input { width: 100%; }
+.ap-plan .ap-dir-h { list-style: none; margin: 6px 0 0 -18px; font-weight: 600; color: var(--text-2); }

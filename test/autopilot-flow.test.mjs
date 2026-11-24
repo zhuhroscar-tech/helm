@@ -96,13 +96,38 @@ check('出错后重发：工具没有被「已经结束」拒绝，能登记、�
 const ap3 = JSON.parse(await readFile(path.join(r3.dir, 'data', 'autopilot', `${r3.autopilotRunId}.json`), 'utf8'));
 check('出错后重发：运行记录恢复后正常结束，记着恢复过 1 次', ap3.status === 'done' && ap3.resumes === 1 && Object.keys(ap3.projects).length === 1, `${ap3.status} resumes=${ap3.resumes}`);
 
+/* ---- 自主探索：登记先过审核员；一批做完后换方向 ---- */
+const critic = { 'independent reviewer': { questions: [{ index: 0, applicable: true, options: [
+  { label: '1. 低波动 50 只', verdict: 'drop', flags: ['tested_none'], reason: '这个项目之前已经测过，没有信号' },
+  { label: '2. 收益率曲线倒挂时减仓', verdict: 'keep', flags: [], reason: '有经济逻辑' },
+] }], noneWorth: false, summary: '第 1 个已经测过' } };
+const r4 = await runOnce({ ...scenario, id: 'autopilot-explore', autopilot: { scope: 'any', budget: { ideas: 4, versions: 1, directions: 2 } } }, {
+  claudeBin: FAKE, timeoutMs: 60000, keepDir: true, fakeOneShot: critic,
+  fakePlan: { mia: [[
+    { tool: 'autopilot_plan', args: { direction: { name: '价量' }, ideas: [{ title: '低波动 50 只', logic: '低风险异象' }, { title: '收益率曲线倒挂时减仓', logic: '衰退前兆' }] } },
+    { tool: 'autopilot_plan', args: { direction: { name: '宏观' }, ideas: [{ title: '收益率曲线倒挂时减仓', logic: '衰退前兆' }] } },
+    { tool: 'create_project', args: { name: '曲线倒挂', planIdea: 1 } },
+    { tool: 'autopilot_plan', args: { direction: { name: '信用', whyNew: '收益来源是信用周期，不是利率曲线' }, ideas: [{ title: '信用利差走阔时减仓', logic: '违约风险上升' }] } },
+    { tool: 'create_project', args: { name: '信用利差', planIdea: 2 } },
+    { text: '两个方向各试了一个想法。' },
+  ]] },
+});
+const t4 = r4.events.filter((e) => e.kind === 'tool');
+check('登记时审核员筛掉「已经测过」的想法：整批被拒，不占预算', t4[0] && t4[0].isError && /审核员筛掉/.test(t4[0].result) && /已经测过/.test(t4[0].result), t4[0] && t4[0].result.slice(0, 120));
+check('换掉之后再登记：通过，并告诉 agent planIdea 从几到几', t4[1] && !t4[1].isError && /planIdea 是 1/.test(t4[1].result), t4[1] && t4[1].result.slice(-80));
+check('这一批做完后换方向：通过（第 2 个方向，planIdea 2）', t4[3] && !t4[3].isError && /第 2 个方向/.test(t4[3].result) && t4[4] && !t4[4].isError, t4[3] && t4[3].result.slice(-80));
+const ap4 = JSON.parse(await readFile(path.join(r4.dir, 'data', 'autopilot', `${r4.autopilotRunId}.json`), 'utf8'));
+check('运行记录：2 个方向、2 个想法，审核记录留下', ap4.batches.length === 2 && ap4.batches[1].whyNew && ap4.plan.length === 2 && (ap4.planReviews || []).length >= 1, JSON.stringify({ b: ap4.batches.length, p: ap4.plan.length, r: (ap4.planReviews || []).length }));
+const root4 = JSON.parse(await readFile(path.join(r4.dir, 'data', 'threads', `${r4.rootId}.json`), 'utf8'));
+check('开工说明里有「可以用的数据和工具」，并鼓励自己换方向', /可以用的数据和工具/.test(root4.messages[0].text) && /换方向|新方向/.test(root4.messages[0].text) && /最多 2 个方向/.test(root4.messages[0].text));
+
 /* ---- 停止 + 接口 ---- */
 const r2 = await runOnce({ ...scenario, id: 'autopilot-stop', autopilot: { budget: { ideas: 1, versions: 1 } } }, {
   claudeBin: FAKE, timeoutMs: 60000, keepDir: true,
   fakePlan: { mia: [[{ tool: 'autopilot_plan', args: { ideas: [{ title: 'x', logic: 'y' }, { title: 'z', logic: 'w' }] } }, { text: '想法太多被拒了，停下。' }]] },
 });
 const t2 = r2.events.filter((e) => e.kind === 'tool');
-check('清单超过预算：被拒', t2[0] && t2[0].isError && /超过预算/.test(t2[0].result));
+check('一批超过预算：被拒', t2[0] && t2[0].isError && /最多 1 个/.test(t2[0].result));
 const ap2 = JSON.parse(await readFile(path.join(r2.dir, 'data', 'autopilot', `${r2.autopilotRunId}.json`), 'utf8'));
 check('没登记成功也照常结束并有账本', ap2.status === 'done' && ap2.plan === null);
 

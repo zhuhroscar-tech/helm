@@ -19,7 +19,8 @@ const FAIL = '结论：❌ 没通过，不能标为主版本\n✗ ...';
 /* ---- 设置 ---- */
 const o = A.normalizeOptions({ budget: { ideas: 99, versions: 0 }, usd: 'x', scope: 'weird', universe: '../etc' });
 check('预算夹在范围内、非法值回到默认', o.ideas === 10 && o.versions === 1 && o.usd === A.DEFAULTS.usd && o.scope === 'any' && o.universe === 'sp500', JSON.stringify(o));
-check('默认值：3 个想法、2 个版本、$20、180 分钟、找到就停', JSON.stringify(A.normalizeOptions({})) === JSON.stringify({ ideas: 3, versions: 2, usd: 20, minutes: 180, stopOnFind: true, scope: 'any', universe: 'sp500' }));
+const d0 = A.normalizeOptions({});
+check('默认值：一共 6 个想法、最多 3 个方向、每个想法 2 个版本、$20、180 分钟、找到就停', d0.ideas === 6 && d0.directions === 3 && d0.versions === 2 && d0.usd === 20 && d0.minutes === 180 && d0.stopOnFind === true && d0.direction === '', JSON.stringify(d0));
 
 /* ---- 一轮完整的记账 + 硬规则 ---- */
 const run = A.newRun({ budget: { ideas: 2, versions: 2 } }, { now: T0 });
@@ -28,12 +29,12 @@ const rec = (tool, args, result) => A.record(run, tool, args, result, { now: T0 
 check('没登记：建项目被拒', no(g('create_project', { name: 'x', planIdea: 1 }), /autopilot_plan/));
 check('没登记：想法检验被拒', no(g('test_idea', { projectId: 5, idea: 'x', factors: [] }), /autopilot_plan/));
 check('没登记：回测被拒', no(g('create_backtest', { projectId: 5 }), /autopilot_plan/));
-check('清单超过预算被拒', no(g('autopilot_plan', { ideas: [1, 2, 3].map((i) => ({ title: `t${i}`, logic: 'l' })) }), /超过预算/));
+check('一批超过预算被拒', no(g('autopilot_plan', { ideas: [1, 2, 3].map((i) => ({ title: `t${i}`, logic: 'l' })) }), /最多 2 个/));
 check('想法没写经济逻辑被拒', no(g('autopilot_plan', { ideas: [{ title: 't' }] }), /logic/));
 const plan = { ideas: [{ title: '低波动', logic: '风险补偿' }, { title: '动量', logic: '反应不足' }] };
 check('清单在预算内：放行', ok(g('autopilot_plan', plan)));
 rec('autopilot_plan', plan, '已登记');
-check('清单只能登记一次', no(g('autopilot_plan', plan), /已经登记/));
+check('这一批还没开始做：不能登记下一批', no(g('autopilot_plan', plan), /没开始/));
 check('建项目要带 planIdea', no(g('create_project', { name: 'x' }), /planIdea/));
 check('planIdea 超出清单被拒', no(g('create_project', { name: 'x', planIdea: 3 }), /planIdea/));
 check('planIdea=1：放行', ok(g('create_project', { name: 'x', planIdea: 1 })));
@@ -71,6 +72,45 @@ const L = A.ledger(run);
 check('账本：1 个想法、2 次检验、2 个开发期版本、验证期 1 次、1 个候选', L.ideas === 1 && L.tests === 2 && L.devVersions === 2 && L.holdoutLooks === 1 && L.found === 1, JSON.stringify(L));
 const lt = A.ledgerText(run);
 check('账本文字：每个想法一行，没开始的也列出', /想法 1「低波动」/.test(lt) && /开发期和验证期都通过/.test(lt) && /想法 2「动量」：没开始/.test(lt), lt);
+
+/* ---- 自主探索：换方向 ---- */
+const rx = A.newRun({ budget: { ideas: 5, versions: 1, directions: 2 } }, { now: T0 });
+const gx = (tool, args) => A.guard(rx, tool, args, { now: T0 + 1000 });
+const rcx = (tool, args, result) => A.record(rx, tool, args, result, { now: T0 + 2000 });
+const b1 = { direction: { name: '价量' }, ideas: [{ title: '低波动', logic: 'x' }, { title: '动量', logic: 'y' }] };
+check('每批最多 3 个想法', no(gx('autopilot_plan', { ideas: [1, 2, 3, 4].map((i) => ({ title: `t${i}`, logic: 'l' })) }), /最多 3 个/));
+check('第一批：不写方向也行', ok(gx('autopilot_plan', { ideas: b1.ideas })));
+rcx('autopilot_plan', b1, '已登记');
+check('记下第 1 个方向，想法带批次', rx.batches.length === 1 && rx.batches[0].name === '价量' && rx.plan.every((x) => x.batch === 1));
+const b2 = { direction: { name: '宏观利率', whyNew: '收益来源是利率周期，不是个股特征' }, ideas: [{ title: '收益率曲线倒挂时减仓', logic: 'z' }] };
+check('上一批没做完：不能换方向', no(gx('autopilot_plan', b2), /没开始/));
+rcx('create_project', { planIdea: 1 }, 'projectId=501'); rcx('create_project', { planIdea: 2 }, 'projectId=502');
+check('换方向要写为什么是新的收益来源', no(gx('autopilot_plan', { direction: { name: '宏观' }, ideas: b2.ideas }), /whyNew/));
+check('换方向不能重复登记过的想法（只改标点、空格也算）', no(gx('autopilot_plan', { direction: b2.direction, ideas: [{ title: '低 波动。', logic: 'q' }] }), /已经登记过/));
+check('上一批都开始了、写清了理由：可以换方向', ok(gx('autopilot_plan', b2)));
+rcx('autopilot_plan', b2, '已登记');
+check('第 2 批的想法接着编号（planIdea=3），带批次 2', rx.plan.length === 3 && rx.plan[2].batch === 2 && ok(gx('create_project', { planIdea: 3 })));
+rcx('create_project', { planIdea: 3 }, 'projectId=503');
+check('方向数用完（最多 2 个）：不能再换', no(gx('autopilot_plan', { direction: { name: '跨资产', whyNew: 'w' }, ideas: [{ title: '新的', logic: 'n' }] }), /方向数已经用完/));
+const ltx = A.ledgerText(rx);
+check('账本按方向分组，写明方向数', /方向：2\/2/.test(ltx) && /方向 1「价量」/.test(ltx) && /方向 2「宏观利率」/.test(ltx), ltx);
+const ry = A.newRun({ budget: { ideas: 2, directions: 3 } }, { now: T0 });
+A.record(ry, 'autopilot_plan', { ideas: [{ title: 'a', logic: 'x' }, { title: 'b', logic: 'y' }] }, '已登记');
+A.record(ry, 'create_project', { planIdea: 1 }, 'projectId=601'); A.record(ry, 'create_project', { planIdea: 2 }, 'projectId=602');
+check('想法总数用完：方向还有也不能再登记', no(A.guard(ry, 'autopilot_plan', { direction: { name: 'c', whyNew: 'w' }, ideas: [{ title: 'c', logic: 'z' }] }, { now: T0 + 1 }), /总数的预算/));
+check('用户给的方向写进开工说明', /用户指定的方向：只用宏观数据/.test(A.kickoffMessage(A.newRun({ direction: '只用宏观数据' }))));
+
+/* ---- 开工背景：已经试过的、可以用的数据 ---- */
+const tt = A.testedText([
+  { kind: 'idea', what: '52 周高点接近度', outcome: '没有信号', projectName: 'p1' },
+  { kind: 'backtest', projectId: 1012, projectName: 'SPY 200日均线择时', validated: 'fail', detail: '' },
+  { kind: 'backtest', projectId: 1012, projectName: 'SPY 200日均线择时', stage: '验证期' },
+]);
+check('已经试过的：想法检验和结论、策略和检验情况，说明都算进门槛', /52 周高点接近度（没有信号/.test(tt) && /SPY 200日均线择时」：2 个回测，没过统计检验、看过验证期/.test(tt) && /门槛/.test(tt), tt);
+check('已经试过的：没有记录时为空', A.testedText([]) === '');
+const dm = A.dataMenu({ universes: [{ key: 'sp500', kind: 'point-in-time' }], fundFields: { F_EP: 'x', F_ROE: 'y' }, datasets: [{ name: 'cpi_surprise' }], breadth: true });
+check('可以用的数据：股票池、财报字段、宏观、宽度、自建数据集', /sp500/.test(dm) && /F_EP、F_ROE/.test(dm) && /DGS10/.test(dm) && /已经算好/.test(dm) && /cpi_surprise/.test(dm), dm);
+check('开工说明带上这两段', /已经试过的（不要再做）/.test(A.kickoffMessage(rx, { tested: tt, menu: dm })) && /可以用的数据和工具/.test(A.kickoffMessage(rx, { tested: tt, menu: dm })));
 
 /* ---- 上限 ---- */
 const r2 = A.newRun({ minutes: 10, usd: 5 }, { now: T0 });

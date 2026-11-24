@@ -100,6 +100,8 @@ export async function runOnce(scenario, opts = {}) {
   await writeFile(fixturesPath, JSON.stringify({ scenario: scenario.id, state: path.join(TMP, 'state.json'), ...(scenario.autopilot ? { autopilot: scenario.autopilot } : {}), ...(scenario.fixtures || {}) }, null, 1));
   let planPath = null;
   if (opts.fakePlan) { planPath = path.join(TMP, 'plan.json'); await writeFile(planPath, JSON.stringify(opts.fakePlan)); }
+  let oneShotPath = null;
+  if (opts.fakeOneShot) { oneShotPath = path.join(TMP, 'oneshot.json'); await writeFile(oneShotPath, JSON.stringify(opts.fakeOneShot)); }
 
   const PORT = await freePort();
   const BASE = `http://127.0.0.1:${PORT}`;
@@ -126,6 +128,7 @@ export async function runOnce(scenario, opts = {}) {
     ...(opts.model ? { CLAUDE_MODEL: opts.model } : {}),
     ...(opts.effort ? { CLAUDE_EFFORT: opts.effort } : {}),
     ...(planPath ? { EVAL_FAKE_PLAN: planPath } : {}),
+    ...(oneShotPath ? { EVAL_FAKE_ONESHOT: oneShotPath } : {}),
   };
   await mkdir(env.HELM_CHANGE_ROOT, { recursive: true });
   const server = spawn(process.execPath, [path.join(ROOT, 'server.mjs')], { env, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -180,7 +183,7 @@ export async function runOnce(scenario, opts = {}) {
     if (scenario.autopilot) {
       // 自动研究：和网页上点「自动研究」一样，由服务端生成开工说明（lib/autopilot.mjs kickoffMessage）；
       // 快速探针带 seed / note，从一轮的中途开始（服务端只在评测模式下接受 seed）
-      chat = await request(BASE, 'POST', '/api/autopilot/start', { headers: H, body: { ...scenario.autopilot, ...(scenario.seed ? { seed: scenario.seed, note: scenario.note || '' } : {}), ...mo } });
+      chat = await request(BASE, 'POST', '/api/autopilot/start', { headers: H, body: { ...scenario.autopilot, ...(scenario.seed ? { seed: scenario.seed, note: scenario.note || '' } : {}), ...(scenario.tested ? { tested: scenario.tested } : {}), ...mo } });
     } else {
       const message = typeof scenario.message === 'function' ? scenario.message() : scenario.message;
       chat = await request(BASE, 'POST', '/api/chat', { headers: H, body: { agent: scenario.agent || 'mia', message, context: scenario.context || undefined, ...mo } });

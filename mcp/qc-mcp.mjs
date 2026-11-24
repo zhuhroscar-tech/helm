@@ -130,10 +130,11 @@ const TOOLS = [
   },
   {
     name: 'autopilot_plan',
-    description: '自动研究专用：在任何建项目、想法检验、回测之前，先登记这一轮要试的想法清单。每个想法写一句话（title）、经济逻辑（logic，为什么应该有效）、类型（kind）和怎样算失败（failIf）。数量不能超过预算；登记后按清单顺序做，不能换题、加题或重新登记。',
+    description: '自动研究专用：登记一批要试的想法（一个方向）。开工时先登记第一批，任何建项目、想法检验、回测都要在登记之后。每个想法写一句话（title）、经济逻辑（logic）、类型（kind）和怎样算失败（failIf）。每批最多 3 个，想法总数不超过预算。一批之内按顺序做，不换题、不加题；这一批都开始做了、还有方向和想法预算，可以再调用一次开新方向（direction.name + direction.whyNew：为什么是不同的收益来源）。每一批先过独立审核员，被筛掉的换掉再登记，不占预算。',
     inputSchema: {
       type: 'object',
       properties: {
+        direction: { type: 'object', description: '这一批的方向（第一批可省略，换方向时必填）', properties: { name: { ...str, description: '方向名，比如「宏观利率」「财报质量变化」' }, whyNew: { ...str, description: '为什么是不同的收益来源（不是同一个想法换参数 / 窗口 / 股票池）' }, data: { ...str, description: '主要用什么数据' } } },
         ideas: {
           type: 'array', description: '想法清单（按要做的顺序）',
           items: { type: 'object', properties: { title: { ...str, description: '一句话想法' }, logic: { ...str, description: '经济逻辑：为什么应该有效' }, kind: { type: 'string', enum: ['stock', 'timing'], description: 'stock=选股，timing=ETF 择时' }, failIf: { ...str, description: '怎样算失败' } }, required: ['title', 'logic'] },
@@ -143,7 +144,7 @@ const TOOLS = [
     },
     async run({ ideas }) {
       if (!process.env.HELM_AUTOPILOT) return '错误：autopilot_plan 只能在自动研究里用';
-      return `已登记 ${ideas.length} 个想法：\n${ideas.map((x, i) => `${i + 1}. ${x.title}`).join('\n')}\n按顺序做；建项目时 create_project 带 planIdea（第几个想法）。`;
+      return `已登记 ${ideas.length} 个想法：\n${ideas.map((x, i) => `- ${x.title}`).join('\n')}\n按顺序做；建项目时 create_project 带 planIdea（想法在整个清单里的序号，从 1 开始，接着上一批往下数）。`;
     },
   },
   {
@@ -917,7 +918,10 @@ async function onMessage(msg) {
         text = await tool.run(args);
         isError = /^错误：|^没有运行回测|^下载失败/.test(text);
       }
-      if (AUTOPILOT && tool.name !== 'approve') await helmPost('/api/autopilot/record', { tool: tool.name, args, result: String(text).slice(0, 4000), isError }).catch(() => {});
+      if (AUTOPILOT && tool.name !== 'approve') {
+        const rec = await helmPost('/api/autopilot/record', { tool: tool.name, args, result: String(text).slice(0, 4000), isError }).catch(() => null);
+        if (rec && rec.note) text = `${text}\n${rec.note}`;
+      }
       return write({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: userText(text) }], isError } });
     }
     write({ jsonrpc: '2.0', id, error: { code: -32601, message: `Method not found: ${method}` } });

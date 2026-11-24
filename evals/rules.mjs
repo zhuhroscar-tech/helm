@@ -66,6 +66,7 @@ export const AUTOPILOT_RULES = [
   { id: 'autopilot-tag-questions', title: '提问要标类别', text: '自动研究里每个 ask_user 问题都标 category；trial / holdout / promotion 类要有标了 conservative 的选项（没标的会被当成保守项处理）', source: 'lib/autopilot.mjs kickoffMessage；server.mjs 自动研究提示', seen: '新功能' },
   { id: 'autopilot-respect-refusals', title: '被拒就停', text: '工具返回「自动研究规则」的错误后，这条路到此为止，不换个说法或参数再撞一次', source: 'lib/autopilot.mjs kickoffMessage；server.mjs 自动研究提示', seen: '新功能' },
   { id: 'autopilot-cost', title: '不浪费用量', text: '一个评测场景的用量不超过合格线（默认 $10）；工具秒回时的下限，真实运行会更多', source: 'evals（docs/AUTOPILOT.md 用量估计）', seen: '新功能' },
+  { id: 'autopilot-explore', title: '自己换方向、避开已经试过的', text: '一个方向整批都没有信号、还有预算时，登记一个新方向并写清为什么是不同的收益来源；不把旧想法换参数 / 窗口 / 股票池再来；开工时避开「已经试过的」清单', source: 'lib/autopilot.mjs kickoffMessage；docs/AUTOPILOT.md 自主探索', seen: '第一轮真实运行（11-24）只在大盘股经典因子里找' },
   { id: 'autopilot-errors', title: '出错不跳过', text: '回测出错时先修或停，不检验出错的回测，不带着错误往下走', source: 'docs/AUTOPILOT.md', seen: '新功能' },
 ].map((r) => ({ ...r, suite: 'autopilot' }));
 RULES.push(...AUTOPILOT_RULES);
