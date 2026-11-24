@@ -9,10 +9,10 @@
 通过 `mcp__qc__*` 工具操作：
 `list_projects`、`read_project`、`create_project`、`update_project`、`read_file`、`write_file`、`compile`、
 `create_backtest`、`wait_for_backtest`、`read_backtest`、`list_backtests`、`read_backtest_orders`、
-`read_backtest_log`、`read_backtest_code`、`update_backtest`、`validate_backtest`、`fetch_data`、`fetch_macro`、`list_data`、`save_dataset`、`list_datasets`、`read_dataset`、`handoff`、`list_paper_sessions`、`read_paper_session`，以及受保护的 `delete_file`、`delete_backtest`。
+`read_backtest_log`、`read_backtest_code`、`update_backtest`、`validate_backtest`、`fetch_data`、`fetch_macro`、`list_data`、`save_dataset`、`list_datasets`、`read_dataset`、`handoff`、`list_paper_sessions`、`read_paper_session`、`attribute_backtest`（因子归因，只读），以及受保护的 `delete_file`、`delete_backtest`。
 
 qlib 工具（用户本机的 qlib + 项目里已测试的研究引擎）：
-`list_universes`、`universe_members`、`prepare_universe`、`test_idea`、`start_research`、`research_status`、`read_research`、`resume_research`、`stop_research`、`export_signals`、`list_signals`。
+`list_universes`、`universe_members`、`prepare_universe`、`test_idea`、`start_research`、`research_status`、`read_research`、`resume_research`、`stop_research`、`export_signals`、`list_signals`、`build_breadth`、`test_timing_signal`。
 
 ## 数据（重要）
 
@@ -163,6 +163,20 @@ self.vol = HelmVol(target=self.target_vol, max_leverage=1.0) # 现金账户：ma
   2. 开发期合格线（事先定好）：最大回撤相对原策略**至少降 25%**，且夏普**不比原策略低 0.05 以上**，并通过 validate_backtest。达不到就停，结论写「波动率目标对这个策略没有可信的帮助」，保持原策略。
   3. 合格后验证期只跑一次，和原策略的验证期比回撤和夏普；不论好坏都照实报告，不再改。
 - 结论里要说清：这是降风险，不是加收益；回撤低了多少、收益少了多少、换手多了多少。
+
+## 择时过滤（市场宽度，HelmBreadth）：用成分股看大盘内部
+ETF 择时策略只看得到 ETF 价格；qlib 的历史成分股能看到大盘「内部」有多少股票在走好。`build_breadth`（股票池导出时也会自动算）生成三条每日序列：`pct_above_200`（站上 200 日均线的成分股比例）、`net_highs`（52 周新高减新低的比例）、`dispersion`（成分股 21 日收益的分化程度，越高越差）。只有 sp500 是完整的历史成分股。
+```python
+from helm_data import HelmBreadth
+self.breadth = HelmBreadth("sp500")
+# 调仓日：只用严格早于今天的值（今天收盘算出的宽度明天才能用）
+b = self.breadth.value(self.time, "pct_above_200")
+risk_on = original_signal and (b is None or b > 0.5)   # 宽度作为风险开关的确认条件，写进 spec
+```
+- **先检验再用**：`test_timing_signal`（只用开发期、不重叠样本、多重检验计数）。结论「没有信号」就停，保持原策略；「信号弱」要明说只是弱，由用户决定要不要做成候选。
+- **事先定死一个规则**：序列、阈值（默认 pct_above_200 > 0.5 / net_highs > 0 / dispersion 低于开发期中位数）、作用方式（只在原策略要持有股票时作为确认，不满足时转到原策略的避险资产）、在哪些日子判断（原策略的调仓日）。不要试多个阈值挑最好的。
+- 叠加后的版本跑成候选，原策略原样做消融对照；合格线：通过 validate_backtest，且夏普不低于原策略、最大回撤不大于原策略。验证期只跑一次。
+- 结论要说清：独立样本有多少（每月一次判断，20 年约 240 个），以及这只是对大盘内部的判断，不预测个股。
 
 ## 调参（超参数搜索）：只用 Helm 自带的方法
 不要自己写循环、手动改参数一次次回测来「找最好的参数」。要调就用下面两个工具，它们只在开发期打分、每个候选都计入尝试次数、用 PBO 检查是不是调出了噪音：

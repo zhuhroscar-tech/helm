@@ -103,12 +103,33 @@ try {
     const nr = await L.runAssessment({ context: {}, legs: [], lang: 'zh', runModel: async () => { called += 1; return '{}'; } });
     check('没有可换的腿：不调用模型', called === 0 && nr.options.length === 1 && nr.options[0].kind === 'none');
     const tv = L.taskMessage({ option: alts0[0], backtest: { backtestId: 'm1', name: 'main' }, lang: 'zh' });
-    check('仓位层任务：一个事先定好的版本 + 停止条件 + 不动主版本', /HelmVol\(target=0\.10/.test(tv) && /-25%/.test(tv) && /0\.05/.test(tv) && /不改当前主版本/.test(tv) && /m1/.test(tv));
+    check('仓位层任务：一个事先定好的版本 + 停止条件 + 不动主版本', /HelmVol\(target=0\.10/.test(tv) && /至少小 25%/.test(tv) && /0\.05/.test(tv) && /不改当前主版本/.test(tv) && /m1/.test(tv));
     const tp = L.taskMessage({ option: alts1[0], backtest: { backtestId: 'm1' }, lang: 'en' });
     check('组合任务：先确认组成策略通过检验、权重事先定、和最好的单个策略对照', /validate_backtest/.test(tp) && /fixed in advance/.test(tp) && /best single component as the ablation/.test(tp) && /project 2, backtest b2/.test(tp) && /Never optimise weights/.test(tp));
     const tc = L.taskMessage({ option: alts0[1], backtest: {}, lang: 'zh' });
     check('互补策略任务：先 ask_user 再动手，新项目，汇报相关性', /ask_user/.test(tc) && /新项目/.test(tc) && /相关性/.test(tc));
     check('提示词：不重复已经没有信号的因子、要给前景判断', /priorIdeaTests/.test(L.assessPrompt('en')) && /"outlook"/.test(L.assessPrompt('en')));
+  }
+
+  /* ---------- qlib 择时过滤 + 因子归因 ---------- */
+  {
+    const t = L.alternativeOptions({ equityLeg: 'SPY', breadth: 'ready', peers: [], lang: 'zh' });
+    check('有美股 ETF：给择时过滤，排在最前', t[0].kind === 'timing' && t[0].equityLeg === 'SPY' && t.map((o) => o.kind).join(',') === 'timing,vol,complement');
+    check('宽度已算好：风险里不提准备数据', !t[0].risks.some((r) => /prepare|build_breadth/.test(r)));
+    const tp = L.alternativeOptions({ equityLeg: 'SPY', breadth: 'prepare', lang: 'en' });
+    check('股票池没准备：风险里写明先 prepare_universe', /prepare_universe/.test(tp[0].risks[0]));
+    check('没有美股 ETF：不给择时过滤', !L.alternativeOptions({ equityLeg: null }).some((o) => o.kind === 'timing'));
+    check('已经用了 HelmBreadth：不再给', !L.alternativeOptions({ equityLeg: 'SPY', usesBreadth: true }).some((o) => o.kind === 'timing'));
+    const tm = L.taskMessage({ option: tp[0], backtest: { backtestId: 'm1' }, lang: 'en' });
+    check('择时任务：只测一次事先定好的序列、没有信号就停、候选 vs 消融、不动主版本', /test_timing_signal ONCE/.test(tm) && /\["pct_above_200"\]/.test(tm) && /stop and report/.test(tm) && /ablation/.test(tm) && /Do not change the current main version/.test(tm) && /prepare_universe/.test(tm));
+    const tz = L.taskMessage({ option: t[0], backtest: { backtestId: 'm1' }, lang: 'zh' });
+    check('择时任务（中文）：宽度已算好时不让再准备', !/prepare_universe|build_breadth\("sp500"\)。/.test(tz) && /HelmBreadth/.test(tz));
+    check('precheck 识别 HelmBreadth', L.precheck({ files: [{ name: 'main.py', content: 'from helm_data import HelmBreadth\nx="SPY"' }], backtests: BTS }).usesBreadth === true);
+    const attr = { available: true, r2: 0.7, alpha: { annual: 0.01, t: 0.5 }, exposures: [{ factor: 'mom', beta: 0.3, t: 4 }], summary: '动量暴露明显' };
+    const ctx = L.buildContext({ files: GEM, backtest: BTS[2], legs, attribution: attr, lang: 'zh' });
+    check('模型材料里带因子归因', ctx.factorAttribution && ctx.factorAttribution.exposures[0].factor === 'mom' && ctx.factorAttribution.summary === '动量暴露明显');
+    check('没有归因时为 null', L.buildContext({ files: GEM, backtest: BTS[2], legs }).factorAttribution === null);
+    check('提示词：别把已有暴露当新东西', /factorAttribution/.test(L.assessPrompt('en')));
   }
 
   /* ---------- 提示词和任务 ---------- */

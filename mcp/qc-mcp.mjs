@@ -10,6 +10,7 @@ import * as Q from '../lib/qlib.mjs';
 import * as Paper from '../lib/paper.mjs';
 import { GATE_RULES } from '../lib/stats.mjs';
 import { loadRobust, robustText } from '../lib/robust.mjs';
+import { loadAttribution } from '../lib/attribution.mjs';
 import { localize } from '../lib/i18n.mjs';
 
 // 界面语言（server.mjs 启动 agent 时通过 HELM_LANG 传进来）：en 时，工具返回的「错误：…」换成英文，其余内容不变。
@@ -428,6 +429,19 @@ const TOOLS = [
     async run(a) { const r = await loadRobust(E.PROJECTS_DIR, a.projectId, a.backtestId, LANG); return r.success ? robustText(r.robust, LANG) : failText(r); },
   },
   {
+    name: 'attribute_backtest',
+    description: '因子归因（只读诊断，不跑回测、不计入尝试次数）：把这个回测的日收益（减无风险利率）对 Fama-French 五因子 + 动量（Kenneth French 数据库，日度）做回归，标准误用 Newey-West。输出每个因子的暴露 β 和 t 值、年化 alpha 和 t 值、R²、收益拆解（alpha + 各因子贡献），以及一段话结论：这个策略是不是其实就是市场 / 动量暴露。因子都是美股的，持有债券或海外的时期解释力低，R² 低不代表有 alpha。叠加一层之前先做这一步。',
+    inputSchema: { type: 'object', properties: PB, required: ['projectId', 'backtestId'] },
+    async run(a) {
+      const r = await loadAttribution({ projectsDir: E.PROJECTS_DIR, dataDir: path.join(E.ROOT, 'data'), projectId: a.projectId, backtestId: a.backtestId, lang: LANG });
+      if (!r.success) return failText(r);
+      const t = r.attribution;
+      if (!t.available) return t.reason;
+      const rows = t.exposures.map((e) => `- ${e.label}：β ${e.beta}（t ${e.t}${e.significant ? '，明确' : ''}），年化贡献 ${(e.contribution * 100).toFixed(2)}%`).join('\n');
+      return `因子归因（${t.start} → ${t.end}，${t.n} 天，Newey-West 滞后 ${t.lag}；因子数据到 ${t.factorsEnd}${t.stale ? '，下载失败用的是旧缓存' : ''}）\n${rows}\n- alpha：年化 ${(t.alpha.annual * 100).toFixed(2)}%（t ${t.alpha.t}）；R² ${t.r2}；平均年化超额收益 ${(t.excessAnnual * 100).toFixed(2)}%\n${t.summary}\n来源：${t.source}`;
+    },
+  },
+  {
     name: 'sensitivity_backtest',
     description: '参数敏感性结果（只读，不会触发重跑）：策略里用 self.get_parameter("名字", 默认值) 声明的参数，各 ×0.8、×1.2 重跑后，原版 vs 变体的年化、夏普、最大回撤，以及每个参数的判定（稳 / 敏感 / 方向翻转）。运行由用户在网页稳健性页点按钮触发；验证期回测不提供。这些变体只是诊断，不是回测记录；挑最好的变体采用就是调参，必须作为新的回测重跑并计入尝试次数。引用数字时用这个工具的结果。',
     inputSchema: { type: 'object', properties: PB, required: ['projectId', 'backtestId'] },
@@ -693,6 +707,44 @@ target：sp500 / QQQ（纳指100）/ SOX / DIA / spy100 / iwm80，或 custom + t
     description: '停止一个正在跑的研究（之后可以用 resume_research 接着跑）。',
     inputSchema: { type: 'object', properties: { ...P, jobId: str }, required: ['projectId', 'jobId'] },
     async run(a) { const r = await Q.stopResearch(a); return r.success ? (r.stopped ? '已停止' : '它本来就没在跑') : failText(r); },
+  },
+  {
+    name: 'build_breadth',
+    description: '用历史成分股算市场宽度（站上 200 日均线的比例 pct_above_200、52 周新高减新低 net_highs、成分股收益分化 dispersion），写到本地 LEAN 数据目录。股票池导出（prepare_universe）时会自动算一次；这里可以单独重算。要先 prepare_universe。策略里用 `from helm_data import HelmBreadth`，`HelmBreadth("sp500").value(self.time, "pct_above_200")` 只给严格早于今天的值。只有 sp500 是完整的历史成分股，其他股票池有幸存者偏差。',
+    inputSchema: { type: 'object', properties: { index: { ...str, description: '股票池，默认 sp500' } } },
+    async run({ index }) {
+      const r = await Q.breadthBuild({ index: index || 'sp500' });
+      if (!r.success) return failText(r);
+      const b = r.breadth;
+      return `✅ 市场宽度 ${b.index}：${b.start} → ${b.end}，${b.rows} 天，每天中位数 ${b.members_median} 只成分股。文件 ${b.csv}。`;
+    },
+  },
+  {
+    name: 'test_timing_signal',
+    description: `择时信号检验（叠加择时过滤的第一步）：检验市场宽度能不能预测后续大盘（股票池的基准，sp500 是 SPY）收益。只用开发期；信号在第 t 天收盘算出，和第 t+1 天起持有 h 天的收益比较；只用不重叠的样本（每 h 天一个），所以样本数就是真实的独立观察数。输出秩相关 IC 和 t 值、逐年方向一致的比例、一条事先定好的规则（pct_above_200 > 0.5、net_highs > 0、dispersion 低于开发期中位数）在场和离场时的平均收益，以及多重检验校正后的结论：有信号 / 信号弱 / 没有信号。
+每个（股票池、序列、持有天数）都会被记账，测得越多门槛越高。「没有信号」照实汇报，不要换序列、换持有天数一直试。择时每月才决定一次，20 年只有约 240 个独立样本，多数结果会是「弱」：这是真实情况，不要放宽。`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ...P,
+        index: { ...str, description: '股票池，默认 sp500（目前只有它是完整的历史成分股）' },
+        series: { type: 'array', items: str, description: '1–3 个：pct_above_200 / net_highs / dispersion。事先想好用哪个，别全测。' },
+        horizons: { type: 'array', items: { type: 'integer' }, description: '持有天数（交易日），1–3 个，默认 [21, 63]' },
+        devStart: { ...str, description: '开发期开始 YYYY-MM-DD，默认 2008-01-01' },
+        devEnd: { ...str, description: '开发期结束 YYYY-MM-DD；按 spec.md 的开发期填；不填则留最近 2 年做验证期' },
+      },
+      required: ['projectId', 'series'],
+    },
+    async run(a) {
+      const r = await Q.timingTest(a);
+      if (!r.success) return failText(r);
+      const t = r.timing;
+      const lines = Object.entries(t.series).map(([k, v]) => {
+        const hz = v.horizons.map((h) => `${h.horizon} 天：IC ${h.ic ?? '—'}，t ${h.t ?? '—'}，${h.n} 个独立样本，规则在场 ${h.rule.share_on != null ? Math.round(h.rule.share_on * 100) + '%' : '—'}（在场平均 ${h.rule.mean_on ?? '—'} / 离场 ${h.rule.mean_off ?? '—'}）`).join('；');
+        return `- ${v.label_zh}（${k}）：**${v.verdict_zh}**。${(v.reasons_zh || []).join('；')}。${hz}`;
+      });
+      return `择时信号检验（${t.index}，基准 ${t.benchmark}，开发期 ${t.dev_window.join(' → ')}；这个股票池已登记 ${t.tests_on_universe} 个检验，门槛 |t| ≥ ${t.t_threshold}）\n${lines.join('\n')}\n${t.summary_zh}\n记录：projects/${t.projectId}/research/timing/${t.id}.json`;
+    },
   },
   {
     name: 'export_signals',

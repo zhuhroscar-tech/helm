@@ -24,6 +24,7 @@ import * as Paper from './lib/paper.mjs';
 import * as Alpaca from './lib/alpaca.mjs';
 import * as QC from './lib/quantconnect.mjs';
 import * as Layer from './lib/layer.mjs';
+import { loadAttribution } from './lib/attribution.mjs';
 import * as AI from './lib/ai.mjs';
 import { sensitiveReadDenies } from './lib/agent-perms.mjs';
 import { effectiveTools, localTools, validateAgentPatch, saveAgentPatch, isQcTool } from './lib/agents.mjs';
@@ -1177,6 +1178,13 @@ const server = http.createServer(async (req, res) => {
       if (!Number.isSafeInteger(pid) || pid <= 0 || !bid) return sendJson(res, 400, { success: false, errors: ['projectId 或 backtestId 不对'] });
       return sendJson(res, 200, await loadRobust(PROJECTS_DIR, pid, bid, res.helmLang));
     }
+    // 因子归因：只读回测已存结果 + French 因子数据（缓存 7 天），不跑回测、不计入尝试次数
+    if (p === '/api/data/backtests/attribution' && req.method === 'GET') {
+      const pid = Number(url.searchParams.get('projectId'));
+      const bid = String(url.searchParams.get('backtestId') || '').replace(/[^a-f0-9]/g, '');
+      if (!Number.isSafeInteger(pid) || pid <= 0 || !bid) return sendJson(res, 400, { success: false, errors: ['projectId 或 backtestId 不对'] });
+      return sendJson(res, 200, await loadAttribution({ projectsDir: PROJECTS_DIR, dataDir: path.join(ROOT, 'data'), projectId: pid, backtestId: bid, lang: res.helmLang === 'en' ? 'en' : 'zh' }));
+    }
     // 参数敏感性：只读，能不能做 + 参数清单 + 已有结果（运行中的进度也从这里读）
     if (p === '/api/data/backtests/sensitivity' && req.method === 'GET') {
       const pid = Number(url.searchParams.get('projectId'));
@@ -1593,7 +1601,6 @@ const server = http.createServer(async (req, res) => {
       const uni = await Promise.race([Q.listUniverses().catch(() => null), new Promise((r) => setTimeout(() => r(null), 8000))]);
       const pc = Layer.precheck({ files: code.files || [], backtests: bl.backtests, universes: uni && uni.success ? uni.universes : null });
       const running = layerRunning.get(pid) || null;
-      if (p === '/api/actions/layer-precheck') {
       // 之前的想法检验（有没有信号）和其他项目的主版本（能不能组合）：都很便宜，预检和评估都用
       const rj = await Q.listResearch({ projectId: pid }).catch(() => null);
       const priorIdeas = Layer.priorIdeaResults(rj && rj.success ? rj.jobs : []);
@@ -1604,8 +1611,18 @@ const server = http.createServer(async (req, res) => {
         const m = l && l.success ? l.backtests.find((x) => x.role === 'main' && !x.error && x.period !== 'holdout') : null;
         if (m) peers.push({ projectId: pr.projectId, name: String(pr.name || pr.projectId).slice(0, 60), backtestId: m.backtestId, sharpe: m.sharpeRatio ?? null });
       }
+      // 择时过滤要用的标普 500 市场宽度：已算好 / 股票池在、只差算 / 股票池都还没准备
+      const sp = uni && uni.success ? uni.universes.find((u) => u.key === 'sp500') : null;
+      const breadth = existsSync(path.join(DATA_DIR, 'helm', 'breadth', 'sp500.csv')) ? 'ready' : sp && sp.exported ? 'build' : 'prepare';
+      // 因子归因（诊断）：第一次要下载因子数据；最多等 8 秒，等不到就先不显示
+      const attr = pc.backtest ? await Promise.race([
+        loadAttribution({ projectsDir: PROJECTS_DIR, dataDir: path.join(ROOT, 'data'), projectId: pid, backtestId: pc.backtest.backtestId, lang }).catch(() => null),
+        new Promise((r) => setTimeout(() => r(null), 8000)),
+      ]) : null;
+      const attribution = attr && attr.success && attr.attribution.available ? attr.attribution : null;
+      if (p === '/api/actions/layer-precheck') {
         const prior = (await Layer.listLayers(PROJECTS_DIR, pid)).filter((x) => x.status === 'ready' && x.backtest?.backtestId === pc.backtest?.backtestId).pop() || null;
-        return sendJson(res, 200, { success: true, errors: [], precheck: { ok: pc.ok, reason: pc.reason || null, legs: pc.legs, qlibBlocked: pc.qlibBlocked || null, usesVol: Boolean(pc.usesVol), noSignal: priorIdeas.filter((x) => x.best === 'none').length, peers: peers.length, backtest: pc.backtest ? { backtestId: pc.backtest.backtestId, name: pc.backtest.name, role: pc.backtest.role } : null }, running, ready: prior ? prior.layerId : null });
+        return sendJson(res, 200, { success: true, errors: [], precheck: { ok: pc.ok, reason: pc.reason || null, legs: pc.legs, qlibBlocked: pc.qlibBlocked || null, usesVol: Boolean(pc.usesVol), noSignal: priorIdeas.filter((x) => x.best === 'none').length, peers: peers.length, breadth, attribution: attribution ? { r2: attribution.r2, summary: attribution.summary } : null, backtest: pc.backtest ? { backtestId: pc.backtest.backtestId, name: pc.backtest.name, role: pc.backtest.role } : null }, running, ready: prior ? prior.layerId : null });
       }
       if (p === '/api/actions/layer-assess') {
         if (!pc.ok) return sendJson(res, 200, { success: false, errors: [pc.reason] });
@@ -1616,8 +1633,8 @@ const server = http.createServer(async (req, res) => {
           || await readFile(path.join(PROJECTS_DIR, String(pid), 'backtests', pc.backtest.backtestId, 'code', 'spec.md'), 'utf8').catch(() => '')
           || await readFile(path.join(PROJECTS_DIR, String(pid), 'spec.md'), 'utf8').catch(() => '');
         const holdout = JSON.parse(await readFile(path.join(PROJECTS_DIR, String(pid), 'holdout_log.json'), 'utf8').catch(() => '[]') || '[]');
-        const context = Layer.buildContext({ project, spec, files: code.files || [], backtest: pc.backtest, holdoutRuns: Array.isArray(holdout) ? holdout.length : 0, legs: pc.legs, priorIdeas, lang });
-        const alts = Layer.alternativeOptions({ usesVol: pc.usesVol, peers, lang });
+        const context = Layer.buildContext({ project, spec, files: code.files || [], backtest: pc.backtest, holdoutRuns: Array.isArray(holdout) ? holdout.length : 0, legs: pc.legs, priorIdeas, attribution, lang });
+        const alts = Layer.alternativeOptions({ usesVol: pc.usesVol, usesBreadth: pc.usesBreadth, peers, equityLeg: pc.legs[0] ? pc.legs[0].etf : null, breadth, lang });
         const job = { layerId: Layer.newLayerId(), projectId: pid, status: 'running', lang, createdAt: new Date().toISOString(), backtest: { backtestId: pc.backtest.backtestId, name: pc.backtest.name, role: pc.backtest.role }, legs: pc.legs, result: null, error: null, choice: null };
         await Layer.saveLayer(PROJECTS_DIR, job);
         layerRunning.set(pid, job.layerId);

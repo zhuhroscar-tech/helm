@@ -279,7 +279,7 @@ function openLayerModal() {
   function tileHTML(o, i) {
     if (o.kind === 'none') return `<button type="button" class="ly-tile ly-none${st.sel === o.id ? ' sel' : ''}${st.sel && st.sel !== o.id ? ' dim' : ''}" data-ly-opt="none" aria-pressed="${st.sel === o.id}"><span class="ly-key">0</span><span class="ly-shape" aria-hidden="true">✕</span><span class="ly-tx"><b>${esc(o.title)}</b><i>${esc(o.tests)}</i></span></button>`;
     const [color, shape] = LY_TILES[i % 4];
-    const what = o.kind === 'vol' ? _t('ly_k_vol') : o.kind === 'portfolio' ? _t('ly_k_port', { n: (o.peers || []).length + 1 }) : o.kind === 'complement' ? _t('ly_k_comp') : `${esc(o.replaces)} → ${esc(o.universeLabel || o.universe)}`;
+    const what = o.kind === 'timing' ? _t('ly_k_timing') : o.kind === 'vol' ? _t('ly_k_vol') : o.kind === 'portfolio' ? _t('ly_k_port', { n: (o.peers || []).length + 1 }) : o.kind === 'complement' ? _t('ly_k_comp') : `${esc(o.replaces)} → ${esc(o.universeLabel || o.universe)}`;
     return `<button type="button" class="ly-tile ly-${color}${st.sel === o.id ? ' sel' : ''}${st.sel && st.sel !== o.id ? ' dim' : ''}" data-ly-opt="${esc(o.id)}" aria-pressed="${st.sel === o.id}">
       <span class="ly-key">${i + 1}</span><span class="ly-shape" aria-hidden="true">${shape}</span>
       <span class="ly-tx"><b>${o.recommended ? `<span class="ly-rec">${_t('ly_rec')}</span>` : ''}${esc(o.title)}</b><i>${esc(o.tests)}</i>
@@ -310,6 +310,7 @@ function openLayerModal() {
       h = `<p>${_t('ly_intro', { v: esc(st.pc.backtest ? st.pc.backtest.name : '') })}</p>
         ${legs ? `<p class="meta">${_t('ly_legs')}</p><div class="ly-chips">${legs}</div>` : ''}
         ${notes.length ? `<p class="ly-sum">${notes.join('<br>')}${_t('ly_alt_first')}</p>` : ''}
+        ${st.pc.attribution ? `<p class="meta"><b>${_t('ly_attr')}</b>${esc(st.pc.attribution.summary)}</p>` : ''}
         <ol class="qc-list"><li>${_t('ly_s1')}</li><li>${_t('ly_s2')}</li><li>${_t('ly_s3')}</li></ol>
         <p class="meta">${_t('ly_cost')}</p>
         <div class="modal-actions">${st.ready ? `<button type="button" class="btn" data-ly-prev>${_t('ly_prev')}</button>` : ''}<button type="button" class="btn" data-ly-close>${_t('k0033')}</button><button type="button" class="btn primary" data-ly-start>${_t('ly_start')}</button></div>`;
@@ -1348,6 +1349,7 @@ let ROB_WHY; _regT(() => { ROB_WHY = {
   seg: _t('k0293'),
   cost: _t('k0294'),
   reg: _t('k0295'),
+  attr: _t('at_why'),
 }; });;
 let rbHead; _regT(() => { rbHead = (title, meta, key) => `<div class="panel-head"><h2>${esc(title)}</h2><span class="meta">${esc(meta)}</span><button type="button" class="gate-i" data-rob-why aria-expanded="false" aria-label="${_t('k0296', { v: esc(title) })}" title="${_t('k0297')}">ⓘ</button></div><p class="gate-why rob-why" hidden>${esc(ROB_WHY[key])}</p>`; });
 const rbFact = (k, v, cls = '') => `<div class="rob-fact"><div class="k">${esc(k)}</div><div class="v ${cls}">${v}</div></div>`;
@@ -1496,7 +1498,24 @@ function robustTabHTML(backtestId) {
     <tr class="grp"><td colspan="6">${_t('k0415')}</td></tr>${g.marginals.map(row).join('')}</tbody></table></div>
     <p class="data-note">${_t('k0416', { v: esc(g.rule) })}</p></div>`;
   }
-  return `<div class="rob">${concl}${sec1}${sec2}${sec3}${sensSectionHTML(backtestId)}${tuneSectionHTML(backtestId)}</div>`;
+  return `<div class="rob">${concl}${sec1}${sec2}${sec3}${attrSectionHTML(backtestId)}${sensSectionHTML(backtestId)}${tuneSectionHTML(backtestId)}</div>`;
+}
+
+// 因子归因（只读诊断，不计入尝试次数）：收益来自哪些已知因子，剩下的 alpha 是否显著
+function attrSectionHTML(backtestId) {
+  const ab = S.attrBt && S.attrBt.id === backtestId ? S.attrBt : null;
+  const head = rbHead(_t('at_h'), _t('at_sub'), 'attr');
+  if (!ab || ab.loading) return `<div class="panel section rob-sec">${head}<div class="skeleton" style="height:120px"></div></div>`;
+  if (ab.error) return `<div class="panel section rob-sec">${head}<p class="data-note">${esc(ab.error)}</p></div>`;
+  const a = ab.a;
+  if (!a || !a.available) return `<div class="panel section rob-sec">${head}<p class="data-note">${esc((a && a.reason) || '')}</p></div>`;
+  const rows = a.exposures.map((e) => `<tr class="static"><td>${esc(e.label)}</td><td class="r ${e.significant ? 'strong' : ''}">${e.beta >= 0 ? '+' : ''}${num(e.beta)}</td><td class="r">${num(e.t)}</td><td class="r">${pc(e.contribution)}</td></tr>`).join('');
+  return `<div class="panel section rob-sec">${head}
+    <p class="rob-text">${esc(a.summary)}</p>
+    <div class="rob-facts">${rbFact(_t('at_r2'), `${Math.round(a.r2 * 100)}%`)}${rbFact(_t('at_alpha'), `${pc(a.alpha.annual)} · t ${num(a.alpha.t)}`, a.alpha.significant ? '' : 'muted')}${rbFact(_t('at_excess'), pc(a.excessAnnual))}${rbFact(_t('at_days'), `${a.n}`)}</div>
+    <div class="table-wrap"><table class="data rob-table"><thead><tr><th>${_t('at_factor')}</th><th class="r">${_t('at_beta')}</th><th class="r">t</th><th class="r">${_t('at_contrib')}</th></tr></thead><tbody>${rows}
+    <tr class="static"><td>${_t('at_alpha_row')}</td><td class="r">—</td><td class="r">${num(a.alpha.t)}</td><td class="r">${pc(a.alpha.annual)}</td></tr></tbody></table></div>
+    <p class="data-note">${_t('at_note', { v: esc(a.start), v2: esc(a.end), v3: esc(a.factorsEnd || '?') })}${a.stale ? ` ${_t('at_stale')}` : ''}</p></div>`;
 }
 
 async function runSens(btn) {
@@ -1690,7 +1709,7 @@ function drawCompare() {
 /* ================= backtest view（概览 / 订单 / 日志 / 代码） ================= */
 async function loadBacktestView(silent = false) {
   const { projectId, backtestId } = S.route;
-  if (!silent) { S.orderSort = null; S.backtest = null; S.charts = null; S.orders = null; S.logs = null; S.code = null; S.robustBt = null; S.sensBt = null; S.tuneBt = null; S.validation = null; renderMain(); }
+  if (!silent) { S.orderSort = null; S.backtest = null; S.charts = null; S.orders = null; S.logs = null; S.code = null; S.robustBt = null; S.attrBt = null; S.sensBt = null; S.tuneBt = null; S.validation = null; renderMain(); }
   ensureProject(projectId).then(() => { renderCrumbs(); renderCtx(); });
   const r = await data('backtests/read', { projectId, backtestId });
   if (S.route.backtestId !== backtestId) return;
@@ -1766,6 +1785,14 @@ async function loadTabData() {
     const r = await dget('backtests/robust', { projectId, backtestId });
     S.robustBt = { id: backtestId, robust: r.success ? r.robust : null, error: r.success ? null : (r.errors || []).join(_t('k0007')) };
     if (S.route.backtestId === backtestId) renderMain();
+  }
+  if (tab === 'robust' && (!S.attrBt || S.attrBt.id !== backtestId)) {
+    // 因子归因：第一次要下载 French 因子数据（几秒），之后缓存 7 天
+    S.attrBt = { id: backtestId, loading: true };
+    dget('backtests/attribution', { projectId, backtestId }).then((r) => {
+      S.attrBt = { id: backtestId, a: r.success ? r.attribution : null, error: r.success ? null : (r.errors || []).join(_t('k0007')) };
+      if (S.route.backtestId === backtestId && S.route.tab === 'robust') renderMain();
+    });
   }
   if (tab === 'robust' && (!S.sensBt || S.sensBt.id !== backtestId)) loadSens(backtestId);
   if (tab === 'robust' && (!S.tuneBt || S.tuneBt.id !== backtestId)) loadTune(backtestId);

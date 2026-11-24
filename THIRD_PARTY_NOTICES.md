@@ -16,6 +16,10 @@ License: Apache License 2.0. Copyright Ran Aroussi. Full text: https://github.co
 
 **Yahoo Finance data.** Prices fetched through yfinance come from Yahoo Finance. yfinance is not affiliated with Yahoo. The data is subject to Yahoo's terms of use and is intended for personal use only; do not redistribute it. Helm stores it only on your machine.
 
+## Kenneth R. French Data Library
+
+Factor attribution (`lib/factors.mjs`, `lib/attribution.mjs`) downloads the daily Fama-French five factors (2x3) and momentum factor from https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/data_library.html and caches them locally (`data/factors/`). The data is provided free by Kenneth R. French for research use; it is not redistributed in this repository. Cite the source when you publish results based on it.
+
 ## Other Python packages
 
 numpy, pandas, scipy, matplotlib, scikit-learn, statsmodels, python-pptx and pypdfium2 are installed from PyPI under their own licenses (BSD, MIT, Apache-2.0 and similar). qlib and LightGBM (MIT), used by the optional research engine, are installed by you.

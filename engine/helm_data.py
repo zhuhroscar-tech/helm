@@ -17,6 +17,9 @@
     y2.value(self.time)                  # 当时已经公布的最新值
     y2.change(self.time, 63)             # 和约 63 个日历日前相比的变化
 
+    br = HelmBreadth("sp500")            # 市场宽度（build_breadth；股票池导出时也会自动算）：只给严格早于今天的值
+    br.value(self.time, "pct_above_200") # 站上 200 日均线的成分股比例；还有 "net_highs"、"dispersion"
+
     vol = HelmVol(target=0.10, max_leverage=1.0)   # 波动率目标：按预测波动率调仓位（不需要任何外部数据）
     vol.update(self.time, daily_return)  # 每个交易日收盘后喂一次策略（或资产）的日收益
     w = vol.scale()                      # 仓位系数 = min(上限, 目标波动率 / 预测波动率)，再乘到原来的目标权重上
@@ -32,7 +35,7 @@ from datetime import datetime, timedelta
 # `from helm_data import *` 只给这几个名字（不把 os / csv 带进策略）
 # 数据都存在下划线开头的属性里（_spells、_by、_dates、_values、_avail、_rows）：整份文件包括“未来”的行都在里面，
 # 策略只能通过方法读（方法只给当时已经知道的数据）。lint_strategy.py 拒绝在 self 以外的对象上读下划线属性。
-__all__ = ["HelmUniverse", "HelmSignals", "HelmMacro", "HelmDataset", "HelmVol"]
+__all__ = ["HelmUniverse", "HelmSignals", "HelmMacro", "HelmDataset", "HelmVol", "HelmBreadth"]
 
 _DATA = os.environ.get("HELM_LEAN_DATA") or os.path.join(os.path.dirname(os.path.realpath(__file__)), "Lean", "Data")
 
@@ -238,6 +241,63 @@ class HelmMacro:
         """当时能用的最近 n 个观测 [(日期, 值)]。"""
         i = self._idx(when)
         return list(zip(self._dates[max(0, i - n + 1): i + 1], self._values[max(0, i - n + 1): i + 1])) if i >= 0 else []
+
+
+class HelmBreadth:
+    """市场宽度：用历史成分股算的每日指标（helm/breadth/<key>.csv，build_breadth 或股票池导出时生成）。
+
+    某一行的日期 d 用的是 d 当天的收盘价，所以策略在 d 当天看不到它，最早 d 的下一个交易日才能用：
+    value(when, field) 只给日期严格早于 when 的最新一行。字段：
+      pct_above_200  站上自己 200 日均线的成分股比例（0–1，越高越健康）
+      net_highs      创 52 周新高的比例减创新低的比例（-1–1）
+      dispersion     成分股 21 日收益的横截面标准差（越高市场越分化）
+    """
+
+    FIELDS = ("pct_above_200", "net_highs", "dispersion", "members")
+
+    def __init__(self, key="sp500"):
+        path = helm_path("breadth", f"{key}.csv")
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"还没有 {key} 的市场宽度：先在 Helm 里运行 build_breadth('{key}')（要先 prepare_universe('{key}')）")
+        self.key = key
+        self._dates, self._rows = [], []
+        with open(path) as f:
+            for r in csv.DictReader(f):
+                row = {}
+                for k in self.FIELDS:
+                    try:
+                        v = float(r.get(k, ""))
+                        row[k] = v if math.isfinite(v) else None
+                    except (TypeError, ValueError):
+                        row[k] = None
+                self._dates.append(r["date"][:10])
+                self._rows.append(row)
+        self.last_date = self._dates[-1] if self._dates else None
+
+    def _idx(self, when):
+        s = _day(when)
+        if _is_stale(self.last_date, s):
+            _warn_once(("breadth", self.key), f"市场宽度 {self.key} 只到 {self.last_date}，回测已经跑到 {s}：之后没有新值。请重新 prepare_universe 或 build_breadth 更新。")
+            return -1
+        return bisect.bisect_left(self._dates, s) - 1  # 严格早于今天
+
+    def value(self, when, field="pct_above_200"):
+        if field not in self.FIELDS:
+            raise ValueError(f"HelmBreadth 没有字段 {field}（可选：{', '.join(self.FIELDS)}）")
+        i = self._idx(when)
+        return self._rows[i][field] if i >= 0 else None
+
+    def as_of(self, when):
+        """(数据日期, 那一行的全部字段)：方便在日志里核对用的是哪一天。"""
+        i = self._idx(when)
+        return (self._dates[i], dict(self._rows[i])) if i >= 0 else (None, None)
+
+    def history(self, when, field="pct_above_200", n=20):
+        i = self._idx(when)
+        if i < 0:
+            return []
+        lo = max(0, i - int(n) + 1)
+        return [(self._dates[k], self._rows[k][field]) for k in range(lo, i + 1)]
 
 
 class HelmDataset:

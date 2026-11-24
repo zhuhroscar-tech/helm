@@ -54,6 +54,7 @@ Each project shows four stages: **idea test → backtest → statistical check �
 5. **Robustness and tuning:**
    - Segment, cost-stress and market-regime breakdowns from saved results.
    - Parameter sensitivity (×0.8 / ×1.2).
+   - Factor attribution: how much of the return is just market, size, value, profitability, investment or momentum exposure (Fama-French factors from the Kenneth R. French Data Library), and whether anything is left over (alpha). Read-only; adds no trials.
    - Latin-hypercube tuning that recommends the centre of a parameter plateau, not the single best point, and estimates the probability of backtest overfitting (PBO). Every candidate counts as a trial.
 6. **Paper trading.** Freeze a backtest and Helm re-runs it after each US trading day, so results after the freeze date are truly out-of-sample.
    - Two modes: internal simulation, or an Alpaca paper account.
@@ -64,11 +65,12 @@ Each project shows four stages: **idea test → backtest → statistical check �
 
 - **Add a layer.** On an existing strategy (say, ETF momentum), choose from colour blocks:
   - qlib stock picking for its US index ETF (an agent proposes the options);
+  - a qlib timing filter: market breadth from point-in-time S&P 500 members (share above their 200-day average and similar) confirms when to hold the stock leg, after an honest time-series test (`HelmBreadth`);
   - volatility-based position sizing (`HelmVol`);
   - a fixed-weight mix with your other validated strategies, or, if you have none yet, building a low-correlation one;
   - "No layer".
 
-  Stock-picking layers often find no signal. When earlier idea tests found nothing, or the agent rates the outlook as weak, the other options come first, marked "Recommended". Whatever you pick runs as a candidate against the unchanged original; your main version and paper trading are not touched.
+  The intro shows the factor attribution first. Stock-picking layers often find no signal. When earlier idea tests found nothing, or the agent rates the outlook as weak, the other options come first, marked "Recommended". Whatever you pick runs as a candidate against the unchanged original; your main version and paper trading are not touched.
 - **Qlib research.** For projects with no idea yet: scans Alpha158 and fundamental factors and trains LightGBM, with a single holdout check. Needs qlib.
 - **Volatility targeting** (`HelmVol`). Scales position size by a forecast volatility using past data only. It aims to lower drawdowns, not to raise returns.
 - **Send to QuantConnect.** Connect once with your QC User ID and API token. Helm creates a project in your account, uploads the code and compiles it in the cloud. It doesn't start cloud backtests or live trading. Strategies that read Helm's local data (`helm_data`) need changes to run on QC, and QC's unadjusted prices give somewhat different results.

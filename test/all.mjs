@@ -22,6 +22,8 @@ const SUITES = [
   ['alpaca.test.mjs', [], []],
   ['quantconnect.test.mjs', [], []],
   ['layer.test.mjs', [], []],
+  ['attribution.test.mjs', [], []],
+  ['timing.test.mjs', [], []],
   ['install.test.mjs', [], []],
   ['server-auth.test.mjs', [], []],
   ['i18n.test.mjs', [], []],
