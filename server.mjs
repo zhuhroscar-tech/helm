@@ -26,6 +26,8 @@ import * as QC from './lib/quantconnect.mjs';
 import * as Layer from './lib/layer.mjs';
 import { loadAttribution } from './lib/attribution.mjs';
 import * as Critic from './lib/critic.mjs';
+import * as Autopilot from './lib/autopilot.mjs';
+import { writeJsonAtomic } from './lib/fs-atomic.mjs';
 import * as AI from './lib/ai.mjs';
 import { sensitiveReadDenies } from './lib/agent-perms.mjs';
 import { effectiveTools, localTools, validateAgentPatch, saveAgentPatch, isQcTool } from './lib/agents.mjs';
@@ -165,9 +167,10 @@ function cleanQuestions(list) {
     const opts = Array.isArray(q && q.options) ? q.options : [];
     if (!text || text.length > 500) return { error: '每个问题要有 1–500 字的 question' };
     if (opts.length < 2 || opts.length > 4) return { error: `「${text.slice(0, 30)}」要有 2–4 个选项（options）` };
-    const options = opts.map((o) => ({ label: String((o && (o.label ?? o)) || '').trim().slice(0, 80), description: String((o && o.description) || '').trim().slice(0, 300) }));
+    // conservative / category：自动研究按它们自动回答（lib/autopilot.mjs autoAnswer）；平时只是附带信息
+    const options = opts.map((o) => ({ label: String((o && (o.label ?? o)) || '').trim().slice(0, 80), description: String((o && o.description) || '').trim().slice(0, 300), ...(o && o.conservative === true ? { conservative: true } : {}) }));
     if (options.some((o) => !o.label)) return { error: '每个选项都要有 label' };
-    out.push({ question: text, header: String(q.header || '').trim().slice(0, 16), multiSelect: q.multiSelect === true, options });
+    out.push({ question: text, header: String(q.header || '').trim().slice(0, 16), multiSelect: q.multiSelect === true, options, ...(Autopilot.CATEGORIES.has(q.category) ? { category: q.category } : {}) });
   }
   return { questions: out };
 }
@@ -231,6 +234,7 @@ async function handleAsk(req, res) {
   if (!run) return sendJson(res, 400, { error: '找不到正在运行的对话' });
   const c = cleanQuestions(body.questions);
   if (c.error) return sendJson(res, 400, { error: c.error });
+  if (run.thread.autopilot) return answerAutopilot(run, { intro: body.intro, questions: c.questions }, res);
   if ([...questions.values()].some((x) => x.threadId === run.thread.id && x.state === 'pending')) return sendJson(res, 409, { error: '已经有一组问题在等用户回答' });
   const q = {
     id: `q${Date.now().toString(36)}${crypto.randomBytes(3).toString('hex')}`, threadId: run.thread.id, agent: run.thread.agent, threadTitle: run.thread.title,
@@ -253,6 +257,88 @@ async function handleAsk(req, res) {
   res.on('close', () => { if (q.state === 'pending' && !res.writableFinished) settleQuestion(q, { skipped: true, by: 'system' }); });
   await done;
   return sendJson(res, 200, { id: q.id, state: q.state, text: answerText(q), answers: q.answers, freeText: q.freeText });
+}
+
+/* ---------------- 自动研究（lib/autopilot.mjs，设计见 docs/AUTOPILOT.md） ---------------- */
+// 运行记录存在 data/autopilot/<runId>.json；正在跑的放在内存里，每次变化都落盘
+const AUTOPILOT_DIR = path.join(path.dirname(THREADS_DIR), 'autopilot');
+const apRuns = new Map();
+const apTimers = new Map(); // runId → 时间上限的定时器（不放进运行记录：定时器对象不能写成 JSON）
+const apSave = (ap) => writeJsonAtomic(path.join(AUTOPILOT_DIR, `${ap.runId}.json`), ap).catch(() => {});
+const apTouch = (ap) => { apSave(ap); broadcast({ type: 'autopilot_updated', runId: ap.runId, status: ap.status }); };
+async function apLoad(runId) {
+  if (!/^ap[a-z0-9]{4,24}$/.test(String(runId || ''))) return null;
+  if (apRuns.has(runId)) return apRuns.get(runId);
+  try {
+    const ap = JSON.parse(await readFile(path.join(AUTOPILOT_DIR, `${runId}.json`), 'utf8'));
+    // 不在内存里却标着 running：服务重启过，那一轮已经断了
+    if (ap.status === 'running') { ap.status = 'interrupted'; ap.reason = ap.reason || 'restart'; ap.endedAt = ap.endedAt || Date.now(); await apSave(ap); }
+    return ap;
+  } catch { return null; }
+}
+async function apList() {
+  const files = (await readdir(AUTOPILOT_DIR).catch(() => [])).filter((f) => /^ap[a-z0-9]+\.json$/.test(f));
+  const out = [];
+  for (const f of files) { const ap = await apLoad(f.slice(0, -5)); if (ap) out.push(Autopilot.runView(ap)); }
+  return out.sort((a, b) => b.createdAt - a.createdAt).slice(0, 30);
+}
+function apEnd(ap, status, reason = null) {
+  if (ap.status !== 'running') return;
+  ap.status = status; ap.reason = reason; ap.endedAt = Date.now();
+  clearTimeout(apTimers.get(ap.runId)); apTimers.delete(ap.runId);
+  apTouch(ap);
+}
+// 自动研究里的提问：不弹给用户，先等审核员（最多 60 秒），再按规则回答
+async function answerAutopilot(run, q, res) {
+  const ap = apRuns.get(run.thread.autopilot);
+  if (!ap) return sendJson(res, 200, { text: '自动研究已经结束：不要继续，停下汇报。' });
+  let review = null;
+  if (Critic.enabled()) {
+    const qq = { intro: q.intro || '', questions: q.questions };
+    review = await Promise.race([criticForQuestion(run.thread, qq).catch(() => null), new Promise((r) => setTimeout(() => r(null), 60_000))]);
+  }
+  const a = Autopilot.autoAnswer(ap, q, review);
+  for (const d of a.decisions) ap.decisions.push({ ...d, agent: run.thread.agent, threadId: run.thread.id, reviewed: Boolean(review) });
+  for (const w of a.awaiting) ap.awaiting = [...(ap.awaiting || []), w];
+  apTouch(ap);
+  return sendJson(res, 200, { id: null, state: 'autopilot', text: a.text, answers: a.answers });
+}
+async function startAutopilot(body, lang) {
+  if ([...apRuns.values()].some((x) => x.status === 'running')) throw httpError(409, localize(lang, '已经有一轮自动研究在跑，等它结束或先停掉。'));
+  const ap = Autopilot.newRun(body || {}, { lang });
+  const thread = newThread('mia', lang === 'en' ? `Autopilot research ${new Date(ap.createdAt).toISOString().slice(0, 16).replace('T', ' ')}` : `自动研究 ${new Date(ap.createdAt).toLocaleString('zh-CN', { hour12: false }).slice(0, 16)}`, { autopilot: ap.runId, lang });
+  ap.rootThreadId = thread.id;
+  apRuns.set(ap.runId, ap);
+  await mkdir(AUTOPILOT_DIR, { recursive: true });
+  await apSave(ap);
+  // 时间上限：到点就停整棵对话树（guard 也会拒绝新的工作）
+  const timer = setTimeout(() => { if (ap.status === 'running') { stopRunTree(ap.rootThreadId); apEnd(ap, 'stopped', 'time'); } }, ap.caps.minutes * 60000);
+  if (timer.unref) timer.unref();
+  apTimers.set(ap.runId, timer);
+  try {
+    await startRun(thread, { message: Autopilot.kickoffMessage(ap), model: body && body.model, effort: body && body.effort });
+  } catch (e) { apEnd(ap, 'error', e.message); throw e; }
+  apTouch(ap);
+  return { runId: ap.runId, threadId: thread.id };
+}
+// MCP（qc-mcp.mjs）在自动研究的对话里，每次调用工具之前问 guard、成功之后报 record
+async function handleAutopilotTool(req, res, kind) {
+  if (!safeEqual(req.headers['x-helm-token'], HANDOFF_TOKEN)) return sendJson(res, 403, { error: 'bad token' });
+  const body = await readJsonRaw(req, 8_000_000);
+  const run = runs.get(body.threadId);
+  const ap = run && run.thread.autopilot ? apRuns.get(run.thread.autopilot) : null;
+  if (!ap) return sendJson(res, 200, kind === 'guard' ? { allow: true } : { ok: true });
+  const tool = String(body.tool || '');
+  const args = body.args && typeof body.args === 'object' ? body.args : {};
+  if (kind === 'guard') {
+    const g = Autopilot.guard(ap, tool, args);
+    if (!g.allow) { ap.refusals.push({ at: Date.now(), agent: run.thread.agent, tool, message: g.message }); apTouch(ap); }
+    return sendJson(res, 200, g);
+  }
+  const r = Autopilot.record(ap, tool, args, String(body.result || ''), { isError: body.isError === true });
+  if (r.found) ap.awaiting = [...(ap.awaiting || []), { at: Date.now(), projectId: r.found.projectId, backtestId: r.found.backtestId, devBacktestId: r.found.devBacktestId, what: 'main' }];
+  apTouch(ap);
+  return sendJson(res, 200, { ok: true });
 }
 
 /* ---------------- utils ---------------- */
@@ -679,6 +765,9 @@ function buildArgs(agent, thread, context, allowDanger, opts) {
     sys += `\n\n## 交接来源\n这个对话是「${src ? src.name : thread.from.agent}」交接给你的任务。完成后给出清晰的最终总结（结论、关键数字、projectId/backtestId），对方会读到你的最终回答。`;
     if (src && src.orchestrator) sys += `\n${src.name}在按阶段调度整个流程：只完成交给你的这一段，做完就给出最终总结并结束；不要自己再交给下一个阶段的 agent（除非任务说明明确要求），需要下一步时在总结里写明建议交给谁、做什么，由${src.name}安排。`;
   }
+  if (thread.autopilot) {
+    sys += `\n\n## 自动研究\n这个对话属于一轮自动研究（用户不在，不会回答问题）。Helm 在代码里强制这些规则：先登记想法清单、想法和版本预算、验证期只在开发期通过后看一次、不能标 main。工具返回「自动研究规则」的错误时，这条路就到此为止：不要换别的工具或参数绕过去，在总结里写明被拒的原因，交回给调度者。要拍板时照常用 ask_user，给问题标 category、给保守选项标 conservative，Helm 会自动回答。`;
+  }
   if (context && Object.keys(context).length) {
     sys += `\n\n## 用户此刻在网站上看的内容\n用户说“这个”“它”“当前”时，指的就是下面这些：\n${formatContext(context)}`;
   }
@@ -775,6 +864,7 @@ async function startRun(thread, { message, context = null, allowDanger = false, 
       HELM_LANG: thread.lang === 'en' ? 'en' : 'zh', // MCP 工具的错误提示用哪种语言（只影响「错误：…」这类用户会看到的文字）
       HELM_AGENT: agent.id,
       HELM_WRITE_ONLY: (agent.writeOnly || []).join(','), // MCP 的 write_file 按这个名单拦（调度者只能写 spec.md）
+      HELM_AUTOPILOT: thread.autopilot || '', // 自动研究：MCP 每次调用工具前后问服务端（硬规则 + 记账）
       MCP_TOOL_TIMEOUT: '1200000', // handoff wait=true 可能要等十几分钟
     },
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -942,6 +1032,17 @@ async function startRun(thread, { message, context = null, allowDanger = false, 
         : (stderr.trim().slice(-800) || `claude 异常退出（退出码 ${code}）`));
       send({ type: 'result', error: assistant.error, denied: [] });
     }
+    // 自动研究：累计用量（超过上限就停整轮）；根对话结束时附上代码记的账本，结束这一轮
+    const ap = thread.autopilot ? apRuns.get(thread.autopilot) : null;
+    if (ap) {
+      ap.cost = Math.round(((ap.cost || 0) + (Number(assistant.cost) || 0)) * 1e4) / 1e4;
+      if (ap.status === 'running' && ap.cost >= ap.caps.usd && thread.id !== ap.rootThreadId) { stopRunTree(ap.rootThreadId); apEnd(ap, 'stopped', 'cost'); }
+      if (thread.id === ap.rootThreadId) {
+        assistant.parts.push({ kind: 'text', helm: 'autopilot-ledger', text: `\n\n---\n${Autopilot.ledgerText(ap)}` });
+        apEnd(ap, assistant.stopped ? 'stopped' : assistant.error ? 'error' : 'done', assistant.stopped ? (ap.reason || 'user') : assistant.error ? String(assistant.error).slice(0, 300) : null);
+        apTouch(ap);
+      } else apTouch(ap);
+    }
     await saveThread(thread).catch(() => {});
     runs.delete(thread.id);
     send({ type: 'end', stopped: Boolean(assistant.stopped) });
@@ -1063,7 +1164,7 @@ async function handleHandoff(req, res) {
   if (depth > MAX_HANDOFF_DEPTH) return sendJson(res, 400, { error: `交接层数超过 ${MAX_HANDOFF_DEPTH} 层，请自己完成或回到用户确认。` });
 
   const srcAgent = agentById(src.agent);
-  const thread = newThread(target.id, task, { depth, from: { agent: src.agent, threadId: src.id }, ...(isLang(src.lang) ? { lang: src.lang } : {}) }); // 交接出去的对话沿用来源对话的语言
+  const thread = newThread(target.id, task, { depth, from: { agent: src.agent, threadId: src.id }, ...(isLang(src.lang) ? { lang: src.lang } : {}), ...(src.autopilot ? { autopilot: src.autopilot } : {}) }); // 交接出去的对话沿用来源对话的语言；自动研究的规则也跟着走
   const context = {};
   if (body.projectId) context.projectId = body.projectId;
   if (body.backtestId) context.backtestId = body.backtestId;
@@ -1148,7 +1249,7 @@ const allowedOrigins = new Set([...allowedHosts].map((h) => `http://${h}`));
 // 注意：本机其它进程仍能 GET 首页拿到令牌并伪造 Origin，这只是纵深防御，不是对本机恶意进程的隔离。
 function checkMutation(req, pathname) {
   if (req.method === 'GET' || req.method === 'HEAD') return null;
-  if (pathname === '/api/handoff' || pathname === '/api/approval' || pathname === '/api/ask' || pathname === '/api/changes/verify' || pathname === '/api/changes/revert-mine') return null;
+  if (pathname === '/api/handoff' || pathname === '/api/approval' || pathname === '/api/ask' || pathname === '/api/changes/verify' || pathname === '/api/changes/revert-mine' || pathname === '/api/autopilot/guard' || pathname === '/api/autopilot/record') return null;
   if (!safeEqual(req.headers['x-helm-ui-token'], UI_TOKEN)) return '请求被拒绝：缺少或错误的页面令牌。如果服务刚重启过，请刷新页面。';
   if (!req.headers.origin || !allowedOrigins.has(req.headers.origin)) return '请求被拒绝：来源（Origin）不是本站。';
   const site = req.headers['sec-fetch-site'];
@@ -1750,6 +1851,21 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { success: r.ok, ...r, autoRestart: process.env.HELM_APP === '1' });
     }
     if (p === '/api/ask' && req.method === 'POST') return await handleAsk(req, res);
+    if (p === '/api/autopilot/guard' && req.method === 'POST') return await handleAutopilotTool(req, res, 'guard');
+    if (p === '/api/autopilot/record' && req.method === 'POST') return await handleAutopilotTool(req, res, 'record');
+    if (p === '/api/autopilot' && req.method === 'GET') return sendJson(res, 200, { success: true, defaults: Autopilot.DEFAULTS, runs: await apList() });
+    if (p === '/api/autopilot/start' && req.method === 'POST') { const b = await readJson(req); return sendJson(res, 200, { success: true, ...(await startAutopilot(b, langOf(req, b))) }); }
+    if (p === '/api/autopilot/stop' && req.method === 'POST') {
+      const b = await readJson(req);
+      const ap = apRuns.get(String(b.runId || ''));
+      if (!ap || ap.status !== 'running') return sendJson(res, 404, { error: localize(langOf(req, b), '这一轮自动研究不在运行') });
+      ap.reason = 'user';
+      stopRunTree(ap.rootThreadId);
+      apEnd(ap, 'stopped', 'user');
+      return sendJson(res, 200, { success: true });
+    }
+    const mAp = p.match(/^\/api\/autopilot\/(ap[a-z0-9]{4,24})$/);
+    if (mAp && req.method === 'GET') { const ap = await apLoad(mAp[1]); return ap ? sendJson(res, 200, { success: true, run: Autopilot.runView(ap) }) : sendJson(res, 404, { error: 'not found' }); }
     if (p === '/api/questions' && req.method === 'GET') {
       return sendJson(res, 200, { success: true, questions: [...questions.values()].map(questionView).sort((a, b) => b.at - a.at).slice(0, 50) });
     }

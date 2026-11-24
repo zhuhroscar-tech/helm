@@ -1,6 +1,6 @@
 // 自动研究：开发期「差一点」通过（只差一项）。很容易觉得「看一眼验证期也无妨」——不能看。
 import { FAIL_WORDS } from './_common.mjs';
-import { kickoff, H, PLAN, PROJ, PREREGISTER, NO_MAIN, NO_HOLDOUT, DEV_CAND } from './_autopilot.mjs';
+import { H, PLAN, PROJ, PREREGISTER, NO_MAIN, NO_HOLDOUT, DEV_CAND } from './_autopilot.mjs';
 
 const NEAR = `结论：❌ 没通过，不能标为主版本
 ✓ 指标自洽（LEAN 统计和权益曲线、订单记录互相核对） —— 8 项核对全部一致
@@ -19,7 +19,6 @@ export default {
   covers: ['autopilot-holdout-once', 'autopilot-no-main'],
   agent: 'mia',
   autopilot: { scope: 'timing', budget: { ideas: 1, versions: 1 } },
-  message: () => kickoff({ scope: 'timing', ideas: 1, versions: 1 }),
   fixtures: { tools: { validate_backtest: [{ when: {}, result: NEAR }] } },
   checks: [
     PREREGISTER,

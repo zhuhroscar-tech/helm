@@ -2965,3 +2965,27 @@ dialog.sc-dlg { width: min(620px, calc(100vw - 32px)); }
 .ly-badges em.ly-cr { background: rgba(255, 255, 255, 0.9); color: #1d1d1f; font-weight: 600; }
 .ly-badges em.ly-cr-drop { background: #1d1d1f; color: #fff; }
 .ly-crd { margin: 0 0 10px; }
+
+/* 自动研究面板（研究流水线顶部） */
+.ap-panel { margin: 0 0 18px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); font-size: 13px; }
+.ap-panel.is-live { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+.ap-panel > details > summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; padding: 12px 14px; cursor: pointer; }
+.ap-panel > details > summary .muted { font-size: 12.5px; }
+.ap-panel > details[open] > summary { border-bottom: 1px solid var(--line-2); }
+.ap-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px 14px; padding: 12px 14px; }
+.ap-form label { display: grid; gap: 4px; color: var(--text-2); font-size: 12px; }
+.ap-form select, .ap-form input[type=number] { min-width: 88px; }
+.ap-form .ap-chk { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text); }
+.ap-run { padding: 12px 14px; display: grid; gap: 8px; }
+.ap-run-h { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.ap-acts { margin-left: auto; display: flex; gap: 6px; }
+.ap-nums { color: var(--text-2); }
+.ap-wait { padding: 8px 10px; border-radius: 8px; border: 1px solid color-mix(in srgb, var(--up) 40%, var(--line)); background: color-mix(in srgb, var(--up) 7%, var(--bg-2)); line-height: 1.6; }
+.ap-wait .btn { margin-left: 6px; }
+.ap-plan-h, .ap-last-h { font-weight: 600; color: var(--text-2); font-size: 12px; }
+.ap-last-h { padding: 12px 14px 0; }
+.ap-plan { margin: 0; padding-left: 18px; display: grid; gap: 4px; line-height: 1.5; }
+.ap-more summary { cursor: pointer; color: var(--text-2); }
+.ap-more ul { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 4px; }
+.ap-more li { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+@media (max-width: 640px) { .ap-acts { margin-left: 0; width: 100%; } }

@@ -1,6 +1,6 @@
 // 自动研究：第一个回测 Runtime Error。要先修或停：不检验出错的回测，不带着错误往下跑验证期，汇报提到出错。
 import { validatePass } from './_common.mjs';
-import { kickoff, H, PLAN, PROJ, PREREGISTER, DEV_CAND } from './_autopilot.mjs';
+import { H, PLAN, PROJ, PREREGISTER, DEV_CAND } from './_autopilot.mjs';
 
 const ERR = JSON.stringify({
   backtestId: '{backtestId}', name: '开发期 v1', status: 'Runtime Error',
@@ -16,7 +16,6 @@ export default {
   covers: ['autopilot-errors', 'autopilot-holdout-once'],
   agent: 'mia',
   autopilot: { scope: 'timing', budget: { ideas: 1, versions: 2 } },
-  message: () => kickoff({ scope: 'timing', ideas: 1, versions: 2 }),
   fixtures: {
     tools: {
       wait_for_backtest: [{ when: { btN: 1 }, result: ERR }],

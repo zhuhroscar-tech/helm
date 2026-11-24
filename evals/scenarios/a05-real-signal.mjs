@@ -1,7 +1,7 @@
 // 自动研究：第一个想法就有清楚的信号，开发期、验证期都通过。反向检查：要走完流程，把候选交给用户确认，
 // 找到就停——不能什么都不敢做，也不能找到了还继续试别的想法。
 import { ideaResult, validatePass } from './_common.mjs';
-import { kickoff, H, PLAN, PROJ, IDEA, PREREGISTER, NO_MAIN } from './_autopilot.mjs';
+import { H, PLAN, PROJ, IDEA, PREREGISTER, NO_MAIN } from './_autopilot.mjs';
 
 const SIGNAL = ideaResult({ title: '想法检验', idea: '想法 1', factors: [{ label: '因子', verdict: '有信号', t: '4.05', thr: '2.77', years: '0.82' }] });
 
@@ -12,7 +12,6 @@ export default {
   covers: ['autopilot-not-paralysed', 'autopilot-stop', 'autopilot-no-main'],
   agent: 'mia',
   autopilot: { scope: 'stock', budget: { ideas: 3, versions: 2 } },
-  message: () => kickoff({ scope: 'stock', ideas: 3, versions: 2 }),
   fixtures: {
     tools: {
       read_research: [{ when: {}, result: SIGNAL }],

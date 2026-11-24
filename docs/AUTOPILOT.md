@@ -1,6 +1,8 @@
 # 自动研究（Autopilot）设计
 
-状态：**设计稿，还没实现**（2026-11-24）。评测场景已经先写好（`evals/scenarios/a*.mjs`，`npm run eval -- --suite autopilot`），实现时以它们为合格标准。
+状态：**已实现**（2026-11-24），还没用真实模型跑过。入口：研究流水线顶部的「自动研究」。评测场景 `evals/scenarios/a*.mjs`（`npm run eval -- --suite autopilot`）是合格标准。
+
+默认值（用户确认过）：3 个想法、每个想法 2 个版本、找到一个两段都通过的候选就停、用量上限 20 美元、时间上限 3 小时。
 
 ## 要解决什么
 
@@ -156,8 +158,22 @@
 ## 实现顺序
 
 1. **已完成**：本设计；评测框架支持自动研究场景，场景写好，自检证明检查能抓住违规。
-2. `validate_backtest` 结论落盘 + 流水线显示修正（独立的小改动，先做）。
-3. `lib/autopilot.mjs`（纯函数 + 单元测试）。
-4. MCP 工具、服务端接口、自动回答、硬规则。
-5. 网页。
-6. 在 Mac 上用真实模型跑 `npm run eval -- --suite autopilot --runs 1`，按结果调提示词。
+2. **已完成**：`validate_backtest` 结论落盘 + 流水线显示修正。
+   - 结论写在 `backtests/<id>/validation.json`，不写进 meta.json：meta 的修改时间是检验缓存键的一部分。
+3. **已完成**：`lib/autopilot.mjs`（纯函数）+ `test/autopilot.test.mjs`。
+4. **已完成**：MCP 工具、服务端接口、自动回答、硬规则。
+   - 端到端测试在 `test/autopilot-flow.test.mjs`：真实服务、MCP、假模型。
+   - 交接出去的子对话带着同一个 `autopilot` 标记，规则一样适用；它们的提示词里也多一段说明。
+5. **已完成**：网页。研究流水线顶部「自动研究」面板，内容包括：
+   - 设置；
+   - 运行中的进度和「停止」；
+   - 想法清单和每个想法的结论；
+   - 等你确认；
+   - 自动决定和被拦下的调用。
+6. **待做**：在 Mac 上用真实模型跑 `npm run eval -- --suite autopilot --runs 1`，按结果调开工说明和提示词。
+
+和设计稿的出入：
+- 硬规则检查在服务端 `/api/autopilot/guard`，没有单独的 `/status` 接口。`GET /api/autopilot` 列出最近的运行，`GET /api/autopilot/<runId>` 取一轮。
+- 用量只在每个对话结束时才知道（claude 的 result 事件），所以上限是「某个子对话结束后发现超了，就停掉整轮」，可能略超一点。
+- 自动研究同一时间只能跑一轮。
+- 加了一条：自动研究里不调参（`tune_backtest`、`start_research` 带 tune 都拒绝）。调参一次就是几十个候选，版本预算管不住它。

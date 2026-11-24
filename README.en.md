@@ -131,6 +131,8 @@ Hand-offs between agents appear as separate conversations. Stopping an agent als
 
 Tests: `npm test -- --fast` (no LEAN) or `npm test` (includes real LEAN backtests). Tests use temporary folders and don't touch your projects.
 
+Autopilot research: from the top of the research pipeline, the AI can propose ideas within a budget and test them through the normal flow; a candidate that passes both the development period and the holdout is left for you to confirm (budget, one holdout look and no automatic main are enforced in code). See [docs/AUTOPILOT.md](docs/AUTOPILOT.md) (Chinese).
+
 Agent behaviour evals: `npm run eval` runs 14 scenarios with the real claude and checks whether the agents follow the rules that only live in their prompts. Run it after changing a prompt or the model; it uses model usage. See [evals/README.md](evals/README.md) (Chinese).
 
 [CONTRIBUTING.md](CONTRIBUTING.md) · [docs/ROADMAP.md](docs/ROADMAP.md) · [CHANGELOG.md](CHANGELOG.md) (Chinese) · [community/](community/README.md)

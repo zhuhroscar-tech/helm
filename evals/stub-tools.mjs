@@ -16,10 +16,10 @@
 // + 计数 n（这个工具在本次评测里第几次被调用，从 1 开始）。result 里可以用 {projectId} {backtestId} {jobId} {name} 占位。
 import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 
-export const PASSTHROUGH = new Set(['handoff', 'ask_user']);
+export const PASSTHROUGH = new Set(['handoff', 'ask_user', 'autopilot_plan']); // autopilot_plan 不碰引擎，用真实的
 
-// 设计好了、还没实现的工具和参数（docs/AUTOPILOT.md）。只在 fixtures 里 autopilot 为真时加进工具列表，
-// 让评测场景先于实现写好；真正实现之后，同名的真实工具优先，这里的定义自动不再使用。
+// 设计好了、还没实现的工具和参数。只在 fixtures 里 autopilot 为真时加进工具列表，让评测场景先于实现写好；
+// 真正实现之后，同名的真实工具 / 参数优先，这里的定义自动不再使用（自动研究的这几个已经都实现了，留着给以后的新工具用）。
 export const PLANNED_TOOLS = [{
   name: 'autopilot_plan',
   description: '自动研究：在任何建项目、想法检验、回测之前，先登记这一轮要试的想法清单。每个想法写一句话、经济逻辑、预计机制、怎样算失败。想法数量不能超过预算；登记后按顺序做，不能换题或加题。',
@@ -89,7 +89,6 @@ export function createStub(fixturesPath) {
       projects: fx.projects || [],
       backtests: fx.backtests || [],
       research: fx.research || [],
-      plan: null,
       counts: {},
       made: { projects: 0, backtests: 0, research: 0 }, // 本次评测里新建的个数：给新记录编 seq（第几个）
     };
@@ -122,15 +121,6 @@ export function createStub(fixturesPath) {
       if (!p) return `错误：项目 ${a.projectId} 不存在`;
       const files = Object.entries(p.files || {}).map(([n, c]) => `### ${n}\n\`\`\`python\n${c}\n\`\`\``).join('\n\n');
       return `项目：${p.name}（projectId=${p.projectId}）${p.description ? `\n说明：${p.description}` : ''}\n\n${files}`;
-    },
-    autopilot_plan: (st, a) => {
-      const max = fx.autopilot && fx.autopilot.budget ? fx.autopilot.budget.ideas : null;
-      const ideas = Array.isArray(a.ideas) ? a.ideas : [];
-      if (st.plan) return '错误：这一轮已经登记过想法清单，不能改。';
-      if (!ideas.length) return '错误：想法清单是空的。';
-      if (max && ideas.length > max) return `错误：想法数 ${ideas.length} 超过预算 ${max}。`;
-      st.plan = ideas;
-      return `已登记 ${ideas.length} 个想法${max ? `（预算 ${max} 个）` : ''}：\n${ideas.map((x, i) => `${i + 1}. ${x.title}`).join('\n')}\n按顺序做；建项目时 create_project 带 planIdea。`;
     },
     create_project: (st, a) => {
       const id = st.nextProjectId++;

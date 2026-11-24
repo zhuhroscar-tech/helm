@@ -3606,6 +3606,7 @@ const pill = ([t, c]) => `<span class="st-pill ${c}">${esc(t)}</span>`;
 async function loadPipeline() {
   if (!S.pipe) S.pipe = { data: null, error: null, tl: null };
   try { const r = await api('/api/pipeline'); S.pipe.data = r; S.pipe.error = null; } catch (e) { S.pipe.error = e.message; }
+  try { S.pipe.ap = await api('/api/autopilot'); } catch { /* 自动研究面板拿不到就不显示 */ }
   const sel = S.route.pipeProject;
   if (sel) {
     try { const r = await api(`/api/pipeline/${sel}`); S.pipe.tl = { projectId: sel, items: r.timeline }; } catch (e) { S.pipe.tl = { projectId: sel, error: e.message }; }
@@ -3717,7 +3718,51 @@ function pipelineHTML() {
       <div class="pcol-body">${cards.map(pipeCardHTML).join('') || '<div class="pcol-empty">—</div>'}</div></section>`;
   }).join('');
   const un = d.unassigned.length ? `<details class="pipe-un"><summary>${_t('k1259', { n: d.unassigned.length })}</summary><ul>${d.unassigned.map((t) => `<li>${agentGlyph(t.agent)}<button type="button" class="linkish" data-open-thread="${esc(t.id)}">${esc(t.title)}</button>${pill(TASK_STATUS[t.status] || TASK_STATUS.done)}<span class="muted">${agoT(t.updatedAt)}</span></li>`).join('')}</ul></details>` : '';
-  return `<div class="page wide">${head}${liveStripHTML(d)}<div class="pipe-board">${cols}</div>${pipeDetailHTML(d)}${un}</div>`;
+  return `<div class="page wide">${head}${liveStripHTML(d)}${autopilotHTML(P.ap)}<div class="pipe-board">${cols}</div>${pipeDetailHTML(d)}${un}</div>`;
+}
+
+/* ---------- Autopilot research (lib/autopilot.mjs, docs/AUTOPILOT.md) ---------- */
+const AP_REASON = { user: 'ap31', time: 'ap32', cost: 'ap33', restart: 'ap34' };
+function apVerdict(x) {
+  if (x.devPassed && x.holdoutPassed) return _t('ap38');
+  if (x.holdoutFailed) return _t('ap39');
+  if (x.devPassed) return _t('ap40');
+  if (x.devVersions && !x.devValidated) return _t('ap43');
+  if (x.devVersions) return _t('ap41');
+  if (x.tests) return _t('ap42');
+  return _t('ap37');
+}
+function apRunHTML(r, live) {
+  const L = r.ledger || {};
+  const st = live ? pill([_t('ap13'), 'st-active']) : pill(r.status === 'done' ? [_t('ap23'), 'st-done'] : r.status === 'error' ? [_t('ap25'), 'st-error'] : r.status === 'interrupted' ? [_t('ap26'), 'st-stopped'] : [_t('ap24'), 'st-stopped']);
+  const reason = r.reason ? `<span class="muted">${esc(AP_REASON[r.reason] ? _t(AP_REASON[r.reason]) : r.reason)}</span>` : '';
+  const nums = `<div class="ap-nums">${_t('ap16', { a: L.ideas || 0, b: r.budget.ideas, t: L.tests || 0, v: L.devVersions || 0, h: L.holdoutLooks || 0, c: Number(r.cost || 0).toFixed(2) })}${L.refusals ? ` · ${_t('ap17', { n: L.refusals })}` : ''}${L.decisions ? ` · ${_t('ap18', { n: L.decisions })}` : ''}</div>`;
+  const plan = r.plan ? r.plan.map((x, i) => {
+    const per = (L.per || []).find((y) => y.planIdea === i + 1);
+    return `<li><b>${i + 1}. ${esc(x.title)}</b> <span class="muted">${esc(x.logic || '')}</span> — ${per ? `<a href="#/pipeline/${per.projectId}">#${per.projectId}</a> ${esc(apVerdict(per))}` : esc(_t('ap37'))}</li>`;
+  }).join('') : `<li class="muted">${_t('ap28')}</li>`;
+  const wait = (r.found || []).map((f) => `<div class="ap-wait"><b>${_t('ap19')}</b> ${_t('ap20', { p: f.projectId })} <a class="btn sm" href="#/p/${f.projectId}/b/${encodeURIComponent(f.devBacktestId || f.backtestId)}">${_t('ap21')}</a></div>`).join('');
+  const dec = (r.decisions || []).length ? `<details class="ap-more"><summary>${_t('ap29')} (${r.decisions.length})</summary><ul>${r.decisions.map((d) => `<li>${agentGlyph(d.agent || 'mia')}${esc(d.question)} → <b>${esc(d.picked || '—')}</b> <span class="muted">${esc(d.why || '')}</span></li>`).join('')}</ul></details>` : '';
+  const ref = (r.refusals || []).length ? `<details class="ap-more"><summary>${_t('ap30')} (${r.refusals.length})</summary><ul>${r.refusals.map((d) => `<li>${agentGlyph(d.agent || 'mia')}<code>${esc(d.tool)}</code> <span class="muted">${esc(d.message || '')}</span></li>`).join('')}</ul></details>` : '';
+  const acts = `<div class="ap-acts">${r.rootThreadId ? `<button type="button" class="btn sm" data-open-thread="${esc(r.rootThreadId)}">${_t('ap15')}</button>` : ''}${live ? `<button type="button" class="btn sm danger" data-ap-stop="${esc(r.runId)}">${_t('ap14')}</button>` : ''}</div>`;
+  return `<div class="ap-run"><div class="ap-run-h">${st}${reason}<span class="muted">${agoT(r.createdAt)}</span>${acts}</div>${nums}${wait}<div class="ap-plan-h">${_t('ap27')}</div><ul class="ap-plan">${plan}</ul>${dec}${ref}</div>`;
+}
+function autopilotHTML(A) {
+  if (!A || !A.runs) return '';
+  const live = A.runs.find((r) => r.status === 'running');
+  const last = live ? null : A.runs[0];
+  const d = A.defaults || {};
+  const opt = (n, sel) => `<option value="${n}" ${n === sel ? 'selected' : ''}>${n}</option>`;
+  const form = live ? '' : `<form id="apForm" class="ap-form">
+      <label>${_t('ap03')}<select name="ideas">${[1, 2, 3, 4, 5].map((n) => opt(n, d.ideas || 3)).join('')}</select></label>
+      <label>${_t('ap04')}<select name="versions">${[1, 2, 3].map((n) => opt(n, d.versions || 2)).join('')}</select></label>
+      <label>${_t('ap05')}<select name="scope"><option value="any">${_t('ap06')}</option><option value="stock">${_t('ap07')}</option><option value="timing">${_t('ap08')}</option></select></label>
+      <label>${_t('ap09')}<input name="usd" type="number" min="1" max="500" step="1" value="${d.usd || 20}"></label>
+      <label>${_t('ap10')}<input name="minutes" type="number" min="10" max="1440" step="10" value="${d.minutes || 180}"></label>
+      <label class="ap-chk"><input name="stopOnFind" type="checkbox" ${d.stopOnFind === false ? '' : 'checked'}>${_t('ap11')}</label>
+      <button type="submit" class="btn primary">${_t('ap12')}</button></form>`;
+  return `<section class="ap-panel ${live ? 'is-live' : ''}" aria-label="${_t('ap01')}"><details ${live || (last && (last.found || []).length) ? 'open' : ''}><summary><b>${_t('ap01')}</b><span class="muted">${_t('ap02')}</span></summary>
+    ${form}${live ? apRunHTML(live, true) : last ? `<div class="ap-last-h">${_t('ap22')}</div>${apRunHTML(last, false)}` : ''}</details></section>`;
 }
 
 /* ---------- Agents ---------- */
@@ -3864,6 +3909,28 @@ function agentFormPatch(form) {
   };
 }
 function wirePipelineAgents() {
+  document.addEventListener('submit', async (e) => {
+    if (e.target.id !== 'apForm') return;
+    e.preventDefault();
+    const f = new FormData(e.target);
+    const body = { budget: { ideas: Number(f.get('ideas')), versions: Number(f.get('versions')) }, scope: String(f.get('scope') || 'any'), usd: Number(f.get('usd')), minutes: Number(f.get('minutes')), stopOnFind: f.get('stopOnFind') === 'on' };
+    if (!(await askConfirm({ title: _t('ap01'), message: _t('ap35') }))) return;
+    const btn = e.target.querySelector('button[type=submit]'); if (btn) btn.disabled = true;
+    try {
+      const r = await api('/api/autopilot/start', { method: 'POST', body: JSON.stringify(body) });
+      toast(_t('ap36'));
+      await loadPipeline();
+      if (r.threadId) openThread(r.threadId);
+    } catch (err) { if (btn) btn.disabled = false; toast(err.message); }
+  });
+  document.addEventListener('click', async (e) => {
+    const st = e.target.closest('[data-ap-stop]');
+    if (!st) return;
+    e.preventDefault();
+    st.disabled = true;
+    try { await api('/api/autopilot/stop', { method: 'POST', body: JSON.stringify({ runId: st.dataset.apStop }) }); } catch (err) { toast(err.message); }
+    loadPipeline();
+  });
   document.addEventListener('click', (e) => {
     const nt = e.target.closest('[data-new-task]');
     if (nt) { e.preventDefault(); e.stopPropagation(); newTaskFor(nt.dataset.newTask); return; }
@@ -4898,7 +4965,7 @@ function connectBus() {
       refreshRestart();
     }
     // 流水线和 Agents 页跟着实时刷新：谁开始、谁交给谁、谁做完、工具做完了什么
-    if (['hello', 'run_start', 'run_end', 'tool_done', 'handoff_draft', 'project_created', 'project_deleted', 'backtest_started', 'research_started', 'paper_updated'].includes(ev.type)) {
+    if (['hello', 'run_start', 'run_end', 'tool_done', 'handoff_draft', 'project_created', 'project_deleted', 'backtest_started', 'research_started', 'paper_updated', 'autopilot_updated'].includes(ev.type)) {
       refreshPipelineSoon();
       if (ev.type !== 'tool_done' && ev.type !== 'handoff_draft') refreshAgentsSoon();
     }

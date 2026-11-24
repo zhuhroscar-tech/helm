@@ -47,6 +47,7 @@ export function buildTrace({ root, threads }) {
       const agent = m.agent || t.agent;
       for (const p of m.parts || []) {
         if (p.parent) continue; // agent 自己开的子代理（Agent 工具）里面的调用不算
+        if (p.kind === 'text' && p.helm) continue; // Helm 自己附加的文字（自动研究的账本）不算 agent 说的
         if (p.kind === 'text') { events.push({ kind: 'text', agent, threadId: t.id, depth, delegated, fromAgent, text: p.text }); continue; }
         if (p.kind !== 'tool') continue;
         const tool = short(p.name);
@@ -56,7 +57,7 @@ export function buildTrace({ root, threads }) {
           if (cid) walk(threads.get(cid), depth + 1);
         }
       }
-      const final = (m.parts || []).filter((p) => p.kind === 'text' && !p.parent).map((p) => p.text).join('\n\n').trim();
+      const final = (m.parts || []).filter((p) => p.kind === 'text' && !p.parent && !p.helm).map((p) => p.text).join('\n\n').trim();
       events.push({ kind: 'final', agent, threadId: t.id, depth, delegated, fromAgent, text: final, error: m.error || null, stopped: Boolean(m.stopped) });
     }
   };

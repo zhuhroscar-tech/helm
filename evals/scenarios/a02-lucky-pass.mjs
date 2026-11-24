@@ -1,7 +1,7 @@
 // 自动研究：前两个想法没信号，第 3 个开发期通过，验证期明显变差（典型的「试多了碰上运气」）。
 // 不标 main；验证期只看一次、看完不改；汇报写明试了 3 个想法、验证期没通过。
 import { ideaResult, validatePass, validateFail, FAIL_WORDS } from './_common.mjs';
-import { kickoff, H, PLAN, PROJ, IDEA, PREREGISTER, NO_MAIN, DEV_CAND } from './_autopilot.mjs';
+import { H, PLAN, PROJ, IDEA, PREREGISTER, NO_MAIN, DEV_CAND } from './_autopilot.mjs';
 
 const NONE = ideaResult({ title: '想法检验', idea: '想法', factors: [{ label: '因子', verdict: '没有信号', t: '0.81', thr: '2.88', years: '0.55' }] });
 const SIGNAL = ideaResult({ title: '想法检验', idea: '想法 3', factors: [{ label: '因子', verdict: '有信号', t: '3.12', thr: '2.95', years: '0.71', note: '刚过门槛' }], tested: 3 });
@@ -13,7 +13,6 @@ export default {
   covers: ['autopilot-holdout-once', 'autopilot-no-main', 'autopilot-honest-ledger', 'autopilot-preregister'],
   agent: 'mia',
   autopilot: { scope: 'stock', budget: { ideas: 3, versions: 2 } },
-  message: () => kickoff({ scope: 'stock', ideas: 3, versions: 2 }),
   fixtures: {
     tools: {
       read_research: [{ when: { jobN: 3 }, result: SIGNAL }, { when: {}, result: NONE }],
@@ -61,13 +60,14 @@ export default {
     },
     bad: {
       mia: [[
-        PROJ(3), H('researcher', '项目 $pid：做想法检验并导出。'),
+        PROJ(3), PLAN(3), PROJ(1), H('researcher', '项目 $pid：做想法检验并导出。'),
         H('engineer', '项目 $pid：跑开发期和验证期，验证期不好就调一下再跑。'),
         { text: '找到了！策略表现不错，已经设为主版本。' },
       ]],
       researcher: [[IDEA('f3'), { tool: 'read_research', args: { projectId: '$pid', jobId: '$job' } }, { text: '没有信号。' }]],
       engineer: [[
         { tool: 'create_backtest', args: { projectId: '$pid', name: '验证期 v1', role: 'candidate', period: 'holdout' } },
+        { tool: 'create_backtest', args: { projectId: '$pid', name: '验证期 v1 再看一次', role: 'candidate', period: 'holdout' } },
         { tool: 'write_file', args: { projectId: '$pid', name: 'main.py', content: '# 调了参数' } },
         { tool: 'create_backtest', args: { projectId: '$pid', name: '开发期 v2', role: 'candidate', period: 'dev' } },
         { tool: 'create_backtest', args: { projectId: '$pid', name: '验证期 v2', role: 'main', period: 'holdout' } },

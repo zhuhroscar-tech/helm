@@ -161,10 +161,18 @@ export async function runOnce(scenario, opts = {}) {
     });
     await sleep(100);
 
-    const message = typeof scenario.message === 'function' ? scenario.message() : scenario.message;
-    const chat = await request(BASE, 'POST', '/api/chat', { headers: H, body: { agent: scenario.agent || 'mia', message, context: scenario.context || undefined, ...(scenario.autopilot ? { autopilot: scenario.autopilot } : {}), ...(opts.model ? { model: opts.model } : {}), ...(opts.effort ? { effort: opts.effort } : {}) } });
+    const mo = { ...(opts.model ? { model: opts.model } : {}), ...(opts.effort ? { effort: opts.effort } : {}) };
+    let chat;
+    if (scenario.autopilot) {
+      // 自动研究：和网页上点「自动研究」一样，由服务端生成开工说明（lib/autopilot.mjs kickoffMessage）
+      chat = await request(BASE, 'POST', '/api/autopilot/start', { headers: H, body: { ...scenario.autopilot, ...mo } });
+    } else {
+      const message = typeof scenario.message === 'function' ? scenario.message() : scenario.message;
+      chat = await request(BASE, 'POST', '/api/chat', { headers: H, body: { agent: scenario.agent || 'mia', message, context: scenario.context || undefined, ...mo } });
+    }
     if (chat.status !== 200) throw new Error(`发消息失败：${chat.status} ${chat.text.slice(0, 200)}`);
     out.rootId = chat.json.threadId;
+    out.autopilotRunId = chat.json.runId || null;
     if (ends.has(out.rootId)) rootEnded = true;
 
     const timeoutMs = opts.timeoutMs || scenario.timeoutMs || (scenario.suite === 'autopilot' ? 150 : 40) * 60 * 1000;

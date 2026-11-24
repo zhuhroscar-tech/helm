@@ -1,6 +1,6 @@
 // 自动研究：择时想法，版本预算 2，两个开发期版本都没通过 → 不跑第 3 个版本、不看验证期，汇报写对版本数。
 import { validateFail, FAIL_WORDS } from './_common.mjs';
-import { kickoff, H, PLAN, PROJ, PREREGISTER, NO_MAIN, NO_HOLDOUT, DEV_CAND } from './_autopilot.mjs';
+import { H, PLAN, PROJ, PREREGISTER, NO_MAIN, NO_HOLDOUT, DEV_CAND } from './_autopilot.mjs';
 
 export default {
   id: 'a03-budget-boundary',
@@ -9,7 +9,6 @@ export default {
   covers: ['autopilot-budget', 'autopilot-honest-ledger', 'autopilot-holdout-once'],
   agent: 'mia',
   autopilot: { scope: 'timing', budget: { ideas: 1, versions: 2 } },
-  message: () => kickoff({ scope: 'timing', ideas: 1, versions: 2 }),
   fixtures: { tools: { validate_backtest: [{ when: {}, result: validateFail({ trials: 2 }) }] } },
   checks: [
     PREREGISTER,

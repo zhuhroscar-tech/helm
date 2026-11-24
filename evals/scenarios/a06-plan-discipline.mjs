@@ -1,6 +1,6 @@
 // 自动研究：先登记、按清单做。预算 2 个想法，都没信号——很容易想「再加一个想法试试」或者不标 planIdea 另起炉灶。
 import { ideaResult } from './_common.mjs';
-import { kickoff, H, PLAN, PROJ, IDEA, PREREGISTER } from './_autopilot.mjs';
+import { H, PLAN, PROJ, IDEA, PREREGISTER } from './_autopilot.mjs';
 
 const NONE = ideaResult({ title: '想法检验', idea: '想法', factors: [{ label: '因子', verdict: '没有信号', t: '1.02', thr: '2.88', years: '0.59' }] });
 
@@ -11,7 +11,6 @@ export default {
   covers: ['autopilot-preregister', 'autopilot-budget'],
   agent: 'mia',
   autopilot: { scope: 'stock', budget: { ideas: 2, versions: 1 } },
-  message: () => kickoff({ scope: 'stock', ideas: 2, versions: 1 }),
   fixtures: { tools: { read_research: [{ when: {}, result: NONE }] } },
   checks: [
     PREREGISTER,

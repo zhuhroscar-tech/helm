@@ -23,6 +23,8 @@ const AGENTS = JSON.parse(readFileSync(process.env.HELM_AGENTS_FILE || path.join
 
 // 行为评测（evals/run.mjs）：设置了 HELM_EVAL_FIXTURES 时，除 handoff / ask_user 以外的工具都返回场景里写好的结果，
 // 不碰真实的引擎和项目。正常使用 Helm 时不会设置这个变量。
+// 自动研究（lib/autopilot.mjs）：服务端启动 agent 时给 HELM_AUTOPILOT=<runId>；交接出去的子对话也带着
+const AUTOPILOT = String(process.env.HELM_AUTOPILOT || '').trim() || null;
 const EVAL = process.env.HELM_EVAL_FIXTURES ? (await import('../evals/stub-tools.mjs')).createStub(process.env.HELM_EVAL_FIXTURES) : null;
 
 const int = { type: 'integer' };
@@ -112,7 +114,8 @@ const TOOLS = [
               question: { ...str, description: '完整的问题，以问号结尾' },
               header: { ...str, description: '很短的标签（≤12 字），比如「基准」「调仓」' },
               multiSelect: { type: 'boolean', description: '可以多选时为 true' },
-              options: { type: 'array', description: '2–4 个选项', items: { type: 'object', properties: { label: { ...str, description: '选项（1–5 个词）' }, description: { ...str, description: '选它会怎样' } }, required: ['label'] } },
+              category: { type: 'string', enum: ['spec', 'trial', 'holdout', 'promotion', 'other'], description: '问题类别：spec=规则说明的歧义；trial=会增加尝试次数（再测、换参数、多跑一版）；holdout=涉及验证期；promotion=标 main / 开模拟；other。自动研究按它自动回答' },
+              options: { type: 'array', description: '2–4 个选项', items: { type: 'object', properties: { label: { ...str, description: '选项（1–5 个词）' }, description: { ...str, description: '选它会怎样' }, conservative: { type: 'boolean', description: '不增加尝试、不碰验证期的那个选项（比如「不重测」「停下」）标 true' } }, required: ['label'] } },
             },
             required: ['question', 'options'],
           },
@@ -127,6 +130,24 @@ const TOOLS = [
       } catch (e) {
         return `错误：${e.message}`;
       }
+    },
+  },
+  {
+    name: 'autopilot_plan',
+    description: '自动研究专用：在任何建项目、想法检验、回测之前，先登记这一轮要试的想法清单。每个想法写一句话（title）、经济逻辑（logic，为什么应该有效）、类型（kind）和怎样算失败（failIf）。数量不能超过预算；登记后按清单顺序做，不能换题、加题或重新登记。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ideas: {
+          type: 'array', description: '想法清单（按要做的顺序）',
+          items: { type: 'object', properties: { title: { ...str, description: '一句话想法' }, logic: { ...str, description: '经济逻辑：为什么应该有效' }, kind: { type: 'string', enum: ['stock', 'timing'], description: 'stock=选股，timing=ETF 择时' }, failIf: { ...str, description: '怎样算失败' } }, required: ['title', 'logic'] },
+        },
+      },
+      required: ['ideas'],
+    },
+    async run({ ideas }) {
+      if (!process.env.HELM_AUTOPILOT) return '错误：autopilot_plan 只能在自动研究里用';
+      return `已登记 ${ideas.length} 个想法：\n${ideas.map((x, i) => `${i + 1}. ${x.title}`).join('\n')}\n按顺序做；建项目时 create_project 带 planIdea（第几个想法）。`;
     },
   },
   {
@@ -218,7 +239,8 @@ const TOOLS = [
   {
     name: 'create_project', description: '新建项目（Python）。可以同时提供 main.py 的完整代码，会写入并编译。一个策略想法只建一个项目：基准、对照、消融都放在同一个项目里（另写 benchmark.py 等文件，或直接用 LEAN 自带的基准曲线），不要为它们另建项目。',
     inputSchema: { type: 'object', properties: { name: { ...str, description: '项目名，用用户写想法时的语言' }, nameEn: { ...str, description: '项目的英文名（英文界面显示它）。name 不是英文时必须给' },
-      nameZh: { ...str, description: '项目的中文名（中文界面显示它）。name 不是中文时必须给' }, description: str, code: { ...str, description: 'main.py 完整代码（可选）' } }, required: ['name'] },
+      nameZh: { ...str, description: '项目的中文名（中文界面显示它）。name 不是中文时必须给' }, description: str, code: { ...str, description: 'main.py 完整代码（可选）' },
+      planIdea: { ...int, description: '自动研究：这个项目对应 autopilot_plan 里的第几个想法（从 1 开始）；平时不用' } }, required: ['name'] },
     async run({ name, nameEn, nameZh, description, code }) {
       if (code && String(process.env.HELM_WRITE_ONLY || '').trim()) {
         return '错误：你不能写策略代码。先不带 code 建项目、存好 spec.md，再用 handoff 交给 engineer（策略工程师）写 main.py。';
@@ -889,12 +911,22 @@ async function onMessage(msg) {
       if (!tool) return write({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: LANG === 'en' ? `Unknown tool ${params.name}` : `未知工具 ${params.name}` }], isError: true } });
       const bad = validateArgs(tool.inputSchema, params.arguments === undefined || params.arguments === null ? {} : params.arguments);
       if (bad) return write({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: userText(`错误：${bad}`) }], isError: true } });
-      if (EVAL && EVAL.handles(tool.name)) {
-        const r = await EVAL.call(tool.name, params.arguments || {});
-        return write({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: userText(r.text) }], isError: r.isError } });
+      const args = params.arguments || {};
+      // 自动研究：调用之前问服务端硬规则（先登记、预算、验证期关卡、不标 main），被拒就不执行
+      if (AUTOPILOT && tool.name !== 'approve') {
+        const g = await helmPost('/api/autopilot/guard', { tool: tool.name, args }).catch((e) => ({ allow: false, message: `错误：自动研究规则检查失败（${e.message}），这次没有执行` }));
+        if (!g.allow) return write({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: userText(String(g.message || '错误：被自动研究规则拒绝')) }], isError: true } });
       }
-      const text = await tool.run(params.arguments || {});
-      return write({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: userText(text) }], isError: /^错误：|^没有运行回测|^下载失败/.test(text) } });
+      let text; let isError;
+      if (EVAL && EVAL.handles(tool.name)) {
+        const r = await EVAL.call(tool.name, args);
+        text = r.text; isError = r.isError;
+      } else {
+        text = await tool.run(args);
+        isError = /^错误：|^没有运行回测|^下载失败/.test(text);
+      }
+      if (AUTOPILOT && tool.name !== 'approve') await helmPost('/api/autopilot/record', { tool: tool.name, args, result: String(text).slice(0, 4000), isError }).catch(() => {});
+      return write({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: userText(text) }], isError } });
     }
     write({ jsonrpc: '2.0', id, error: { code: -32601, message: `Method not found: ${method}` } });
   } catch (e) {

@@ -130,6 +130,8 @@ npm start                  # 打开 http://localhost:4377
 
 测试：`npm test -- --fast`（不跑 LEAN）或 `npm test`（含真实 LEAN 回测）。测试用临时目录，不碰你的项目。
 
+自动研究：研究流水线顶部可以让 AI 在预算内自己提出想法、按流程检验，开发期和验证期都通过的候选交给你确认（预算、验证期只看一次、不自动标 main 都由代码强制），见 [docs/AUTOPILOT.md](docs/AUTOPILOT.md)。
+
 Agent 行为评测：`npm run eval` 用真实的 claude 跑 14 个场景，检查 agent 有没有守只写在提示词里的规则。改了提示词或换了模型时跑一次，会花模型用量。见 [evals/README.md](evals/README.md)。
 
 [CONTRIBUTING.md](CONTRIBUTING.md) · [docs/ROADMAP.md](docs/ROADMAP.md) · [CHANGELOG.md](CHANGELOG.md) · [community/](community/README.md)

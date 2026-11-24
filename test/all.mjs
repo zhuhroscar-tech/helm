@@ -53,6 +53,8 @@ const SUITES = [
   ['tune.test.mjs', [], []],
   ['ask-user.test.mjs', [], []],
   ['agent-eval.test.mjs', [], []],
+  ['autopilot.test.mjs', [], []],
+  ['autopilot-flow.test.mjs', [], []],
   ['ai-connect.test.mjs', [], []],
   ['translate.test.mjs', [], []],
   ['deck.test.mjs', [], []],
