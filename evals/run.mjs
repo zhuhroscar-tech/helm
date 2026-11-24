@@ -158,7 +158,7 @@ export async function runOnce(scenario, opts = {}) {
         log(`    ${q.agent} 用 ask_user 问了 ${q.questions.length} 个问题 → ${body.skip ? '按推荐' : '按场景回答'}`);
         await request(BASE, 'POST', `/api/questions/${q.id}`, { headers: H, body }).catch(() => {});
       }
-      if (ev.type === 'run_start' && ev.threadId !== out.rootId) log(`    → ${ev.agent} 开始${ev.from ? `（${ev.from.agent} 交接来的）` : ''}`);
+      if (ev.type === 'run_start' && ev.from) log(`    → ${ev.agent} 开始${ev.from ? `（${ev.from.agent} 交接来的）` : ''}`);
       // 快速探针：看到想看的那一步就停（scenario.stopWhen(live)），不等整轮走完
       if (scenario.stopWhen && out.rootId && !out.stoppedEarly) {
         if (ev.type === 'tool_done') live.push({ kind: 'tool', root: ev.threadId === out.rootId, threadId: ev.threadId, tool: String(ev.name || '').replace(/^mcp__qc__/, ''), args: ev.input || {}, result: String(ev.result || ''), isError: ev.status === 'error' });
@@ -214,8 +214,9 @@ export async function runOnce(scenario, opts = {}) {
   if (out.rootId) {
     const tree = await loadThreads(threadsDir, out.rootId);
     out.events = buildTrace(tree);
-    for (const t of tree.threads.values()) for (const m of t.messages || []) if (m.role === 'assistant' && typeof m.cost === 'number') out.cost += m.cost;
-    out.grade = gradeRun(scenario, out.events, { questions: out.questions, cost: out.cost });
+    // 被停掉的对话（提前停下 / 超时）拿不到 claude 的用量：只能算出下限
+    for (const t of tree.threads.values()) for (const m of t.messages || []) if (m.role === 'assistant') { if (typeof m.cost === 'number') out.cost += m.cost; else out.costUnknown = true; }
+    out.grade = gradeRun(scenario, out.events, { questions: out.questions, cost: out.cost, costUnknown: Boolean(out.costUnknown) });
     if (out.error) out.grade.pass = false;
   }
   if (!opts.keepDir && !opts.saveTo) await rm(TMP, { recursive: true, force: true });
@@ -263,7 +264,7 @@ export function markdownReport(meta, rows, runsBy, scenarios) {
   L.push(`# Agent 行为评测 ${meta.stamp}`, '');
   L.push(`- 模型：${meta.model || '（agents.json / 默认）'}，思考深度：${meta.effort || '（默认）'}，claude ${meta.claudeVersion || '?'}`);
   L.push(`- agents.json：${meta.agentsFile}（${meta.agentsHash}），workspace/CLAUDE.md：${meta.claudeMdHash}，git ${meta.git || '?'}`);
-  L.push(`- 每个场景 ${meta.runs} 次；总用量 $${meta.cost.toFixed(2)}；用时 ${Math.round(meta.durationMs / 60000)} 分钟`);
+  L.push(`- 每个场景 ${meta.runs} 次；总用量${meta.costUnknown ? '至少' : ''} $${meta.cost.toFixed(2)}${meta.costUnknown ? '（提前停下的对话拿不到用量）' : ''}；用时 ${Math.round(meta.durationMs / 60000)} 分钟`);
   if (meta.baseline) L.push(`- 对比：${meta.baseline}`);
   const bad = rows.filter((r) => r.rate < 1);
   L.push('', `**结果：${rows.length - bad.length}/${rows.length} 项检查每次都通过**${rows.some((r) => r.regressed) ? `；**${rows.filter((r) => r.regressed).length} 项比上次变差**` : ''}`, '');
@@ -276,7 +277,7 @@ export function markdownReport(meta, rows, runsBy, scenarios) {
   for (const s of scenarios) {
     for (const [i, r] of (runsBy[s.id] || []).entries()) {
       const hs = r.events.filter((e) => e.kind === 'tool' && e.tool === 'handoff').map((e) => `${e.agent}→${e.args.agent}${e.args.wait ? '' : '(不等)'}`);
-      L.push(`- **${s.id} #${i + 1}**：${r.grade && r.grade.pass ? '全部通过' : '有没通过的'}；$${r.cost.toFixed(2)}，${Math.round(r.durationMs / 1000)} 秒；交接 ${hs.join('，') || '无'}${r.questions.length ? `；问了用户 ${r.questions.length} 次` : ''}${r.grade && r.grade.unscripted.length ? `；没预设结果的工具：${r.grade.unscripted.join('、')}` : ''}${r.error ? `；出错：${r.error}` : ''}${r.saved ? `；记录：${r.saved}` : ''}`);
+      L.push(`- **${s.id} #${i + 1}**：${r.grade && r.grade.pass ? '全部通过' : '有没通过的'}；${r.costUnknown ? '至少 ' : ''}$${r.cost.toFixed(2)}，${Math.round(r.durationMs / 1000)} 秒；交接 ${hs.join('，') || '无'}${r.questions.length ? `；问了用户 ${r.questions.length} 次` : ''}${r.grade && r.grade.unscripted.length ? `；没预设结果的工具：${r.grade.unscripted.join('、')}` : ''}${r.error ? `；出错：${r.error}` : ''}${r.saved ? `；记录：${r.saved}` : ''}`);
     }
   }
   return L.join('\n');
@@ -374,7 +375,7 @@ async function main() {
       r.saved = path.relative(ROOT, saveTo);
       (runsBy[s.id] = runsBy[s.id] || [])[i] = r;
       const bad = r.grade ? r.grade.checks.filter((c) => !c.pass) : [];
-      console.log(`  ${r.error ? `出错：${r.error}` : bad.length ? `✗ ${bad.map((c) => c.id).join('、')}` : '✓ 全部通过'}（$${r.cost.toFixed(2)}，${Math.round(r.durationMs / 1000)} 秒）`);
+      console.log(`  ${r.error ? `出错：${r.error}` : bad.length ? `✗ ${bad.map((c) => c.id).join('、')}` : '✓ 全部通过'}（${r.costUnknown ? '至少 ' : ''}$${r.cost.toFixed(2)}，${Math.round(r.durationMs / 1000)} 秒）`);
     }
   };
   await Promise.all(Array.from({ length: Math.min(parallel, jobs.length) }, worker));
@@ -388,18 +389,19 @@ async function main() {
     stamp, runs, model, effort, claudeVersion, git,
     agentsFile: path.relative(ROOT, agentsPath), agentsHash: fileHash(agentsPath), claudeMdHash: fileHash(path.join(ROOT, 'workspace', 'CLAUDE.md')),
     cost: Object.values(runsBy).flat().reduce((a, r) => a + (r.cost || 0), 0), durationMs: Date.now() - t0,
+    costUnknown: Object.values(runsBy).flat().some((r) => r.costUnknown),
     baseline: baselineFile ? path.relative(ROOT, path.resolve(baselineFile)) : null,
   };
   await mkdir(outDir, { recursive: true });
   const jsonFile = path.join(outDir, `${stamp}.json`);
   const mdFile = path.join(outDir, `${stamp}.md`);
-  const slim = Object.fromEntries(Object.entries(runsBy).map(([k, v]) => [k, v.map((r) => ({ grade: r.grade, cost: r.cost, durationMs: r.durationMs, error: r.error, questions: r.questions, saved: r.saved }))]));
+  const slim = Object.fromEntries(Object.entries(runsBy).map(([k, v]) => [k, v.map((r) => ({ grade: r.grade, cost: r.cost, costUnknown: Boolean(r.costUnknown), durationMs: r.durationMs, error: r.error, questions: r.questions, saved: r.saved }))]));
   await writeFile(jsonFile, JSON.stringify({ meta, rows, runs: slim }, null, 1));
   await writeFile(mdFile, markdownReport(meta, rows, runsBy, scenarios));
 
   console.log('\n结果：');
   for (const r of rows) console.log(`  ${status(r.rate).padEnd(5)} ${r.passed}/${r.runs}  ${r.scenario} / ${r.check}${r.regressed ? '  ↓ 比上次差' : ''}${r.rate < 1 ? `\n         ${String(r.evidence).slice(0, 200)}` : ''}`);
-  console.log(`\n总用量 $${meta.cost.toFixed(2)}。报告：${path.relative(process.cwd(), mdFile)}`);
+  console.log(`\n总用量${meta.costUnknown ? '至少' : ''} $${meta.cost.toFixed(2)}${meta.costUnknown ? '（提前停下的对话拿不到用量）' : ''}。报告：${path.relative(process.cwd(), mdFile)}`);
   console.log(`下次改了提示词或换了模型，用 --baseline ${path.relative(process.cwd(), jsonFile)} 对比。`);
   const failing = rows.filter((r) => status(r.rate) === 'fail' || r.regressed);
   process.exit(failing.length ? 1 : 0);

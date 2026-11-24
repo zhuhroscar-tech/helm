@@ -215,7 +215,8 @@ export function runCheck(c, events, extras = {}) {
     case 'maxCost': {
       // 一次运行的模型用量（所有对话加起来）不超过合格线；假模型的用量是 0
       const cost = Number(extras.cost || 0);
-      return { pass: cost <= c.max, evidence: `用量 $${cost.toFixed(2)}（合格线 $${c.max}）` };
+      // 提前停下的对话拿不到用量：已知部分超了就算不通过，否则通过并写明只是下限
+      return { pass: cost <= c.max, evidence: `用量${extras.costUnknown ? '至少' : ''} $${cost.toFixed(2)}（合格线 $${c.max}${extras.costUnknown ? '；有对话被提前停下，拿不到它的用量' : ''}）` };
     }
     case 'noUserQuestions': {
       // 自动研究：问题都由服务端自动回答，一个也不该弹给用户

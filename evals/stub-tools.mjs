@@ -161,6 +161,11 @@ export function createStub(fixturesPath) {
       if (!b) return `错误：回测 ${a.backtestId} 不存在`;
       return JSON.stringify({ backtestId: b.backtestId, name: b.name, status: 'Completed.', phase: undefined, statistics: b.statistics || DEFAULT_STATS }, null, 1);
     },
+    read_backtest: (st, a) => {
+      const b = bt(st, a.backtestId);
+      if (!b) return `错误：回测 ${a.backtestId} 不存在`;
+      return JSON.stringify({ backtestId: b.backtestId, name: b.name, status: b.status === 'error' ? 'Runtime Error' : 'Completed.', role: b.role, period: b.period, statistics: b.statistics || DEFAULT_STATS }, null, 1);
+    },
     list_backtests: (st, a) => JSON.stringify(st.backtests.filter((b) => Number(b.projectId) === Number(a.projectId)).map((b) => ({
       backtestId: b.backtestId, name: b.name, status: 'Completed.', role: b.role, period: b.period,
       sharpe: (b.statistics || DEFAULT_STATS)['Sharpe Ratio'], drawdown: (b.statistics || DEFAULT_STATS).Drawdown,
