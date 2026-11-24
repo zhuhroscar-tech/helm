@@ -306,6 +306,9 @@ async function answerAutopilot(run, q, res) {
 async function startAutopilot(body, lang) {
   if ([...apRuns.values()].some((x) => x.status === 'running')) throw httpError(409, localize(lang, '已经有一轮自动研究在跑，等它结束或先停掉。'));
   const ap = Autopilot.newRun(body || {}, { lang });
+  // 评测的快速探针：从一轮的中途开始（只在评测模式下允许，平时忽略 seed）
+  const seeded = Boolean(process.env.HELM_EVAL_FIXTURES && body && body.seed && typeof body.seed === 'object');
+  if (seeded) Autopilot.applySeed(ap, body.seed);
   const thread = newThread('mia', lang === 'en' ? `Autopilot research ${new Date(ap.createdAt).toISOString().slice(0, 16).replace('T', ' ')}` : `自动研究 ${new Date(ap.createdAt).toLocaleString('zh-CN', { hour12: false }).slice(0, 16)}`, { autopilot: ap.runId, lang });
   ap.rootThreadId = thread.id;
   apRuns.set(ap.runId, ap);
@@ -316,7 +319,7 @@ async function startAutopilot(body, lang) {
   if (timer.unref) timer.unref();
   apTimers.set(ap.runId, timer);
   try {
-    await startRun(thread, { message: Autopilot.kickoffMessage(ap), model: body && body.model, effort: body && body.effort });
+    await startRun(thread, { message: seeded ? Autopilot.progressMessage(ap, body.note) : Autopilot.kickoffMessage(ap), model: body && body.model, effort: body && body.effort });
   } catch (e) { apEnd(ap, 'error', e.message); throw e; }
   apTouch(ap);
   return { runId: ap.runId, threadId: thread.id };

@@ -2,6 +2,18 @@
 
 ## 未发布
 
+### 评测更快：快速探针、并行、--quick
+- 新增快速探针 `--suite probe`（`evals/scenarios/p01–p05`）：从一轮自动研究的中途开始，看到关键的一步就停，通常几分钟跑完。
+  - 起点由场景的 `seed`（已登记的清单、建过的项目、回测和检验结论）和 `note`（刚交回的结论）给出。
+  - 服务端只在评测模式下接受 seed。
+  - 开工说明后面接上「目前进度」：代码记的账本加补充说明。
+- `evals/run.mjs` 的改动：
+  - `stopWhen(live)`：运行中看到要检查的那一步，就停掉整棵对话树；
+  - 默认同时跑 4 个运行（`--parallel` 可改）；
+  - `--quick` 让所有 agent 用 sonnet + medium。
+- 新函数：`lib/autopilot.mjs` 的 `applySeed` 和 `progressMessage`。以后「接着上一轮做」也能用。
+- 自动研究的检查现在也加在探针上。测试：`test/autopilot.test.mjs` 和 `test/agent-eval.test.mjs` 新增从中途开始和提前停下的检查，自检 26 个场景全部通过。
+
 ### 自动研究评测：补三条检查（真实模型跑之前）
 - 每个自动研究场景新增三条自动检查：
   - 提问要标类别，会加尝试、碰验证期、标 main 的问题要有保守选项（`askTagged`）；

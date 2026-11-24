@@ -108,6 +108,14 @@ check('每个自动决定都有记录（问了什么、选了什么、为什么�
 check('英文', /Autopilot answered/.test(A.autoAnswer({ ...A.newRun({}, { lang: 'en' }) }, q('spec', OPTS)).text));
 check('开工说明写明预算和硬规则', /最多 1 个想法/.test(A.kickoffMessage(r3)) && /autopilot_plan/.test(A.kickoffMessage(r3)) && /planIdea/.test(A.kickoffMessage(r3)));
 
+/* ---- 从中途开始（快速探针） ---- */
+const r5 = A.newRun({ budget: { ideas: 2, versions: 1 } }, { now: T0 });
+A.applySeed(r5, { plan: [{ title: 'a', logic: 'x' }, { title: 'b', logic: 'y' }, { title: 'c', logic: 'z' }], projects: { 301: 1 }, backtests: { d1: { projectId: 301, period: 'dev' } }, validations: { d1: { pass: false } } });
+check('applySeed：清单按预算截断、进度写进运行记录', r5.plan.length === 2 && r5.projects[301] === 1 && r5.current === 301 && r5.validations.d1.pass === false);
+check('applySeed 之后硬规则照常：版本预算已用完', no(A.guard(r5, 'create_backtest', { projectId: 301, role: 'candidate', period: 'dev' }, { now: T0 + 1 }), /版本预算/));
+check('applySeed 之后硬规则照常：第 1 个想法不能再建项目，第 2 个可以', no(A.guard(r5, 'create_project', { planIdea: 1 }, { now: T0 + 1 }), /已经建过/) && ok(A.guard(r5, 'create_project', { planIdea: 2 }, { now: T0 + 1 })));
+check('progressMessage：开工说明 + 目前进度 + 补充', /目前进度/.test(A.progressMessage(r5, '分析师说没通过')) && /分析师说没通过/.test(A.progressMessage(r5, '分析师说没通过')));
+
 /* ---- 统计检验结论落盘 → 流水线 ---- */
 const TMP = await mkdtemp(path.join(os.tmpdir(), 'helm-ap-'));
 process.env.HELM_PROJECTS_DIR = path.join(TMP, 'projects');

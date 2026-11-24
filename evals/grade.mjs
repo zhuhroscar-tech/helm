@@ -258,8 +258,10 @@ export const AUTOPILOT_CHECKS = [
 
 /** 给一次运行打分。extras：{ questions } */
 export function gradeRun(scenario, events, extras = {}) {
-  const defs = [...DEFAULT_CHECKS, ...(scenario.suite === 'autopilot' ? AUTOPILOT_CHECKS : [])];
-  const costCheck = scenario.suite === 'autopilot' ? [{ id: 'cost-cap', rule: 'autopilot-cost', type: 'maxCost', max: scenario.maxCost ?? 10, desc: `用量不超过 $${scenario.maxCost ?? 10}（工具秒回时的下限，真实运行会更多）` }] : [];
+  // 自动研究的场景（完整的 autopilot 和快速探针 probe）都带上自动研究的检查
+  const isAp = Boolean(scenario.autopilot) || scenario.suite === 'autopilot' || scenario.suite === 'probe';
+  const defs = [...DEFAULT_CHECKS, ...(isAp ? AUTOPILOT_CHECKS : [])];
+  const costCheck = isAp ? [{ id: 'cost-cap', rule: 'autopilot-cost', type: 'maxCost', max: scenario.maxCost ?? 10, desc: `用量不超过 $${scenario.maxCost ?? 10}（工具秒回时的下限，真实运行会更多）` }] : [];
   const checks = [...(scenario.defaultChecks === false ? [] : [...defs, ...costCheck].filter((d) => !(scenario.skipDefaults || []).includes(d.id))), ...scenario.checks];
   const results = checks.map((c) => {
     let r;

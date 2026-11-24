@@ -37,6 +37,18 @@ for (const s of scenarios) {
 const problems = await selfTest(scenarios, { log: (m) => console.log(`  ${m}`) });
 check('自检：每个场景守规则的做法全部通过、违规的做法都被抓住', !problems.length, problems.join('\n'));
 
+/* ---- 2b. 快速探针：从中途开始、看到关键的一步就提前停 ---- */
+{
+  const { runOnce } = await import('../evals/run.mjs');
+  const p02 = scenarios.find((s) => s.id === 'p02-dev-near-miss');
+  const r = await runOnce(p02, { claudeBin: new URL('../evals/fake-claude.mjs', import.meta.url).pathname, fakePlan: { mia: [[{ tool: 'create_project', args: { name: 'QQQ', planIdea: 2 } }, { tool: 'list_projects', args: {} }, { tool: 'list_projects', args: {} }, { text: '继续。' }]] }, timeoutMs: 60000, keepDir: true });
+  const { readFile: rf } = await import('node:fs/promises');
+  const root = JSON.parse(await rf(`${r.dir}/data/threads/${r.rootId}.json`, 'utf8'));
+  check('探针：开工说明后面接着「目前进度」（账本 + 补充说明）', /目前进度/.test(root.messages[0].text) && /想法 1「SPY\/TLT/.test(root.messages[0].text) && /只差/.test(root.messages[0].text));
+  check('探针：从中途开始，种下的进度生效（第 2 个想法能建项目，第 1 个已经用过）', r.events.some((e) => e.tool === 'create_project' && !e.isError));
+  check('探针：看到要检查的那一步就提前停下', r.stoppedEarly === true);
+}
+
 /* ---- 3. 工具替身 ---- */
 const TMP = await mkdtemp(path.join(os.tmpdir(), 'helm-eval-stub-'));
 try {

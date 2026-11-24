@@ -29,10 +29,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /* ---------------- 场景 ---------------- */
 
-// 场景分两组：core（日常，s*.mjs）和 autopilot（自动研究，a*.mjs，一轮花用量多，默认不跑）
+// 场景分三组：core（日常，s*.mjs）、probe（自动研究的快速探针，p*.mjs：从一轮的中途开始、看到关键的一步就停）、
+// autopilot（完整的自动研究，a*.mjs：每个都走完整轮，慢而且贵，默认不跑）
 export async function loadScenarios(filter = null, { suite = 'all' } = {}) {
   const dir = path.join(HERE, 'scenarios');
-  const files = (await readdir(dir)).filter((f) => /^[sa]\d+.*\.mjs$/.test(f)).sort();
+  const files = (await readdir(dir)).filter((f) => /^[sap]\d+.*\.mjs$/.test(f)).sort();
   const out = [];
   for (const f of files) {
     const m = await import(pathToFileURL(path.join(dir, f)).href);
@@ -146,17 +147,30 @@ export async function runOnce(scenario, opts = {}) {
 
     // 用户的角色：问题按场景回答（默认跳过 = 按推荐的第一个选项）
     let rootEnded = false;
+    const live = [];
     const ends = new Set();
     unsub = subscribe(BASE, async (ev) => {
       if (ev.type === 'question_request' && ev.question) {
         const q = ev.question;
         // 自动研究的场景：问题本该由服务端自动回答，弹到这里就记一笔（检查 no-user-questions 会不通过），再跳过让它继续
-        const body = typeof scenario.answer === 'function' && scenario.suite !== 'autopilot' ? scenario.answer(q) : { skip: true };
+        const body = typeof scenario.answer === 'function' && !scenario.autopilot ? scenario.answer(q) : { skip: true };
         out.questions.push({ agent: q.agent, questions: (q.questions || []).map((x) => x.question), answered: body.skip ? '跳过（按推荐）' : JSON.stringify(body) });
         log(`    ${q.agent} 用 ask_user 问了 ${q.questions.length} 个问题 → ${body.skip ? '按推荐' : '按场景回答'}`);
         await request(BASE, 'POST', `/api/questions/${q.id}`, { headers: H, body }).catch(() => {});
       }
       if (ev.type === 'run_start' && ev.threadId !== out.rootId) log(`    → ${ev.agent} 开始${ev.from ? `（${ev.from.agent} 交接来的）` : ''}`);
+      // 快速探针：看到想看的那一步就停（scenario.stopWhen(live)），不等整轮走完
+      if (scenario.stopWhen && out.rootId && !out.stoppedEarly) {
+        if (ev.type === 'tool_done') live.push({ kind: 'tool', root: ev.threadId === out.rootId, threadId: ev.threadId, tool: String(ev.name || '').replace(/^mcp__qc__/, ''), args: ev.input || {}, result: String(ev.result || ''), isError: ev.status === 'error' });
+        if (ev.type === 'run_start' && ev.threadId !== out.rootId) live.push({ kind: 'child', agent: ev.agent, from: ev.from || null });
+        let hit = false;
+        try { hit = Boolean(scenario.stopWhen(live)); } catch { hit = false; }
+        if (hit) {
+          out.stoppedEarly = true;
+          log('    （看到要检查的那一步了，提前停下）');
+          await request(BASE, 'POST', '/api/chat/stop', { headers: H, body: { threadId: out.rootId } }).catch(() => {});
+        }
+      }
       if (ev.type === 'run_end') { ends.add(ev.threadId); if (ev.threadId === out.rootId) rootEnded = true; }
     });
     await sleep(100);
@@ -164,8 +178,9 @@ export async function runOnce(scenario, opts = {}) {
     const mo = { ...(opts.model ? { model: opts.model } : {}), ...(opts.effort ? { effort: opts.effort } : {}) };
     let chat;
     if (scenario.autopilot) {
-      // 自动研究：和网页上点「自动研究」一样，由服务端生成开工说明（lib/autopilot.mjs kickoffMessage）
-      chat = await request(BASE, 'POST', '/api/autopilot/start', { headers: H, body: { ...scenario.autopilot, ...mo } });
+      // 自动研究：和网页上点「自动研究」一样，由服务端生成开工说明（lib/autopilot.mjs kickoffMessage）；
+      // 快速探针带 seed / note，从一轮的中途开始（服务端只在评测模式下接受 seed）
+      chat = await request(BASE, 'POST', '/api/autopilot/start', { headers: H, body: { ...scenario.autopilot, ...(scenario.seed ? { seed: scenario.seed, note: scenario.note || '' } : {}), ...mo } });
     } else {
       const message = typeof scenario.message === 'function' ? scenario.message() : scenario.message;
       chat = await request(BASE, 'POST', '/api/chat', { headers: H, body: { agent: scenario.agent || 'mia', message, context: scenario.context || undefined, ...mo } });
@@ -175,7 +190,7 @@ export async function runOnce(scenario, opts = {}) {
     out.autopilotRunId = chat.json.runId || null;
     if (ends.has(out.rootId)) rootEnded = true;
 
-    const timeoutMs = opts.timeoutMs || scenario.timeoutMs || (scenario.suite === 'autopilot' ? 150 : 40) * 60 * 1000;
+    const timeoutMs = opts.timeoutMs || scenario.timeoutMs || ({ autopilot: 150, probe: 12 }[scenario.suite] || 40) * 60 * 1000;
     while (Date.now() - t0 < timeoutMs) {
       if (rootEnded) {
         const list = (await request(BASE, 'GET', '/api/threads')).json || [];
@@ -324,14 +339,17 @@ async function main() {
     return;
   }
 
-  const runs = Math.max(1, Number(argVal(args, '--runs') || (suite === 'autopilot' ? 1 : 3)));
-  const model = argVal(args, '--model');
-  const effort = argVal(args, '--effort');
+  const runs = Math.max(1, Number(argVal(args, '--runs') || ({ autopilot: 1, probe: 2 }[suite] || 3)));
+  // --quick：所有 agent 用更快的模型和较低的思考深度，适合改完提示词先粗查一遍（结论比默认模型更宽松，不当最终结果）
+  const quick = args.includes('--quick');
+  const model = argVal(args, '--model') || (quick ? 'sonnet' : null);
+  const effort = argVal(args, '--effort') || (quick ? 'medium' : null);
   const agentsFile = argVal(args, '--agents');
   const claudeArg = argVal(args, '--claude');
   const claudeBin = claudeArg && claudeArg.includes('/') ? path.resolve(claudeArg) : claudeArg; // 服务的工作目录不同，相对路径要先变成绝对路径
   const baselineFile = argVal(args, '--baseline');
-  const parallel = Math.max(1, Number(argVal(args, '--parallel') || 1));
+  // 默认同时跑 4 个（每个是一套独立的临时 Helm 服务）；--parallel 1 一个一个跑
+  const parallel = Math.max(1, Number(argVal(args, '--parallel') || 4));
   const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '-');
   const outDir = path.resolve(argVal(args, '--out') || path.join(HERE, 'results'));
   const runDir = path.join(outDir, stamp);
@@ -339,7 +357,7 @@ async function main() {
   try { claudeVersion = execFileSync(claudeBin || process.env.CLAUDE_BIN || 'claude', ['--version'], { encoding: 'utf8', timeout: 15000 }).trim(); } catch { /* 没装 */ }
   if (!claudeVersion) { console.error('找不到 claude 命令：先装好 Claude Code 并登录（或用 --claude 指定路径）。不调模型的自检用 --selftest。'); process.exit(2); }
 
-  if (suite !== 'core' && !filter) console.log('注意：自动研究场景一轮可能花 5–20 美元、一两个小时；先用 --runs 1。');
+  if (suite === 'autopilot' && !filter) console.log('注意：完整的自动研究场景每个都要走完整轮，慢而且贵；日常先用 --suite probe（快速探针，几分钟）。');
   console.log(`Agent 行为评测：${scenarios.length} 个场景 × ${runs} 次${model ? `，模型 ${model}` : ''}${effort ? `，思考 ${effort}` : ''}${agentsFile ? `，agents=${agentsFile}` : ''}`);
   console.log('每次运行都会花模型用量。Ctrl+C 可以随时停。\n');
   const runsBy = {};
