@@ -79,7 +79,12 @@ r2.cost = 6;
 check('超过用量上限：不能开新工作', no(A.guard(r2, 'autopilot_plan', plan, { now: T0 + 1000 }), /用量/));
 check('只读工具不受上限影响', ok(A.guard(r2, 'read_backtest', { projectId: 1 }, { now: T0 + 11 * 60000 })));
 r2.status = 'stopped';
-check('运行结束后：一律拒绝', no(A.guard(r2, 'read_backtest', {}, { now: T0 }), /结束/));
+check('运行结束后：不能开新的工作', no(A.guard(r2, 'create_project', { planIdea: 1 }, { now: T0 }), /结束/) && no(A.guard(r2, 'handoff', { agent: 'engineer' }, { now: T0 }), /结束/));
+check('运行结束后：还能查看结果（只读工具）', ok(A.guard(r2, 'read_backtest', {}, { now: T0 })) && ok(A.guard(r2, 'list_backtests', {}, { now: T0 })));
+r2.status = 'error'; r2.cost = 0;
+check('出错的一轮可以接着做：状态恢复、时间上限从现在重新算', A.resume(r2, { now: T0 + 60 * 60000 }) && r2.status === 'running' && ok(A.guard(r2, 'autopilot_plan', plan, { now: T0 + 65 * 60000 })));
+r2.status = 'done';
+check('正常结束的不接着做', A.resume(r2) === false && r2.status === 'done');
 
 /* ---- 自动回答 ---- */
 const r3 = A.newRun({ budget: { ideas: 1, versions: 1 } }, { now: T0 });

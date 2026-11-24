@@ -324,6 +324,18 @@ async function startAutopilot(body, lang) {
   apTouch(ap);
   return { runId: ap.runId, threadId: thread.id };
 }
+async function resumeAutopilot(thread) {
+  const ap = apRuns.get(thread.autopilot) || await apLoad(thread.autopilot);
+  if (!ap || ap.rootThreadId !== thread.id || ap.status === 'running' || !Autopilot.RESUMABLE.has(ap.status)) return;
+  if ([...apRuns.values()].some((x) => x.status === 'running' && x.runId !== ap.runId)) return; // 另一轮在跑：这条消息就当普通追问（只能看结果）
+  Autopilot.resume(ap);
+  apRuns.set(ap.runId, ap);
+  clearTimeout(apTimers.get(ap.runId));
+  const timer = setTimeout(() => { if (ap.status === 'running') { stopRunTree(ap.rootThreadId); apEnd(ap, 'stopped', 'time'); } }, ap.caps.minutes * 60000);
+  if (timer.unref) timer.unref();
+  apTimers.set(ap.runId, timer);
+  apTouch(ap);
+}
 // MCP（qc-mcp.mjs）在自动研究的对话里，每次调用工具之前问 guard、成功之后报 record
 async function handleAutopilotTool(req, res, kind) {
   if (!safeEqual(req.headers['x-helm-token'], HANDOFF_TOKEN)) return sendJson(res, 403, { error: 'bad token' });
@@ -1810,6 +1822,8 @@ const server = http.createServer(async (req, res) => {
       if (!message) return sendJson(res, 400, { error: '消息为空' });
       let thread = body.threadId ? await loadThread(body.threadId) : null;
       if (!thread) thread = newThread(agentById(body.agent) ? body.agent : AGENTS[0].id, message);
+      // 自动研究的根对话：那一轮出错 / 中断 / 被停掉之后再发消息（比如换了模型重发）= 从原来的进度接着做
+      if (thread.autopilot && !runs.has(thread.id)) await resumeAutopilot(thread);
       thread.lang = langOf(req, body); // 这条消息用哪种语言回复（zh = 现有行为；en = 提示词里追加一句「用 English 回复」）
       let run;
       try {

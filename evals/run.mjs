@@ -191,10 +191,17 @@ export async function runOnce(scenario, opts = {}) {
     if (ends.has(out.rootId)) rootEnded = true;
 
     const timeoutMs = opts.timeoutMs || scenario.timeoutMs || ({ autopilot: 150, probe: 12 }[scenario.suite] || 40) * 60 * 1000;
+    // scenario.followUps：根对话结束后，用户在同一个对话里再发的消息（比如出错后换模型重发）
+    const followUps = [...(scenario.followUps || [])];
     while (Date.now() - t0 < timeoutMs) {
       if (rootEnded) {
         const list = (await request(BASE, 'GET', '/api/threads')).json || [];
-        if (!list.some((t) => t.running)) break;
+        if (!list.some((t) => t.running)) {
+          if (!followUps.length) break;
+          rootEnded = false;
+          const fu = await request(BASE, 'POST', '/api/chat', { headers: H, body: { threadId: out.rootId, message: followUps.shift(), ...mo } });
+          if (fu.status !== 200) throw new Error(`追加消息失败：${fu.status} ${fu.text.slice(0, 200)}`);
+        }
       }
       await sleep(500);
     }

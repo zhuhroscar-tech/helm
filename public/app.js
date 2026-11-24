@@ -3736,6 +3736,7 @@ function apRunHTML(r, live) {
   const L = r.ledger || {};
   const st = live ? pill([_t('ap13'), 'st-active']) : pill(r.status === 'done' ? [_t('ap23'), 'st-done'] : r.status === 'error' ? [_t('ap25'), 'st-error'] : r.status === 'interrupted' ? [_t('ap26'), 'st-stopped'] : [_t('ap24'), 'st-stopped']);
   const reason = r.reason ? `<span class="muted">${esc(AP_REASON[r.reason] ? _t(AP_REASON[r.reason]) : r.reason)}</span>` : '';
+  const canResume = !live && ['error', 'interrupted', 'stopped'].includes(r.status);
   const nums = `<div class="ap-nums">${_t('ap16', { a: L.ideas || 0, b: r.budget.ideas, t: L.tests || 0, v: L.devVersions || 0, h: L.holdoutLooks || 0, c: Number(r.cost || 0).toFixed(2) })}${L.refusals ? ` · ${_t('ap17', { n: L.refusals })}` : ''}${L.decisions ? ` · ${_t('ap18', { n: L.decisions })}` : ''}</div>`;
   const plan = r.plan ? r.plan.map((x, i) => {
     const per = (L.per || []).find((y) => y.planIdea === i + 1);
@@ -3745,7 +3746,7 @@ function apRunHTML(r, live) {
   const dec = (r.decisions || []).length ? `<details class="ap-more"><summary>${_t('ap29')} (${r.decisions.length})</summary><ul>${r.decisions.map((d) => `<li>${agentGlyph(d.agent || 'mia')}${esc(d.question)} → <b>${esc(d.picked || '—')}</b> <span class="muted">${esc(d.why || '')}</span></li>`).join('')}</ul></details>` : '';
   const ref = (r.refusals || []).length ? `<details class="ap-more"><summary>${_t('ap30')} (${r.refusals.length})</summary><ul>${r.refusals.map((d) => `<li>${agentGlyph(d.agent || 'mia')}<code>${esc(d.tool)}</code> <span class="muted">${esc(d.message || '')}</span></li>`).join('')}</ul></details>` : '';
   const acts = `<div class="ap-acts">${r.rootThreadId ? `<button type="button" class="btn sm" data-open-thread="${esc(r.rootThreadId)}">${_t('ap15')}</button>` : ''}${live ? `<button type="button" class="btn sm danger" data-ap-stop="${esc(r.runId)}">${_t('ap14')}</button>` : ''}</div>`;
-  return `<div class="ap-run"><div class="ap-run-h">${st}${reason}<span class="muted">${agoT(r.createdAt)}</span>${acts}</div>${nums}${wait}<div class="ap-plan-h">${_t('ap27')}</div><ul class="ap-plan">${plan}</ul>${dec}${ref}</div>`;
+  return `<div class="ap-run"><div class="ap-run-h">${st}${reason}<span class="muted">${agoT(r.createdAt)}</span>${acts}</div>${canResume ? `<div class="muted">${_t('ap44')}</div>` : ''}${nums}${wait}<div class="ap-plan-h">${_t('ap27')}</div><ul class="ap-plan">${plan}</ul>${dec}${ref}</div>`;
 }
 function autopilotHTML(A) {
   if (!A || !A.runs) return '';
@@ -3913,7 +3914,8 @@ function wirePipelineAgents() {
     if (e.target.id !== 'apForm') return;
     e.preventDefault();
     const f = new FormData(e.target);
-    const body = { budget: { ideas: Number(f.get('ideas')), versions: Number(f.get('versions')) }, scope: String(f.get('scope') || 'any'), usd: Number(f.get('usd')), minutes: Number(f.get('minutes')), stopOnFind: f.get('stopOnFind') === 'on' };
+    // 模型和思考深度跟对话框里选的一致（默认「自动」）：不传的话 claude 用它自己的默认模型，账号不一定能用
+    const body = { budget: { ideas: Number(f.get('ideas')), versions: Number(f.get('versions')) }, scope: String(f.get('scope') || 'any'), usd: Number(f.get('usd')), minutes: Number(f.get('minutes')), stopOnFind: f.get('stopOnFind') === 'on', model: S.model || 'auto', effort: S.effort || 'auto' };
     if (!(await askConfirm({ title: _t('ap01'), message: _t('ap35') }))) return;
     const btn = e.target.querySelector('button[type=submit]'); if (btn) btn.disabled = true;
     try {

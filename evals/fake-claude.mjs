@@ -75,6 +75,8 @@ const sub = (v) => {
 
 let n = 0;
 for (const s of steps) {
+  // { fail: '原因' }：模拟 claude 出错结束（比如账号用不了这个模型）
+  if (s.fail !== undefined) { mcp.stdin.end(); emit({ type: 'result', session_id: sid, is_error: true, result: s.fail, total_cost_usd: 0, duration_ms: 1 }); process.exit(0); }
   if (s.text !== undefined) { emit({ type: 'assistant', message: { content: [{ type: 'text', text: s.text }] } }); continue; }
   const id = `toolu_fake_${++n}`;
   const input = sub(s.args || {});

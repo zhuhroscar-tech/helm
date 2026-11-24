@@ -83,6 +83,19 @@ check('运行记录：6 次拒绝、1 个自动决定都记下来了', ap.refusa
 check('运行记录：开工说明里写的预算和设置一致', ap.budget.ideas === 2 && ap.budget.versions === 1 && ap.caps.usd === 20);
 check('开工说明由服务端生成（含 autopilot_plan、预算）', /自动研究/.test(root.messages[0].text) && /最多 2 个想法/.test(root.messages[0].text) && /autopilot_plan/.test(root.messages[0].text));
 
+/* ---- 出错后换模型重发：从原来的进度接着做（真实情况：第一次用的模型账号用不了） ---- */
+const r3 = await runOnce({ ...scenario, id: 'autopilot-resume', autopilot: { scope: 'timing', budget: { ideas: 1, versions: 1 } }, followUps: ['（换了模型重发）'] }, {
+  claudeBin: FAKE, timeoutMs: 60000, keepDir: true,
+  fakePlan: { mia: [
+    [{ fail: 'Fable 5.1 requires usage credits.' }],
+    [{ tool: 'autopilot_plan', args: { ideas: [{ title: 'SPY/TLT 动量', logic: '趋势延续' }] } }, { tool: 'create_project', args: { name: 'SPY/TLT 动量', planIdea: 1 } }, { text: '接着做了。' }],
+  ] },
+});
+const t3 = r3.events.filter((e) => e.kind === 'tool');
+check('出错后重发：工具没有被「已经结束」拒绝，能登记、能建项目', t3.length === 2 && t3.every((e) => !e.isError), t3.map((e) => `${e.tool}:${e.isError ? e.result.slice(0, 40) : 'ok'}`).join(' '));
+const ap3 = JSON.parse(await readFile(path.join(r3.dir, 'data', 'autopilot', `${r3.autopilotRunId}.json`), 'utf8'));
+check('出错后重发：运行记录恢复后正常结束，记着恢复过 1 次', ap3.status === 'done' && ap3.resumes === 1 && Object.keys(ap3.projects).length === 1, `${ap3.status} resumes=${ap3.resumes}`);
+
 /* ---- 停止 + 接口 ---- */
 const r2 = await runOnce({ ...scenario, id: 'autopilot-stop', autopilot: { budget: { ideas: 1, versions: 1 } } }, {
   claudeBin: FAKE, timeoutMs: 60000, keepDir: true,
