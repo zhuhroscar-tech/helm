@@ -2,6 +2,15 @@
 
 ## 未发布
 
+### 做空策略
+- 以前：回测能做空但没有融券费（结果偏乐观），规格表没有做空规则，Alpaca 模拟实盘遇到空头直接报错。
+- **回测融券费**：`from helm_data import HelmShortCost`，每个交易日 `charge(self)` 按 |空头市值| × 年化费率 × 自然日/360 从现金里扣（默认 0.5%，难借股票 `hard_to_borrow` 默认 10%，可按代码单独设）；`summary()` 报合计。`engine/test_helm_short.py` 7 项。
+- **代码检查**：负权重 / 负下单数量却没用 HelmShortCost → 提醒 `short-no-borrow-cost`；现金账户做空 → `short-cash-account`。
+- **规则**：`workspace/CLAUDE.md` 新增「做空」一节（保证金账户、多空上限、融券费率、只空大盘股和宽基 ETF、要报空头腿和融券成本）；工程师、分析师、风控的提示词各加一句。
+- **Alpaca 模拟实盘**：负目标权重会开空 / 加空 / 减空 / 平空（订单带 intent，clientOrderId 结尾 `-short` / `-cover`）；先卖多和平空、再开空和买多；从多翻空只先平仓，反向仓位下次运行再开；总仓位按 Σ|权重| 缩到 1.6 倍以内；账户不能做空时一笔都不下；不是 shortable + easy_to_borrow 的股票不开空并写明；自己的空头仓位按账本算（账户里别人持仓的代码不开空）。页面上订单显示「卖空 / 平空」。
+- `test/short.test.mjs`：36 项（回测提醒、调仓计划、下单、模拟实盘资金和仓位）。纯多头的行为不变（原有 alpaca / paper-safety 测试全部通过）。
+- **未验证**：真实 LEAN 里 `cash_book["USD"].add_amount` 扣费（测试用的是假算法对象，有 `set_cash` 兜底）；真实 Alpaca 模拟盘的空单。
+
 ### Agent 行为评测（evals/）
 - 以前的测试用假 claude，只测流程（交接、停止、提问）能跑通，不测 agent 做的决定。很多规则只写在提示词里：按阶段派活、「没有信号」就停、开发期没过不跑验证期、开工前问。改了提示词或换了模型，agent 不守这些规则，测试也不会失败。
 - `npm run eval`：在临时目录起真实的 Helm 服务和真实的 claude，跑 14 个场景（总控 8 个，研究员、工程师、分析师各 2 个）。回测、想法检验、统计检验等工具返回场景写好的结果（`evals/stub-tools.mjs`，由 `mcp/qc-mcp.mjs` 在 `HELM_EVAL_FIXTURES` 设置时加载，平时不加载），handoff 和 ask_user 走真实服务。评分是确定的规则，不用模型打分（`evals/grade.mjs`）：工具调没调、调用顺序、参数、最终回答里的关键词。每个场景默认跑 3 次，报告分 pass / flaky / fail。

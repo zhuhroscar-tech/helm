@@ -24,6 +24,10 @@
     vol.update(self.time, daily_return)  # 每个交易日收盘后喂一次策略（或资产）的日收益
     w = vol.scale()                      # 仓位系数 = min(上限, 目标波动率 / 预测波动率)，再乘到原来的目标权重上
 
+    borrow = HelmShortCost(rate=0.005)   # 融券成本：LEAN 回测默认不收，做空的策略必须用它
+    borrow.charge(self)                  # 每个交易日调用一次（on_data 开头或收盘后）：按空头市值 × 年化费率 × 天数/360 从现金里扣
+    borrow.total                         # 累计扣了多少钱；on_end_of_algorithm 里 self.log(borrow.summary())
+
 文件放在 LEAN 数据目录下的 helm/ 里，由 Helm 写入。这个模块只在本地 LEAN 可用，搬到 QC 云端时要换成 QC 自己的数据。
 """
 import bisect
@@ -35,7 +39,7 @@ from datetime import datetime, timedelta
 # `from helm_data import *` 只给这几个名字（不把 os / csv 带进策略）
 # 数据都存在下划线开头的属性里（_spells、_by、_dates、_values、_avail、_rows）：整份文件包括“未来”的行都在里面，
 # 策略只能通过方法读（方法只给当时已经知道的数据）。lint_strategy.py 拒绝在 self 以外的对象上读下划线属性。
-__all__ = ["HelmUniverse", "HelmSignals", "HelmMacro", "HelmDataset", "HelmVol", "HelmBreadth"]
+__all__ = ["HelmUniverse", "HelmSignals", "HelmMacro", "HelmDataset", "HelmVol", "HelmBreadth", "HelmShortCost"]
 
 _DATA = os.environ.get("HELM_LEAN_DATA") or os.path.join(os.path.dirname(os.path.realpath(__file__)), "Lean", "Data")
 
@@ -494,6 +498,103 @@ class HelmVol:
         f = self.forecast()
         return {"days": len(self._r2), "forecast": f, "source": self.last_source, "scale": self.scale(),
                 "target": self.target, "max_leverage": self.max_leverage, "method": self.method, "horizon": self.horizon}
+
+
+class HelmShortCost:
+    """融券（借股）成本。LEAN 本地回测不收融券费，做空的策略回测会偏乐观；这个类按天把费用从现金里扣掉。
+
+    费用 = |空头市值| × 年化费率 × 距上次扣费的自然日数 / 360（美股融券按自然日计息，周末也算）。
+    rate：默认年化费率（容易借的大盘股约 0.25%–1%，默认 0.5%）；rates：{代码: 费率} 单独指定，
+    hard_to_borrow：难借的代码集合，统一用 htb_rate（默认 10%，难借股常见 5%–50%+，宁可估高）。
+    只读当时的持仓和价格，没有前视。charge() 同一天调用多次只扣一次。
+    """
+    DAY_COUNT = 360.0
+
+    def __init__(self, rate=0.005, rates=None, hard_to_borrow=None, htb_rate=0.10):
+        for name, v in (("rate", rate), ("htb_rate", htb_rate)):
+            if not (0 <= float(v) <= 2):
+                raise ValueError(f"{name} 是年化费率，比如 0.005 = 0.5%（范围 0–200%）")
+        self.rate, self.htb_rate = float(rate), float(htb_rate)
+        self.rates = {str(k).upper(): float(v) for k, v in (rates or {}).items()}
+        for k, v in self.rates.items():
+            if not (0 <= v <= 2):
+                raise ValueError(f"{k} 的费率 {v} 不合理：要写年化小数，比如 0.03 = 3%")
+        self.htb = {str(k).upper() for k in (hard_to_borrow or ())}
+        self.total = 0.0
+        self.by_symbol = {}
+        self.days_short = 0                     # 有空头持仓、扣过费的交易日数
+        self.max_short_value = 0.0              # 出现过的最大空头总市值
+        self._last = None                       # 上次扣费的日期（date）
+
+    def rate_for(self, ticker):
+        t = str(ticker).upper()
+        if t in self.rates:
+            return self.rates[t]
+        return self.htb_rate if t in self.htb else self.rate
+
+    @staticmethod
+    def _a(o, snake, pascal, default=None):
+        v = getattr(o, snake, None)
+        return getattr(o, pascal, default) if v is None else v
+
+    @staticmethod
+    def _shorts(algo):
+        """[(代码, 空头市值的绝对值)]；兼容 LEAN 的 snake_case / PascalCase 和测试用的假对象。"""
+        A = HelmShortCost._a
+        pf = A(algo, "portfolio", "Portfolio")
+        vals = pf.values() if hasattr(pf, "values") else pf.Values
+        out = []
+        for h in vals:
+            if float(A(h, "quantity", "Quantity", 0)) >= 0:
+                continue
+            v = A(h, "holdings_value", "HoldingsValue", 0)
+            sym = A(h, "symbol", "Symbol")
+            tk = A(sym, "value", "Value") or str(sym)
+            out.append((str(tk), abs(float(v))))
+        return out
+
+    @staticmethod
+    def _debit(algo, amount):
+        A = HelmShortCost._a
+        pf = A(algo, "portfolio", "Portfolio")
+        book = A(pf, "cash_book", "CashBook")
+        if book is not None:
+            try:
+                c = book["USD"]
+                A(c, "add_amount", "AddAmount")(-amount)
+                return
+            except Exception:  # noqa: BLE001  旧版 LEAN / 假对象：直接改现金
+                pass
+        A(pf, "set_cash", "SetCash")(float(A(pf, "cash", "Cash")) - amount)
+
+    def charge(self, algo, when=None):
+        """扣从上次扣费到今天的融券费，返回这次扣的金额。第一次调用按 1 天算。"""
+        d = when if when is not None else self._a(algo, "time", "Time")
+        d = datetime.strptime(_day(d), "%Y-%m-%d").date()
+        if self._last is not None and d <= self._last:
+            return 0.0
+        days = 1 if self._last is None else (d - self._last).days
+        self._last = d
+        shorts = self._shorts(algo)
+        if not shorts:
+            return 0.0
+        fee = 0.0
+        for tk, mv in shorts:
+            f = mv * self.rate_for(tk) * days / self.DAY_COUNT
+            self.by_symbol[tk] = self.by_symbol.get(tk, 0.0) + f
+            fee += f
+        self.max_short_value = max(self.max_short_value, sum(mv for _, mv in shorts))
+        self.days_short += 1
+        if fee > 0:
+            self._debit(algo, fee)
+            self.total += fee
+        return fee
+
+    def summary(self):
+        top = sorted(self.by_symbol.items(), key=lambda kv: -kv[1])[:5]
+        return (f"融券成本合计 ${self.total:,.2f}（{self.days_short} 个有空头的交易日，最大空头市值 ${self.max_short_value:,.0f}；"
+                f"默认费率 {self.rate:.2%}，难借 {self.htb_rate:.2%}）"
+                + (f"；最多的：{', '.join(f'{k} ${v:,.0f}' for k, v in top)}" if top else ""))
 
 
 def _solve(A, b):

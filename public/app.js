@@ -3064,6 +3064,8 @@ function paperRunsHTML(s, P, run) {
   </tbody></table></div>`;
 }
 
+// 买 / 卖 / 卖空 / 平空：计划里的订单带 intent，Alpaca 的订单从 clientOrderId 的结尾（-short / -cover）看出来
+const sideLabel = (o) => { const it = o.intent || (/-short$/.test(o.clientOrderId || '') ? 'short' : /-cover$/.test(o.clientOrderId || '') ? 'cover' : ''); return it === 'short' ? _t('shrt01') : it === 'cover' ? _t('shrt02') : o.side === 'buy' ? _t('k1125') : _t('k1126'); };
 let ALP_STATUS_ZH; _regT(() => { ALP_STATUS_ZH = { new: _t('k1101'), accepted: _t('k1102'), pending_new: _t('k1103'), partially_filled: _t('k0635'), filled: _t('k1104'), canceled: _t('k1105'), expired: _t('k1106'), rejected: _t('k1107'), done_for_day: _t('k1108'), replaced: _t('k1109') }; });
 let LEAN_STATUS_ZH; _regT(() => { LEAN_STATUS_ZH = { 0: _t('k1110'), 1: _t('k1101'), 2: _t('k0635'), 3: _t('k1104'), 5: _t('k1105'), 7: _t('k0633') }; });
 
@@ -3085,7 +3087,7 @@ function paperDriftHTML(s, P) {
       ${T.untargetedCount ? ` ${_t('k1120')}${(D.untargeted || []).map((u) => `${_t('k1119', { v: esc(u.symbol), v2: num(u.qty, 0), v3: pct(u.weight, false) })}`).join(_t('k0015'))}</span>` : ''}
       ${T.missingPrice && T.missingPrice.length ? ` ${_t('k1121')}${esc(T.missingPrice.join(_t('k0015')))}` : ''}</p>`;
   const rows = (D.rows || []).map((r) => `<tr class="static${r.status === 'rejected' ? ' bad' : r.status === 'none' ? ' dim' : ''}" title="${esc([r.refSource ? `${_t('k1124', { refSource: r.refSource })}` : '', r.error || ''].filter(Boolean).join(_t('k0007')))}">
-      <td class="mono">${esc(r.symbol)} ${r.side ? (r.side === 'buy' ? _t('k1125') : _t('k1126')) : ''}</td>
+      <td class="mono">${esc(r.symbol)} ${r.side ? sideLabel(r) : ''}</td>
       <td>${r.status === 'filled' || r.status === 'none' ? esc(r.statusZh) : `<span class="warn-t">${esc(r.statusZh)}</span>`}</td>
       <td class="r">${r.side ? `${num(r.filledQty, 0)}/${num(r.qty, 0)}` : '—'}</td>
       <td class="r">${r.refPrice != null ? num(r.refPrice) : '—'} → ${r.fillPrice != null ? num(r.fillPrice) : '—'}</td>
@@ -3141,7 +3143,7 @@ function paperHTML() {
     const ao = P.alpacaOrders;
     orders = `<div class="panel section"><div class="panel-head"><h2>${_t('k1177')}</h2><span class="meta">${_t('k1178')}</span></div>
       ${ao && ao.error ? `<div class="error-box">${_t('k1173', { v: esc(ao.error) })}</div>` : Array.isArray(ao) && ao.length ? `<div class="table-wrap"><table class="data"><thead><tr><th>${_t('k1174')}</th><th>${_t('k0114')}</th><th>${_t('k0626')}</th><th>${_t('k0627')}</th><th>${_t('k0632')}</th><th>${_t('k1175')}</th><th>${_t('k0269')}</th></tr></thead><tbody>
-        ${ao.map((o) => `<tr><td class="when">${esc((o.submittedAt || '').replace('T', ' ').slice(0, 16))}</td><td class="mono">${esc(o.symbol)}</td><td>${o.side === 'buy' ? _t('k1125') : _t('k1126')}</td><td class="mono">${num(o.qty, 0)}</td><td class="mono">${num(o.filledQty, 0)}</td><td class="mono">${o.filledAvgPrice != null ? `$${num(o.filledAvgPrice)}` : '—'}</td><td>${esc(ALP_STATUS_ZH[o.status] || o.status)}</td></tr>`).join('')}
+        ${ao.map((o) => `<tr><td class="when">${esc((o.submittedAt || '').replace('T', ' ').slice(0, 16))}</td><td class="mono">${esc(o.symbol)}</td><td>${sideLabel(o)}</td><td class="mono">${num(o.qty, 0)}</td><td class="mono">${num(o.filledQty, 0)}</td><td class="mono">${o.filledAvgPrice != null ? `$${num(o.filledAvgPrice)}` : '—'}</td><td>${esc(ALP_STATUS_ZH[o.status] || o.status)}</td></tr>`).join('')}
       </tbody></table></div>` : _t('k1176')}</div>`;
   } else if (L) {
     orders = `<div class="panel section"><div class="panel-head"><h2>${_t('k1181')}</h2><span class="meta">${_t('k1182')}</span></div>
