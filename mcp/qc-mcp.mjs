@@ -2,6 +2,7 @@
 // 本地 LEAN 引擎的 MCP 服务器（stdio，零依赖）
 // 工具名和 QuantConnect 的习惯保持一致，策略代码与 QC 云端完全兼容。
 import { readFileSync } from 'node:fs';
+import { postLocal } from '../lib/local-http.mjs';
 import path from 'node:path';
 import * as E from '../lib/engine.mjs';
 import { fetchMacro } from '../lib/macro.mjs';
@@ -72,12 +73,7 @@ const TAGS = {
 async function helmPost(p, body, timeoutMs = 60000) {
   const url = process.env.HELM_URL;
   if (!url || !process.env.HELM_THREAD_ID) throw new Error('只能在 Helm 网站发起的对话里使用');
-  const r = await fetch(`${url}${p}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-helm-token': process.env.HELM_TOKEN || '' },
-    body: JSON.stringify({ threadId: process.env.HELM_THREAD_ID, ...body }),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
+  const r = await postLocal(`${url}${p}`, { threadId: process.env.HELM_THREAD_ID, ...body }, { headers: { 'x-helm-token': process.env.HELM_TOKEN || '' }, timeoutMs });
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
   return j;
@@ -197,12 +193,8 @@ const TOOLS = [
       if (!url || !process.env.HELM_THREAD_ID) return '错误：handoff 只能在 Helm 网站发起的对话里使用';
       let r;
       try {
-        r = await fetch(`${url}/api/handoff`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-helm-token': process.env.HELM_TOKEN || '' },
-          body: JSON.stringify({ fromThreadId: process.env.HELM_THREAD_ID, agent, task, projectId, backtestId, wait }),
-          signal: AbortSignal.timeout(16 * 60 * 1000),
-        });
+        r = await postLocal(`${url}/api/handoff`, { fromThreadId: process.env.HELM_THREAD_ID, agent, task, projectId, backtestId, wait },
+          { headers: { 'x-helm-token': process.env.HELM_TOKEN || '' }, timeoutMs: 16 * 60 * 1000 });
       } catch (e) {
         if (e && (e.name === 'TimeoutError' || e.name === 'AbortError')) return '交接请求等待超时：对方很可能已经开始工作了。不要再交接一次（会开出重复的对话），请让用户在网站上查看对方的进度。';
         return `错误：交接请求失败（${e.message}）`;

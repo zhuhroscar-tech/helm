@@ -2,6 +2,12 @@
 
 ## 未发布
 
+### 修好：交接等超过 5 分钟就断开（影响所有 agent，不只是自动研究）
+- 现象：第一轮真实的自动研究里，总控交接研究员做想法 2 时，两次报「交接请求失败（fetch failed）」。研究员的想法检验跑到一半被停掉，总控只好再交接一次。
+- 原因：MCP 用 Node 自带的 fetch 调 Helm 服务。fetch 默认 5 分钟收不到响应头就断开（undici headersTimeout）。服务端看到请求断开，就把正在干活的子对话一起停掉。handoff（wait=true）、ask_user 等用户回答、审批都可能超过 5 分钟。已在沙盒里实测确认：fetch 在 303 秒断开，换成 node:http 后等到了 310 秒的响应。
+- 修法：新增 `lib/local-http.mjs` 的 `postLocal`（node:http，只有我们自己给的超时）。`mcp/qc-mcp.mjs` 的 handoff 和其它调 Helm 服务的请求都改用它。
+- 测试：新增 `test/local-http.test.mjs`。
+
 ### 自动研究：修好「一开工就结束」
 - **现象**：真实使用时，开工说明没指定模型，claude 用了它自己的默认模型（Fable），账号用不了，这一轮立刻以出错结束。之后在同一个对话里换模型重发，每个工具都被拒绝：「这一轮已经结束」。
 - **修法**：
