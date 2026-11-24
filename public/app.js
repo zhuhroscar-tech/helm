@@ -3243,10 +3243,44 @@ function setAlpHTML() {
     <label class="field"><span>Secret Key</span><input id="setAlpSecret" type="password" autocomplete="new-password" spellcheck="false"></label>
     <div class="set-btns"><button type="button" class="btn sm primary" data-set-alp-connect>${_t('h086')}</button></div>`;
 }
+// 更新（lib/updater.mjs）：自动更新开关、当前版本、GitHub 上的新版本、为什么暂时不能更新
+const UPD_INSTALL = 'curl -fsSL https://raw.githubusercontent.com/zhuhroscar-tech/helm/main/install.sh | bash';
+function updBlockerText(b, st) {
+  if (b === 'branch') return _t('upd_b_branch', { b: esc(st.branch || '?') });
+  if (b === 'dirty') return _t('upd_b_dirty', { n: st.dirty });
+  if (b === 'ahead') return _t('upd_b_ahead');
+  if (b === 'diverged') return _t('upd_b_diverged');
+  if (b === 'busy') return _t('upd_b_busy');
+  if (b === 'no-remote') return _t('upd_b_noremote');
+  return _t('upd_b_notgit');
+}
+function setUpdHTML() {
+  const U = S.upd;
+  if (!U) return `<p class="modal-hint">${_t('upd15')}</p>`;
+  if (U.error && !U.state) return `<p class="modal-hint">${esc(U.error)}</p>`;
+  const st = U.state || {}; const set = U.settings || {}; const av = set.available;
+  const ver = st.git ? `<span class="mono">${esc(st.short || '')}</span> · ${esc(String(st.date || '').slice(0, 10))}` : '—';
+  const news = av && av.behind ? _t('upd06', { n: av.behind }) : set.lastCheck ? _t('upd05') : '';
+  const when = set.lastCheck ? ` · ${_t('upd09')} ${esc(new Date(set.lastCheck).toLocaleString(LOC(), { hour12: false }))}` : '';
+  const list = av && av.commits && av.commits.length ? `<ul class="upd-list">${av.commits.slice(0, 5).map((c) => `<li><span class="mono">${esc(c.sha)}</span> ${esc(c.subject)}</li>`).join('')}</ul>` : '';
+  const bl = (U.blockers || []).length ? `<p class="set-line down">${_t('upd10')} ${U.blockers.map((b) => updBlockerText(b, st)).join('; ')}</p>` : '';
+  const setup = av && (av.needsSetup || av.needsApp) ? `<p class="modal-hint">${_t('upd14')} <code>${esc(UPD_INSTALL)}</code></p>` : '';
+  const err = set.lastError ? `<p class="set-line down">${esc(set.lastError)}</p>` : '';
+  return `<label class="upd-toggle"><input type="checkbox" id="setUpdAuto" data-upd-toggle ${set.autoUpdate ? 'checked' : ''}> <span>${_t('upd02')}</span></label>
+    <p class="modal-hint">${_t('upd03')}</p>
+    <dl class="set-kv"><dt>${_t('upd04')}</dt><dd>${ver}</dd><dt>GitHub</dt><dd>${news ? esc(news) : '—'}${when}</dd></dl>${list}${bl}${setup}${err}
+    <div class="set-btns"><button type="button" class="btn sm" data-upd-check>${_t('upd07')}</button>${av && av.behind ? `<button type="button" class="btn sm primary" data-upd-apply ${(U.blockers || []).length ? 'disabled' : ''}>${_t('upd08')}</button>` : ''}</div>`;
+}
+async function loadUpdate() {
+  try { S.upd = await api('/api/update/status'); } catch (e) { S.upd = { error: e.message }; }
+  renderSettings('upd');
+}
+
 function settingsBodyHTML() {
   return `<h2 id="setH">${_t('ux049')}</h2>
     <section class="set-sec" id="setAi" aria-labelledby="setAiH"><h3 id="setAiH">${_t('h092')}</h3><div class="set-in">${setAiHTML()}</div></section>
     <section class="set-sec" id="setAlp" aria-labelledby="setAlpH"><h3 id="setAlpH">${_t('h081')}</h3><div class="set-in">${setAlpHTML()}</div></section>
+    <section class="set-sec" id="setUpd" aria-labelledby="setUpdH"><h3 id="setUpdH">${_t('upd01')}</h3><div class="set-in">${setUpdHTML()}</div></section>
     <section class="set-sec" id="setLook" aria-labelledby="setLookH"><h3 id="setLookH">${_t('ux056')}</h3><div class="set-in side-foot">${lookRowsHTML()}</div></section>
     <div class="modal-actions"><button type="button" class="btn" data-onb-open>${_t('ob080')}</button><button type="button" class="btn primary" data-set-close>${_t('ux057')}</button></div>`;
 }
@@ -3256,6 +3290,7 @@ function renderSettings(part) {
   const d = settingsDlg.d;
   if (part === 'ai') { const el = d.querySelector('#setAi .set-in'); if (el) el.innerHTML = setAiHTML(); return; }
   if (part === 'alp') { const el = d.querySelector('#setAlp .set-in'); if (el) el.innerHTML = setAlpHTML(); return; }
+  if (part === 'upd') { const el = d.querySelector('#setUpd .set-in'); if (el) el.innerHTML = setUpdHTML(); return; }
   const body = d.querySelector('.set-body'); if (body) body.innerHTML = settingsBodyHTML();
 }
 async function loadAlpacaStatus() {
@@ -3265,6 +3300,29 @@ async function loadAlpacaStatus() {
 }
 async function onSettingsClick(e, close) {
   if (e.target.closest('[data-set-close]') || e.target.closest('[data-onb-open]')) { close(); return; }
+  const ut = e.target.closest('[data-upd-toggle]');
+  if (ut) {
+    const r = await safePost('/api/update/settings', { autoUpdate: ut.checked });
+    if (!r.success) { ut.checked = !ut.checked; toast((r.errors || [r.error]).join('; ')); }
+    loadUpdate();
+    return;
+  }
+  const uc = e.target.closest('[data-upd-check]');
+  if (uc) {
+    uc.disabled = true; uc.textContent = _t('upd15');
+    const r = await safePost('/api/update/check', {});
+    if (!r.success) toast(_t('upd11', { e: r.detail || r.error || (r.errors || []).join('; ') }));
+    await loadUpdate();
+    return;
+  }
+  const ua = e.target.closest('[data-upd-apply]');
+  if (ua) {
+    ua.disabled = true;
+    const r = await safePost('/api/update/apply', {});
+    if (!r.success) toast(r.error === 'rolled-back' ? _t('upd16') : (r.blockers || []).map((b) => updBlockerText(b, (S.upd && S.upd.state) || {})).join('; ') || String(r.error || ''));
+    await loadUpdate();
+    return;
+  }
   if (e.target.closest('[data-set-ai-change]')) { openAiModal(); return; }
   const t = e.target.closest('[data-set-ai-test]');
   if (t) { t.disabled = true; await testAiUI(); S.aiCheckedAt = Date.now(); renderSettings('ai'); return; }
@@ -3295,6 +3353,7 @@ function openSettings(section) {
     settingsDlg = openModal({ cls: 'settings-dlg', labelId: 'setH', html: `<div class="cd-body set-body">${settingsBodyHTML()}</div>`, onClick: onSettingsClick, onClose: () => { settingsDlg = null; } });
     loadAi(true).then(() => { S.aiCheckedAt = Date.now(); renderSettings('ai'); });
     loadAlpacaStatus();
+    loadUpdate();
   }
   const sec = section === 'alpaca' ? settingsDlg.d.querySelector('#setAlp') : null;
   if (sec) { sec.scrollIntoView({ block: 'start' }); setTimeout(() => { const k = settingsDlg && settingsDlg.d.querySelector('#setAlpKey'); if (k) k.focus(); }, 300); }
@@ -4762,6 +4821,9 @@ function connectBus() {
       if (window.HelmDecks) HelmDecks.onEvent(ev);
     } else if (ev.type === 'universe_started') {
       if (S.route.view === 'home') loadUniverses(true);
+    } else if (ev.type === 'update_applied') {
+      toast(ev.autoRestart ? _t('upd12', { v: ev.to }) : _t('upd13', { v: ev.to }), { sticky: !ev.autoRestart });
+      if (settingsDlg) loadUpdate();
     } else if (ev.type === 'agents_changed') {
       reloadAgentList();
     } else if (ev.type === 'approval_request') {

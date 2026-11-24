@@ -37,6 +37,7 @@ const SUITES = [
   ['main-needs.test.mjs', [], []],
   ['macro.test.mjs', [], []],
   ['helm-vol.test.mjs', [], []],
+  ['updater.test.mjs', [], []],
   ['dataset.test.mjs', [], []],
   ['risk-gate.test.mjs', [], []],
   ['robust.test.mjs', [], []],

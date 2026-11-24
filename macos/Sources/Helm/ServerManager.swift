@@ -102,6 +102,12 @@ final class ServerManager {
     private func exited(code: Int32, bySignal: Bool) {
         process = nil
         if stopping { stopping = false; state = .idle; return }
+        // 退出码 75：服务刚刚从 GitHub 更新了自己（lib/updater.mjs），请求重启 → 马上用新代码重新启动
+        if code == 75 && !bySignal {
+            state = .idle
+            Task { @MainActor in await self.start() }
+            return
+        }
         let why = bySignal ? L("被信号 \(code) 终止（被别的程序或系统结束了）", "Killed by signal \(code) (ended by another program or the system)")
                            : L("退出码 \(code)", "Exit code \(code)")
         state = .failed(title: L("Helm 服务停止了", "The Helm server stopped"),

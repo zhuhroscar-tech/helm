@@ -31,6 +31,7 @@ import { decide as decideChange, scopeKey, simpleDiff } from './lib/change-polic
 import { sandboxReady, wrapAgentCommand } from './lib/exec-sandbox.mjs';
 import { ChangeStore, readTextSync, defaultRunTests } from './lib/changes.mjs';
 import { loadTasks, buildPipeline, projectTimeline } from './lib/pipeline.mjs';
+import { localState, blockers as updateBlockers, checkForUpdate, applyUpdate, readUpdateState, setAutoUpdate, startAutoUpdater, UPDATE_BRANCH } from './lib/updater.mjs';
 import { loadConfig, applyToEnv } from './lib/config.mjs';
 import { langOf, isLang, langPrompt, localize, localizeData, HEALTH_EN } from './lib/i18n.mjs';
 import { Translator, translateData, translatePrompt, parseArray } from './lib/translate.mjs';
@@ -1667,6 +1668,25 @@ const server = http.createServer(async (req, res) => {
     // 必须 await：直接 return 一个 Promise 的话，里面抛的错不会进下面的 catch，变成未处理的 rejection 把服务带崩
     if (p === '/api/handoff' && req.method === 'POST') return await handleHandoff(req, res);
     if (p === '/api/approval' && req.method === 'POST') return await handleApproval(req, res);
+    // 自动更新：状态 / 开关 / 立即检查 / 立即更新
+    if (p === '/api/update/status' && req.method === 'GET') {
+      const [st, set] = await Promise.all([localState(UPDATE_ROOT), readUpdateState(UPDATE_DATA)]);
+      return sendJson(res, 200, { success: true, branch: UPDATE_BRANCH, state: st, blockers: updateBlockers(st, { isIdle: updateIdle() }), settings: set, autoRestart: process.env.HELM_APP === '1' });
+    }
+    if (p === '/api/update/settings' && req.method === 'POST') {
+      const b = await readJsonRaw(req);
+      if (typeof b.autoUpdate !== 'boolean') return sendJson(res, 400, { error: 'autoUpdate 必须是 true 或 false' });
+      return sendJson(res, 200, { success: true, settings: await setAutoUpdate(UPDATE_DATA, b.autoUpdate) });
+    }
+    if (p === '/api/update/check' && req.method === 'POST') {
+      const r = await checkForUpdate({ root: UPDATE_ROOT, dataDir: UPDATE_DATA });
+      return sendJson(res, 200, { success: r.ok, ...r, blockers: r.state ? updateBlockers(r.state, { isIdle: updateIdle() }) : [] });
+    }
+    if (p === '/api/update/apply' && req.method === 'POST') {
+      const r = await applyUpdate({ root: UPDATE_ROOT, dataDir: UPDATE_DATA, isIdle: updateIdle() });
+      if (r.ok && r.updated) afterUpdate(r);
+      return sendJson(res, 200, { success: r.ok, ...r, autoRestart: process.env.HELM_APP === '1' });
+    }
     if (p === '/api/ask' && req.method === 'POST') return await handleAsk(req, res);
     if (p === '/api/questions' && req.method === 'GET') {
       return sendJson(res, 200, { success: true, questions: [...questions.values()].map(questionView).sort((a, b) => b.at - a.at).slice(0, 50) });
@@ -1780,14 +1800,14 @@ server.listen(PORT, HOST, () => {
 // 回测、研究和参数敏感性是独立（detached）进程，不受影响，会继续跑完。
 // 模拟实盘的每日运行在这个进程里：正在跑的那一次会被打断，下次启动后定时任务马上补跑（lib/paper.mjs 的 shouldRunNow）。
 let shuttingDown = false;
-function shutdown(sig) {
-  if (shuttingDown) return process.exit(0);
+function shutdown(sig, exitCode = 0) {
+  if (shuttingDown) return process.exit(exitCode);
   shuttingDown = true;
   console.log(L(`\n  收到 ${sig}，正在关闭 Helm …（正在跑的回测 / 研究不会被中断）`, `\n  Got ${sig}, shutting down Helm … (running backtests / research keep going)`));
   const live = Paper.runningSessions().length;
   if (live) console.log(L(`  有 ${live} 个模拟实盘正在更新，这一次会被打断；下次启动 Helm 后会自动补跑，不会重复下单。`, `  ${live} paper session(s) are updating and will be interrupted; Helm re-runs them on next start without duplicate orders.`));
-  const hardStop = setTimeout(() => process.exit(0), 3000); hardStop.unref();
-  server.close(() => process.exit(0));
+  const hardStop = setTimeout(() => process.exit(exitCode), 3000); hardStop.unref();
+  server.close(() => process.exit(exitCode));
   for (const res of bus) { try { res.end(); } catch { /* 已断开 */ } }
   for (const r of runs.values()) {
     for (const res of r.subs || []) { try { res.end(); } catch { /* 已断开 */ } }
@@ -1795,5 +1815,20 @@ function shutdown(sig) {
   }
   server.closeAllConnections?.();
 }
+/* ---------------- 自动更新（lib/updater.mjs）：从 GitHub 的 main 拿最新版本 ---------------- */
+// 测试可以用 HELM_UPDATE_ROOT 指到一个临时仓库
+const UPDATE_ROOT = process.env.HELM_UPDATE_ROOT || ROOT;
+const UPDATE_DATA = path.dirname(THREADS_DIR);
+const updateIdle = () => runs.size === 0 && ![...approvals.values()].some((a) => a.state === 'pending') && ![...questions.values()].some((q) => q.state === 'pending') && Paper.runningSessions().length === 0;
+// Mac App 里运行时（HELM_APP=1）：退出码 75 = 「已更新，请重启我」，App 会马上重新启动服务；终端里运行时提示用户自己重启
+const RESTART_CODE = 75;
+async function afterUpdate(r) {
+  broadcast({ type: 'update_applied', from: r.from, to: r.to, needsSetup: r.needsSetup, needsApp: r.needsApp, autoRestart: process.env.HELM_APP === '1' });
+  if (process.env.HELM_APP === '1') setTimeout(() => shutdown('update', RESTART_CODE), 3000);
+}
+if (!process.env.HELM_NO_AUTO_UPDATE) {
+  startAutoUpdater({ root: UPDATE_ROOT, dataDir: UPDATE_DATA, isIdle: updateIdle, onUpdated: afterUpdate, log: (m) => console.log(`  ${m}`) });
+}
+
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
