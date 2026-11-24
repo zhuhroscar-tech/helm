@@ -15,9 +15,14 @@ const check = (name, cond, extra = '') => { console.log(`${cond ? 'PASS' : 'FAIL
 
 const py = existsSync(path.join(ROOT, 'engine/.venv/bin/python')) ? path.join(ROOT, 'engine/.venv/bin/python') : 'python3';
 const tmpReg = await mkdtemp(path.join(os.tmpdir(), 'helm-timing-'));
-const r = spawnSync(py, ['-I', path.join(ROOT, 'engine', 'qlib_research', 'test_qs_timing.py')], { encoding: 'utf8', env: { ...process.env, QS_TIMING_REGISTRY: path.join(tmpReg, 'reg.jsonl') }, timeout: 300000 });
-const out = `${r.stdout || ''}${r.stderr || ''}`;
-check('engine/qlib_research/test_qs_timing.py 全部通过', r.status === 0 && /全部通过/.test(out), out.split('\n').filter((l) => /FAIL|Error/.test(l)).slice(0, 4).join(' | '));
+// Node 的 CI 没装 numpy / pandas：这时跳过（Python 3.11 engine tests 那个 CI 任务会跑它）
+if (spawnSync(py, ['-I', '-c', 'import numpy, pandas'], { encoding: 'utf8' }).status !== 0) {
+  console.log('SKIP  Python 没有 numpy / pandas，跳过 test_qs_timing.py');
+} else {
+  const r = spawnSync(py, ['-I', path.join(ROOT, 'engine', 'qlib_research', 'test_qs_timing.py')], { encoding: 'utf8', env: { ...process.env, QS_TIMING_REGISTRY: path.join(tmpReg, 'reg.jsonl') }, timeout: 300000 });
+  const out = `${r.stdout || ''}${r.stderr || ''}`;
+  check('engine/qlib_research/test_qs_timing.py 全部通过', r.status === 0 && /全部通过/.test(out), out.split('\n').filter((l) => /FAIL|Error/.test(l)).slice(0, 4).join(' | '));
+}
 
 const E = await import('../lib/engine.mjs');
 const code = `from AlgorithmImports import *
