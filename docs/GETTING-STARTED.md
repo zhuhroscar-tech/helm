@@ -25,6 +25,8 @@ Claude Code is what actually runs the agents. You don't have to use it with a Cl
 
 ## 2. Get the code and install the engine
 
+Shortcut: `curl -fsSL https://raw.githubusercontent.com/zhuhroscar-tech/helm/main/install.sh | bash` does steps 2 and 3 for you (and offers to install Claude Code and build the app). It asks before each change. The manual steps:
+
 ```
 git clone https://github.com/zhuhroscar-tech/helm.git
 cd helm
@@ -162,7 +164,7 @@ qlib is optional; see [Optional: qlib research engine](#optional-qlib-research-e
 
 ## Optional: qlib research engine
 
-Optional. Only needed for stock-picking research (idea tests, factor research) and the S&P 500 / Nasdaq 100 universes. ETF and single-ticker strategies don't need it, and you can add it later.
+Optional. Only needed for **full Qlib research** (LightGBM models, qlib backtests). Idea tests, the S&P 500 / Nasdaq 100 universes and signal exports run on Helm's own `engine/.venv` and don't need qlib. ETF and single-ticker strategies don't need it either, and you can add it later.
 
 **1. A Python with qlib and LightGBM.** Use a separate environment, `engine/.qlib-venv` (not `engine/.venv`, whose versions are pinned for LEAN). From the Helm folder, with uv (already installed by the setup script):
 

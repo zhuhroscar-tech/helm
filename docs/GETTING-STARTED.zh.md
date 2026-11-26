@@ -25,6 +25,8 @@ agent 实际上是靠 Claude Code 跑的。但不一定要有 Claude 订阅：An
 
 ## 2. 下载代码，装好回测引擎
 
+捷径：`curl -fsSL https://raw.githubusercontent.com/zhuhroscar-tech/helm/main/install.sh | bash` 会替你做完第 2、3 步（还会提议安装 Claude Code、构建 App），每一步改动之前都会先问。手动步骤如下：
+
 ```
 git clone https://github.com/zhuhroscar-tech/helm.git
 cd helm
@@ -162,7 +164,7 @@ qlib 是选装的，装法见下面的 [选装：qlib 研究引擎](#选装qlib-
 
 ## 选装：qlib 研究引擎
 
-选装，以后再装也行。只有选股研究（想法检验、因子研究）和标普 500 / 纳斯达克 100 股票池需要。ETF 和单只股票的策略用不到。
+选装，以后再装也行。只有**完整的 Qlib 研究**（LightGBM 模型、qlib 回测）需要。想法检验、标普 500 / 纳斯达克 100 股票池和导出信号都用 Helm 自己的 `engine/.venv`，不需要 qlib。ETF 和单只股票的策略也用不到。
 
 **1. 一个装了 qlib 和 LightGBM 的 Python。** 用单独的环境 `engine/.qlib-venv`，不要装进 `engine/.venv`（那里的版本是按 LEAN 锁定的）。在 Helm 文件夹里用 uv（安装脚本已经装好了）：
 

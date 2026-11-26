@@ -31,11 +31,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Install pinned numpy, pandas and scipy
-        run: python -m pip install numpy==1.26.4 pandas==2.3.3 scipy==1.13.1
+      - name: Install pinned numpy, pandas, scipy and matplotlib (no qlib)
+        run: python -m pip install numpy==1.26.4 pandas==2.3.3 scipy==1.13.1 matplotlib
       - name: Run engine tests that do not import qlib
         # test_qs_qlib.py is excluded: it imports qs_qlib, which imports qlib at module level.
+        # test_qs_light runs the idea-check / export path with qlib blocked.
         run: |
-          for t in test_qs_core test_qs_data test_qs_fund test_qs_idea; do
+          for t in test_qs_core test_qs_data test_qs_fund test_qs_idea test_qs_expr test_qs_light test_qs_timing; do
             python engine/qlib_research/$t.py
           done
+          python engine/test_helm_vol.py

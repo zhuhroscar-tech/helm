@@ -243,7 +243,9 @@ def _lean_scale(df: pd.DataFrame):
     k = 10 ** int(np.ceil(-np.log10(lo)))
     df = df.copy()
     df[["open", "high", "low", "close"]] *= k
-    df["volume"] = df["volume"] / k
+    # volume / k, rounded (not truncated) and at least 1 when there was trading: small volumes must not become 0
+    v = df["volume"]
+    df["volume"] = np.where(v > 0, np.maximum(np.rint(v / k), 1), v)
     return df, k
 
 
@@ -414,6 +416,12 @@ def cmd_export(a):
         "csv": f"helm/universes/{key}.csv",
     }
     (udir / f"{key}.json").write_text(json.dumps(summary, ensure_ascii=False, indent=1, default=str))
+    # Market breadth for timing filters (helm/breadth/<key>.csv). Optional: a failure here must not fail the export.
+    try:
+        import qs_timing as Tm
+        summary["breadth"] = Tm.build_from_lean(data, key)
+    except Exception as e:  # noqa: BLE001
+        summary["breadth"] = {"error": f"{type(e).__name__}: {e}"}
     write_status(status, status="complete", phase=None, progress=1, summary=summary)
     out(summary)
 
@@ -504,9 +512,40 @@ def cmd_signals(a):
     out(meta)
 
 
+# ---------------------------------------------------------------------------
+# market breadth (qs_timing): build from an exported universe, and an honest time-series test
+# ---------------------------------------------------------------------------
+
+def cmd_breadth_build(a):
+    import qs_timing as Tm
+    key = (a.index or "").lower()
+    if key not in INDEXES:
+        raise SystemExit(f"unknown index {a.index}")
+    out(Tm.build_from_lean(a.data, key))
+
+
+def cmd_timing_test(a):
+    import qs_timing as Tm
+    key = (a.index or "").lower()
+    if key not in INDEXES:
+        raise SystemExit(f"unknown index {a.index}")
+    breadth = Tm.read_breadth(a.data, key)
+    bench_t = INDEXES[key]["bench"]
+    bench = Tm.read_lean_daily(Path(a.data) / "equity" / "usa" / "daily" / f"{lean_symbol(bench_t)}.zip")
+    if bench is None:
+        raise SystemExit(f"本地没有基准 {bench_t} 的价格：先 fetch_data(['{bench_t}'])")
+    series = [s for s in (a.series or "").split(",") if s]
+    horizons = [int(h) for h in (a.horizons or "21,63").split(",") if h]
+    r = Tm.run_test(breadth, bench, key, series, horizons, a.dev_start, a.dev_end,
+                    extra={"project": a.project} if a.project else None)
+    r["benchmark"] = bench_t
+    r["breadth_end"] = str(breadth.index[-1].date())
+    out(r)
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["universes", "members", "export", "signals"])
+    ap.add_argument("cmd", choices=["universes", "members", "export", "signals", "breadth-build", "timing-test"])
     ap.add_argument("--index")
     ap.add_argument("--date")
     ap.add_argument("--data")
@@ -517,9 +556,15 @@ def main():
     ap.add_argument("--name")
     ap.add_argument("--feature")
     ap.add_argument("--idea-factor", help="signals: export this idea-test factor's daily scores")
+    ap.add_argument("--series", help="timing-test: comma-separated breadth series")
+    ap.add_argument("--horizons", help="timing-test: comma-separated holding days")
+    ap.add_argument("--dev-start", default="2008-01-01")
+    ap.add_argument("--dev-end")
+    ap.add_argument("--project")
     a = ap.parse_args()
     try:
-        {"universes": cmd_universes, "members": cmd_members, "export": cmd_export, "signals": cmd_signals}[a.cmd](a)
+        {"universes": cmd_universes, "members": cmd_members, "export": cmd_export, "signals": cmd_signals,
+         "breadth-build": cmd_breadth_build, "timing-test": cmd_timing_test}[a.cmd](a)
     except SystemExit:
         raise
     except Exception as e:  # noqa: BLE001

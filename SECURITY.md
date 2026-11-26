@@ -36,3 +36,9 @@ Never send real API keys, Alpaca credentials, the contents of `data/secrets/`, `
 Only the latest commit on the default branch receives security fixes. Older commits are not patched.
 
 The maintainer aims to acknowledge a report within 7 days. This is a personal project, so there is no guaranteed response time.
+
+## Phone companion (optional, off by default)
+
+Turning on **Settings → Phone companion** is the only way Helm listens beyond `127.0.0.1`. It starts a second HTTP server on port 4378, bound to all interfaces, with four routes: pair, read a summary, list inbox ideas, add an inbox idea. It serves five static files from `public/companion/` and nothing else. It has no route to agents, chat, backtests, code, keys, or paper trading, and the main server's page token is not accepted there. An idea sent from a phone is stored in `data/inbox.json` and starts nothing until you act on it in the main page.
+
+Pairing uses a 6-digit code generated on the computer (10 minutes, single use, void after 5 wrong tries) that the phone exchanges for a 256-bit token; 20 failed attempts from one address block it for 10 minutes. The connection is plain HTTP, so anyone who can watch your network traffic can read the token and the summary: use it only on a network you trust, or over a VPN such as Tailscale. "Disconnect all phones" revokes the token. Details: `docs/COMPANION.md`.

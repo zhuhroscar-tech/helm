@@ -17,6 +17,17 @@
     y2.value(self.time)                  # 当时已经公布的最新值
     y2.change(self.time, 63)             # 和约 63 个日历日前相比的变化
 
+    br = HelmBreadth("sp500")            # 市场宽度（build_breadth；股票池导出时也会自动算）：只给严格早于今天的值
+    br.value(self.time, "pct_above_200") # 站上 200 日均线的成分股比例；还有 "net_highs"、"dispersion"
+
+    vol = HelmVol(target=0.10, max_leverage=1.0)   # 波动率目标：按预测波动率调仓位（不需要任何外部数据）
+    vol.update(self.time, daily_return)  # 每个交易日收盘后喂一次策略（或资产）的日收益
+    w = vol.scale()                      # 仓位系数 = min(上限, 目标波动率 / 预测波动率)，再乘到原来的目标权重上
+
+    borrow = HelmShortCost(rate=0.005)   # 融券成本：LEAN 回测默认不收，做空的策略必须用它
+    borrow.charge(self)                  # 每个交易日调用一次（on_data 开头或收盘后）：按空头市值 × 年化费率 × 天数/360 从现金里扣
+    borrow.total                         # 累计扣了多少钱；on_end_of_algorithm 里 self.log(borrow.summary())
+
 文件放在 LEAN 数据目录下的 helm/ 里，由 Helm 写入。这个模块只在本地 LEAN 可用，搬到 QC 云端时要换成 QC 自己的数据。
 """
 import bisect
@@ -28,7 +39,7 @@ from datetime import datetime, timedelta
 # `from helm_data import *` 只给这几个名字（不把 os / csv 带进策略）
 # 数据都存在下划线开头的属性里（_spells、_by、_dates、_values、_avail、_rows）：整份文件包括“未来”的行都在里面，
 # 策略只能通过方法读（方法只给当时已经知道的数据）。lint_strategy.py 拒绝在 self 以外的对象上读下划线属性。
-__all__ = ["HelmUniverse", "HelmSignals", "HelmMacro", "HelmDataset"]
+__all__ = ["HelmUniverse", "HelmSignals", "HelmMacro", "HelmDataset", "HelmVol", "HelmBreadth", "HelmShortCost"]
 
 _DATA = os.environ.get("HELM_LEAN_DATA") or os.path.join(os.path.dirname(os.path.realpath(__file__)), "Lean", "Data")
 
@@ -236,6 +247,63 @@ class HelmMacro:
         return list(zip(self._dates[max(0, i - n + 1): i + 1], self._values[max(0, i - n + 1): i + 1])) if i >= 0 else []
 
 
+class HelmBreadth:
+    """市场宽度：用历史成分股算的每日指标（helm/breadth/<key>.csv，build_breadth 或股票池导出时生成）。
+
+    某一行的日期 d 用的是 d 当天的收盘价，所以策略在 d 当天看不到它，最早 d 的下一个交易日才能用：
+    value(when, field) 只给日期严格早于 when 的最新一行。字段：
+      pct_above_200  站上自己 200 日均线的成分股比例（0–1，越高越健康）
+      net_highs      创 52 周新高的比例减创新低的比例（-1–1）
+      dispersion     成分股 21 日收益的横截面标准差（越高市场越分化）
+    """
+
+    FIELDS = ("pct_above_200", "net_highs", "dispersion", "members")
+
+    def __init__(self, key="sp500"):
+        path = helm_path("breadth", f"{key}.csv")
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"还没有 {key} 的市场宽度：先在 Helm 里运行 build_breadth('{key}')（要先 prepare_universe('{key}')）")
+        self.key = key
+        self._dates, self._rows = [], []
+        with open(path) as f:
+            for r in csv.DictReader(f):
+                row = {}
+                for k in self.FIELDS:
+                    try:
+                        v = float(r.get(k, ""))
+                        row[k] = v if math.isfinite(v) else None
+                    except (TypeError, ValueError):
+                        row[k] = None
+                self._dates.append(r["date"][:10])
+                self._rows.append(row)
+        self.last_date = self._dates[-1] if self._dates else None
+
+    def _idx(self, when):
+        s = _day(when)
+        if _is_stale(self.last_date, s):
+            _warn_once(("breadth", self.key), f"市场宽度 {self.key} 只到 {self.last_date}，回测已经跑到 {s}：之后没有新值。请重新 prepare_universe 或 build_breadth 更新。")
+            return -1
+        return bisect.bisect_left(self._dates, s) - 1  # 严格早于今天
+
+    def value(self, when, field="pct_above_200"):
+        if field not in self.FIELDS:
+            raise ValueError(f"HelmBreadth 没有字段 {field}（可选：{', '.join(self.FIELDS)}）")
+        i = self._idx(when)
+        return self._rows[i][field] if i >= 0 else None
+
+    def as_of(self, when):
+        """(数据日期, 那一行的全部字段)：方便在日志里核对用的是哪一天。"""
+        i = self._idx(when)
+        return (self._dates[i], dict(self._rows[i])) if i >= 0 else (None, None)
+
+    def history(self, when, field="pct_above_200", n=20):
+        i = self._idx(when)
+        if i < 0:
+            return []
+        lo = max(0, i - int(n) + 1)
+        return [(self._dates[k], self._rows[k][field]) for k in range(lo, i + 1)]
+
+
 class HelmDataset:
     """自建数据集（agent 用 save_dataset 从网上整理，存在 helm/custom/<name>.csv）。没有前视：每一行都有 available_date
     （信息第一次公开的日期），查询某一天时只给 available_date 严格早于那一天的行（和 HelmMacro 日度序列同一个约定：
@@ -304,3 +372,243 @@ def _dataset_value(v):
         return x if math.isfinite(x) else v
     except ValueError:
         return v
+
+
+
+# ---------------------------------------------------------------------------
+# HelmVol：波动率预测 + 仓位系数（波动率目标）
+# ---------------------------------------------------------------------------
+# 收益难预测，波动率好预测：今天波动大，接下来几周大概率也大。按预测波动率缩放仓位，
+# 不改变策略选什么、何时买卖，只改「买多少」，目标是把回撤和波动压下来。
+#
+# 方法（事先定好，不在回测里挑）：
+#   - HAR（Corsi 2009, "A Simple Approximate Long-Memory Model of Realized Volatility"）：
+#     未来 h 天的平均日方差 ≈ b0 + b1·昨天的平方收益 + b2·过去 5 天平均 + b3·过去 22 天平均。
+#     用到「现在」为止、目标窗口已经完整发生的样本做最小二乘（扩张窗口），每 refit_every 天重估一次。
+#   - EWMA（RiskMetrics, λ = 0.94）：历史不够 min_history 天、或 HAR 给出非正 / 离谱的预测时的后备。
+#   - 历史连 EWMA 都不够（< 22 天）时 forecast() 返回 None，scale() 返回 1（不调仓位）。
+# 只能逐日 update，不能回头改历史；所有估计只用已经 update 过的数据，不可能看到未来。
+
+class HelmVol:
+    TRADING_DAYS = 252
+
+    def __init__(self, target=0.10, max_leverage=1.0, horizon=21, min_history=504, refit_every=21,
+                 method="har", ewma_lambda=0.94, min_scale=0.0):
+        if not (0 < target < 2):
+            raise ValueError("target 是年化波动率目标，比如 0.10 = 10%")
+        if not (0 < max_leverage <= 3):
+            raise ValueError("max_leverage 要在 (0, 3] 之间；现金账户不加杠杆就用 1.0")
+        if method not in ("har", "ewma"):
+            raise ValueError('method 只能是 "har" 或 "ewma"')
+        if not (1 <= int(horizon) <= 63):
+            raise ValueError("horizon（预测几天）要在 1–63 之间")
+        self.target, self.max_leverage, self.min_scale = float(target), float(max_leverage), float(min_scale)
+        self.horizon, self.min_history, self.refit_every = int(horizon), max(int(min_history), 66), max(int(refit_every), 1)
+        self.method, self.lam = method, float(ewma_lambda)
+        self._dates, self._r2 = [], []          # 已经发生的日期和平方日收益
+        self._cum = [0.0]                       # 平方收益的前缀和：_cum[i] = r2[0] + ... + r2[i-1]
+        self._A = [[0.0] * 4 for _ in range(4)]  # 最小二乘的累加量（扩张窗口：新样本只加不改）
+        self._b = [0.0] * 4
+        self._nobs, self._next_i = 0, 21
+        self._ewma = None                       # EWMA 方差
+        self._coef, self._fit_at = None, -1      # 系数用到第几个交易日为止的数据（按固定日历重估，和何时调用无关）
+        self.last_source = None                 # 最近一次预测用的是 "har" / "ewma" / None
+
+    # --- 喂数据 ---
+    def update(self, when, ret):
+        """加一个交易日的简单收益（比如 0.01 = +1%）。日期必须严格递增；NaN / None 忽略。"""
+        if ret is None:
+            return
+        r = float(ret)
+        if not math.isfinite(r) or abs(r) > 1.0:
+            return  # 单日超过 ±100% 视为坏数据
+        d = _day(when)
+        if self._dates and d <= self._dates[-1]:
+            raise ValueError(f"HelmVol.update 的日期必须递增：{d} 不晚于 {self._dates[-1]}")
+        self._dates.append(d)
+        self._r2.append(r * r)
+        self._cum.append(self._cum[-1] + r * r)
+        self._ewma = r * r if self._ewma is None else self.lam * self._ewma + (1 - self.lam) * r * r
+
+    def warmup(self, pairs):
+        """批量 update：[(日期, 日收益), ...]，常用于 initialize 里用 history 预热。"""
+        for d, r in pairs:
+            self.update(d, r)
+
+    # --- 预测 ---
+    def _features(self, i):
+        c = self._cum
+        return (1.0, self._r2[i], (c[i + 1] - c[i - 4]) / 5.0, (c[i + 1] - c[i - 21]) / 22.0)
+
+    def _fit(self, m):
+        """扩张窗口最小二乘，只用前 m 个交易日：样本 i 的目标 = 第 i+1..i+h 天的平均平方收益，
+        只加入目标窗口在第 m 天之前已经完整发生的 i。"""
+        h, c = self.horizon, self._cum
+        while self._next_i < m - h:
+            i = self._next_i
+            x = self._features(i)
+            t = (c[i + 1 + h] - c[i + 1]) / h
+            for a in range(4):
+                self._b[a] += x[a] * t
+                for bb in range(4):
+                    self._A[a][bb] += x[a] * x[bb]
+            self._nobs += 1
+            self._next_i += 1
+        if self._nobs < 60:
+            return None
+        k = 4
+        A = [row[:] for row in self._A]
+        b = self._b[:]
+        scale = max(A[a][a] for a in range(k)) or 1.0
+        for a in range(1, k):
+            A[a][a] += 1e-8 * scale  # 极小的 ridge，只为数值稳定
+        return _solve(A, b)
+
+    def forecast(self):
+        """未来 horizon 天的年化波动率预测；历史不足返回 None。"""
+        n = len(self._r2)
+        if n < 22 or self._ewma is None:
+            self.last_source = None
+            return None
+        ewma_var = self._ewma
+        var = None
+        if self.method == "har" and n >= self.min_history:
+            m = n - n % self.refit_every  # 每 refit_every 个交易日重估一次，时点只由日期序号决定
+            if m != self._fit_at:
+                self._coef, self._fit_at = self._fit(m), m
+            if self._coef is not None:
+                f = self._features(n - 1)
+                v = sum(c * x for c, x in zip(self._coef, f))
+                # 非正、或比 EWMA 离谱 10 倍以上的预测不用
+                if v > 0 and ewma_var / 10 <= v <= ewma_var * 10:
+                    var = v
+        self.last_source = "har" if var is not None else "ewma"
+        if var is None:
+            var = ewma_var
+        return math.sqrt(var * self.TRADING_DAYS)
+
+    def scale(self):
+        """仓位系数 = min(max_leverage, target / 预测波动率)，不低于 min_scale；没法预测时为 1（不调）。"""
+        f = self.forecast()
+        if f is None or f <= 0:
+            return min(1.0, self.max_leverage)
+        return max(self.min_scale, min(self.max_leverage, self.target / f))
+
+    def info(self):
+        f = self.forecast()
+        return {"days": len(self._r2), "forecast": f, "source": self.last_source, "scale": self.scale(),
+                "target": self.target, "max_leverage": self.max_leverage, "method": self.method, "horizon": self.horizon}
+
+
+class HelmShortCost:
+    """融券（借股）成本。LEAN 本地回测不收融券费，做空的策略回测会偏乐观；这个类按天把费用从现金里扣掉。
+
+    费用 = |空头市值| × 年化费率 × 距上次扣费的自然日数 / 360（美股融券按自然日计息，周末也算）。
+    rate：默认年化费率（容易借的大盘股约 0.25%–1%，默认 0.5%）；rates：{代码: 费率} 单独指定，
+    hard_to_borrow：难借的代码集合，统一用 htb_rate（默认 10%，难借股常见 5%–50%+，宁可估高）。
+    只读当时的持仓和价格，没有前视。charge() 同一天调用多次只扣一次。
+    """
+    DAY_COUNT = 360.0
+
+    def __init__(self, rate=0.005, rates=None, hard_to_borrow=None, htb_rate=0.10):
+        for name, v in (("rate", rate), ("htb_rate", htb_rate)):
+            if not (0 <= float(v) <= 2):
+                raise ValueError(f"{name} 是年化费率，比如 0.005 = 0.5%（范围 0–200%）")
+        self.rate, self.htb_rate = float(rate), float(htb_rate)
+        self.rates = {str(k).upper(): float(v) for k, v in (rates or {}).items()}
+        for k, v in self.rates.items():
+            if not (0 <= v <= 2):
+                raise ValueError(f"{k} 的费率 {v} 不合理：要写年化小数，比如 0.03 = 3%")
+        self.htb = {str(k).upper() for k in (hard_to_borrow or ())}
+        self.total = 0.0
+        self.by_symbol = {}
+        self.days_short = 0                     # 有空头持仓、扣过费的交易日数
+        self.max_short_value = 0.0              # 出现过的最大空头总市值
+        self._last = None                       # 上次扣费的日期（date）
+
+    def rate_for(self, ticker):
+        t = str(ticker).upper()
+        if t in self.rates:
+            return self.rates[t]
+        return self.htb_rate if t in self.htb else self.rate
+
+    @staticmethod
+    def _a(o, snake, pascal, default=None):
+        v = getattr(o, snake, None)
+        return getattr(o, pascal, default) if v is None else v
+
+    @staticmethod
+    def _shorts(algo):
+        """[(代码, 空头市值的绝对值)]；兼容 LEAN 的 snake_case / PascalCase 和测试用的假对象。"""
+        A = HelmShortCost._a
+        pf = A(algo, "portfolio", "Portfolio")
+        vals = pf.values() if hasattr(pf, "values") else pf.Values
+        out = []
+        for h in vals:
+            if float(A(h, "quantity", "Quantity", 0)) >= 0:
+                continue
+            v = A(h, "holdings_value", "HoldingsValue", 0)
+            sym = A(h, "symbol", "Symbol")
+            tk = A(sym, "value", "Value") or str(sym)
+            out.append((str(tk), abs(float(v))))
+        return out
+
+    @staticmethod
+    def _debit(algo, amount):
+        A = HelmShortCost._a
+        pf = A(algo, "portfolio", "Portfolio")
+        book = A(pf, "cash_book", "CashBook")
+        if book is not None:
+            try:
+                c = book["USD"]
+                A(c, "add_amount", "AddAmount")(-amount)
+                return
+            except Exception:  # noqa: BLE001  旧版 LEAN / 假对象：直接改现金
+                pass
+        A(pf, "set_cash", "SetCash")(float(A(pf, "cash", "Cash")) - amount)
+
+    def charge(self, algo, when=None):
+        """扣从上次扣费到今天的融券费，返回这次扣的金额。第一次调用按 1 天算。"""
+        d = when if when is not None else self._a(algo, "time", "Time")
+        d = datetime.strptime(_day(d), "%Y-%m-%d").date()
+        if self._last is not None and d <= self._last:
+            return 0.0
+        days = 1 if self._last is None else (d - self._last).days
+        self._last = d
+        shorts = self._shorts(algo)
+        if not shorts:
+            return 0.0
+        fee = 0.0
+        for tk, mv in shorts:
+            f = mv * self.rate_for(tk) * days / self.DAY_COUNT
+            self.by_symbol[tk] = self.by_symbol.get(tk, 0.0) + f
+            fee += f
+        self.max_short_value = max(self.max_short_value, sum(mv for _, mv in shorts))
+        self.days_short += 1
+        if fee > 0:
+            self._debit(algo, fee)
+            self.total += fee
+        return fee
+
+    def summary(self):
+        top = sorted(self.by_symbol.items(), key=lambda kv: -kv[1])[:5]
+        return (f"融券成本合计 ${self.total:,.2f}（{self.days_short} 个有空头的交易日，最大空头市值 ${self.max_short_value:,.0f}；"
+                f"默认费率 {self.rate:.2%}，难借 {self.htb_rate:.2%}）"
+                + (f"；最多的：{', '.join(f'{k} ${v:,.0f}' for k, v in top)}" if top else ""))
+
+
+def _solve(A, b):
+    """小型线性方程组（高斯消元，部分选主元）。奇异时返回 None。"""
+    n = len(b)
+    M = [row[:] + [b[i]] for i, row in enumerate(A)]
+    for c in range(n):
+        p = max(range(c, n), key=lambda r: abs(M[r][c]))
+        if abs(M[p][c]) < 1e-300:
+            return None
+        M[c], M[p] = M[p], M[c]
+        for r in range(n):
+            if r != c:
+                f = M[r][c] / M[c][c]
+                for k in range(c, n + 1):
+                    M[r][k] -= f * M[c][k]
+    return [M[i][n] / M[i][i] for i in range(n)]

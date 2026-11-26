@@ -55,6 +55,14 @@ try {
     const top = T.plateauScores(ranges, cands)[0];
     const pick = cands.find((c) => c.id === top.id).values.a;
     check('平台：挑平台中间的参数，不挑孤立尖峰', pick >= 14 && pick <= 18, `挑了 a=${pick}`);
+    const rec = T.recommendFromPlateau(ranges, cands);
+    const ra = cands.find((c) => c.id === rec.id).values.a;
+    check('推荐：在最好的平台里，取组中心', ra >= 14 && ra <= 18 && rec.group.includes(rec.id) && rec.group[0] === top.id, `推荐 a=${ra}`);
+    // 边上的点：邻居都在一侧，平台分数被抬高；推荐应落在组中间而不是边上
+    const edge = [[10, 1.2], [11, 1.25], [12, 1.3], [13, 1.35], [24, 0.5], [30, 0.2], [36, 0.1]].map(([a, s2], i) => ({ id: `e${i}`, values: { a }, sharpe: s2 }));
+    const er = T.recommendFromPlateau(ranges, edge);
+    check('推荐：平台在范围边上时不推荐最边上的点', edge.find((c) => c.id === er.id).values.a !== 10, `推荐 a=${edge.find((c) => c.id === er.id).values.a}`);
+    check('推荐：没有候选返回 null', T.recommendFromPlateau(ranges, []) === null);
   }
 
   /* ---- 参数平台：抽样统计（固定种子）。一个参数无关时也能大致找到山顶；一个运气好的孤立候选大多挑不中 ---- */
@@ -65,13 +73,14 @@ try {
     for (let i = 0; i < N; i++) {
       const c = T.sampleConfigs(ranges, 12, T.seedOf(`plateau-${i}`));
       const cands = c.map((x) => ({ ...x, sharpe: hill(x.values.fast) }));
-      if (Math.abs(cands.find((x) => x.id === T.plateauScores(ranges, cands)[0].id).values.fast - 16) > 4) miss++;
+      if (Math.abs(cands.find((x) => x.id === T.recommendFromPlateau(ranges, cands).id).values.fast - 16) > 4) miss++;
       const L = 1 + (i % (c.length - 1));
       const withLuck = cands.map((x, j) => ({ ...x, sharpe: x.sharpe + (j === L ? 2 : 0) }));
-      if (T.plateauScores(ranges, withLuck)[0].id === withLuck[L].id) lucky++;
+      if (T.recommendFromPlateau(ranges, withLuck).id === withLuck[L].id) lucky++;
     }
-    check('平台（抽样统计）：有一个无关参数时，偏离山顶超过 4 的比例 < 25%', miss / N < 0.25, `${miss}/${N}`);
-    check('平台（抽样统计）：一个候选夏普凭运气 +2 时，被挑中的比例 < 35%（单点最优是 100%）', lucky / N < 0.35, `${lucky}/${N}`);
+    // 只用平台分数最高的点时是 12.7% / 19.3%（2000 次抽样）；取组中心后约 3.5% / 13.9%
+    check('平台（抽样统计）：有一个无关参数时，推荐偏离山顶超过 4 的比例 < 8%', miss / N < 0.08, `${miss}/${N}`);
+    check('平台（抽样统计）：一个候选夏普凭运气 +2 时，被推荐的比例 < 20%（单点最优是 100%）', lucky / N < 0.2, `${lucky}/${N}`);
   }
 
   /* ---- CSCV PBO ---- */
@@ -128,8 +137,8 @@ try {
   };
   const jobs = []; const calls = [];
   E._hooks.hasLocalData = () => true;
-  // 固定抽样种子：12 个随机候选里「平台」选法有约 1/8 的抽样会落在范围边上（这是它抗孤立尖峰的代价，
-  // 见 lib/tune.mjs plateauScores），不固定的话这条测试大约每 3–8 次失败一次
+  // 固定任务编号 → 固定抽样，测试可复现。推荐改成「最好平台的组中心」后，换成随机编号也基本不会落到边上
+  // （见上面的抽样统计；以前用平台分数最高的点，约 1/8 的抽样落在范围边上，这条测试大约每 6 次失败一次）
   E._hooks.newTuneJobId = () => 'a1b2c3d4e5f60718';
   E._hooks.startTune = (p, b, j) => { jobs.push(E.runTuneJob(p, b, j)); };
   E._hooks.runLean = async (o) => {

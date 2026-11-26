@@ -63,7 +63,7 @@ const unknown = [...used.keys()].filter((k) => !(k in zh));
 check(`public/*.js 和 index.html 用到的 ${used.size} 个键都在字典里`, unknown.length === 0, unknown.slice(0, 5).map((k) => `${k}@${used.get(k)}`).join(','));
 const unusedDefault = kz.filter((k) => !used.has(k) && /^[khx]\d+$/.test(k));
 check('字典里没有没人用的自动编号键', unusedDefault.length === 0, unusedDefault.slice(0, 5).join(','));
-// 代码里除了字典、注释和语言无关的数据，不应再有汉字（见 README 的「语言」一节）
+// 代码里除了字典、注释和语言无关的数据，不应再有汉字（见 docs/ARCHITECTURE.md 的 Language 一节）
 const appSrc = await read('app.js');
 const codeCjk = appSrc.split('\n').filter((l) => CJK.test(l) && !/^\s*(\/\/|\/\*|\*)/.test(l) && CJK.test(l.replace(/\s\/\/.*$/, '').replace(/\/\*.*?\*\//g, '')));
 check('app.js 里剩下的汉字只在「服务器返回的中文数据」的匹配里', codeCjk.length <= 20, `${codeCjk.length} 行`);
@@ -75,6 +75,13 @@ const t1 = I.t('k0010', { floor: 5 });
 check('t(): 数字插值（英文）', t1 === '5 min ago', t1);
 check('t(): vars 里没有的占位符原样保留', I.t('k0010', {}).includes('{floor}'));
 check('t(): 缺键退回键名', I.t('no_such_key') === 'no_such_key');
+// 英文单复数：「{n} project(s)」按前面最近的数字占位符定；没有数字时原样保留
+check('t(): 英文单数（1 project）', I.t('hm_t1', { n: 1 }) === '1 project waiting on you', I.t('hm_t1', { n: 1 }));
+check('t(): 英文复数（3 projects）', I.t('hm_t1', { n: 3 }) === '3 projects waiting on you', I.t('hm_t1', { n: 3 }));
+check('t(): 英文 0 用复数', I.t('hm_gClosed', { n: 0 }).startsWith('0 ideas '), I.t('hm_gClosed', { n: 0 }));
+check('t(): 一句里两个 (s) 各看各的数字', I.t('k0981', { v: 1, v2: 9 }) === '· 1 project · 9 idea-check jobs', I.t('k0981', { v: 1, v2: 9 }));
+check('t(): 数字后面隔着标签也认（</b> trading day(s)）', I.t('k1091', { v: 1, v2: '', v3: '', rk: 5 }).includes('</b> trading day since freeze'), I.t('k1091', { v: 1, v2: '', v3: '', rk: 5 }));
+check('t(): 没有数字可依据时保留 (s)', I.t('hm_t1', {}).includes('project(s)') && I.t('hm_t1', { n: 'many' }).includes('project(s)'));
 check('auto + 浏览器语言 en-US → English', I.lang() === 'en' && I.locale() === 'en-US');
 I.setPref('zh');
 check('setPref(zh)：中文、zh-CN、写入 localStorage', I.lang() === 'zh' && I.locale() === 'zh-CN' && base.store.get('helm.lang') === 'zh' && I.t('k0010', { floor: 5 }) === '5 分钟前', I.t('k0010', { floor: 5 }));

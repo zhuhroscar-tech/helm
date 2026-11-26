@@ -23,30 +23,34 @@ Confirmed in `CHANGELOG.md` (2026-11-14) and the review's status updates.
 - Review section 2.5: `regimeLabels` made incremental. Python exports vectorised (`lean_lines`, `lean_rows`).
 - Monday-start backtests dropping their first day, and wrong excess annualisation when the benchmark covers only part of the period.
 
+- Flaky `test/tune.test.mjs` "recommended parameter is near the true optimum": the test was already seeded, but the cause was in the product. Recommending the top plateau point picked a range edge in about 1 in 8 samples. Helm now recommends the candidate nearest the centre of the best plateau (`recommendFromPlateau` in `lib/tune.mjs`). With random task ids the check now fails about 1 in 40 instead of 1 in 6.
+- Stopping the orchestrator now also stops the agent it is waiting on (`handoff` with `wait=true`): explicitly via `/api/chat/stop`, and also when the caller's process disappears. `wait=false` handoffs keep running. Covered in `test/handoff-flow.test.mjs`.
+
+- #6 PSR and DSR assumed i.i.d. returns: the variance term now carries a Newey-West long-run factor, floored at 1 (`neweyWestFactor` in `lib/stats.mjs`). Measured false-pass rate with AR(1) phi = 0.2: 8.5–9.2% before, 5.6–6.0% after, against 5% nominal. Trials already store Helm's own daily Sharpe.
+- #8 Paper-trading drift verdict was re-checked daily: it is now set only at fixed checkpoints (trading day 20, 60, 120, 250, then every 250) at 1.25% per side (`lib/drift.mjs`). Measured false-alarm rate over 250 days for paths that match the backtest: 42% or more before, 7.5% after.
+- Both rates are re-measured on every test run by `test/stats-calibration.test.mjs`.
+
 Owner decision, not a plan:
 
 - P0 #5 (a paper session still trading from a backtest that was later demoted). The existing session was kept running by choice. A manual "set as main" button was added instead.
 
 ## Now
 
-Checks that are missing or known to be broken.
+Nothing open. All six checks were closed on 2026-11-25.
 
-- Verify the macOS sandbox rules on a real Mac. The changelog says they were checked only as text on Linux.
-- Run full `npm test` (with LEAN) against the 2026-11-14 changes. The changelog records only the fast run.
-- Fix the flaky `test/tune.test.mjs` check "recommended parameter is near the true optimum". About 1 run in 6 recommends 11 where 14-18 is expected. The cause is the seed taken from the random task id.
-- Fix the known bug: when the orchestrator is stopped, a handoff it sent with `wait=true` keeps running. It must be stopped separately in the other agent's conversation.
-- Run the 2026-11-12 paper-trading changes (failure records, market calendar, catch-up after interruption) against real LEAN. The changelog says this has not been done.
-- Run the 2026-11-13 handoff flow once with the real `claude` command. The changelog says only a fake `claude` has been used.
-- Run the `--parameters` path to LEAN for parameter sensitivity. Only the full-mode `sensitivity.test.mjs` covers it, and it has not run.
-- Open every page (backtest, paper trading and others) in a browser after the CSP change. The changelog says only the home page and conversation panel were checked.
+- Full `npm test` with LEAN, on an Apple Silicon Mac: 2005 checks passed. The only failing file was `test/companion.test.mjs` (27 checks), a test-runner problem and not a product fault: the file was not in the list in `test/all.mjs`, so it ran inside the agent sandbox, which blocks the network it needs. It is now listed. Its re-run on a Mac is the one thing not yet seen passing there; it passes on Linux (81 checks).
+- The `--parameters` path to LEAN: full-mode `sensitivity.test.mjs`, 84 checks, including two variants run on real LEAN whose results differ from the base run.
+- The macOS sandbox rules: `test/sandbox.test.mjs`, 18 checks on a real Mac (no access to Helm's port, other ports, the internet, `.env`, `~/.ssh`, other projects, the trial ledger or the Alpaca keys; no writes outside the private temp folder).
+- Every page under the CSP: 13 pages in headless Chromium, in Chinese and English, with real project data. No CSP violations, script errors or failed requests. Not checked in the Mac app's WebKit view.
+- The 2026-11-12 paper-trading changes against real LEAN: full-mode `paper-drift.test.mjs` (22) and `paper-safety.test.mjs` (52), and one real session's log shows a recorded failure, two catch-up runs and normal daily runs after that.
+- The handoff flow with the real `claude` command, by use, not by a test run: 15 real conversations with handoffs since 2026-11-14, and the 2026-11-24 agent eval (54/54) used real `claude`.
 
 ## Next
 
 Statistics and integrity work from review sequencing weeks 2-3.
 
-- #6 PSR and DSR assume i.i.d. returns. Multiply the variance term by a Newey-West long-run factor. Also store Helm's own daily Sharpe in `trials.jsonl`. The review measured an 8.5% false-pass rate against 5% nominal with AR(1) phi = 0.2.
-- #7 Sharpe confidence interval undercovers at one year (92.6% at n = 252). Choose the block length from the data, and add the coverage harness as a slow test.
-- #8 The paper-trading drift verdict is re-checked daily, so 47% of matching paths are flagged at least once in 250 days. Move to fixed checkpoints with a multiplicity correction, or a sequential boundary.
+- #7 Sharpe confidence interval undercovers at one year (92.6% at n = 252). Choose the block length from the data, and add the coverage check to `test/stats-calibration.test.mjs`.
+- Drift (review 2.3, second part): centre the expected range on a deflated Sharpe. The source backtest is the best of N tries, so its own distribution is optimistic.
 - #9 Lint bypasses: module aliases, non-literal `getattr`, and missing readers in the deny list. Each bypass should become a failing `lint.test` case.
 - #15 Weekly FRED series all use the same 7-day release lag. Add a per-series lag table with a test.
 - #17 Storage retention: purge `.trash` after 30 days, keep qlib caches only for the latest two runs per project, and drop large order and log files from runs older than 90 days. Target: `projects/` under 200 MB.

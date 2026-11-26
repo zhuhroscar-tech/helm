@@ -42,7 +42,7 @@ FORBIDDEN_CALLS = {"open", "exec", "eval", "compile", "__import__", "globals", "
 SAFE_DUNDERS = {"__init__", "__name__", "__doc__", "__qualname__", "__module__"}
 SAFE_DUNDER_STRINGS = SAFE_DUNDERS | {"__main__", "__future__"}
 BAD_RESOLUTIONS = {"minute", "second", "tick", "hour"}
-HELM_DATA_CLASSES = {"HelmUniverse", "HelmSignals", "HelmMacro", "HelmDataset"}
+HELM_DATA_CLASSES = {"HelmUniverse", "HelmSignals", "HelmMacro", "HelmDataset", "HelmVol", "HelmBreadth", "HelmShortCost"}
 UNIVERSE_CALLS = {
     "add_universe", "add_universe_selection", "set_universe_selection",
     "AddUniverse", "AddUniverseSelection", "SetUniverseSelection",
@@ -119,6 +119,9 @@ class Linter(ast.NodeVisitor):
         self.random_uses = []
         self.seeded = False
         self.setup_seen = set()
+        self.short_nodes = []      # 明显在做空的地方：set_holdings / PortfolioTarget 负权重、下单负数量
+        self.borrow_cost = False   # 用了 HelmShortCost
+        self.cash_account = None   # AccountType.CASH 出现的位置
 
     def err(self, node, code, msg):
         self.errors.append({"file": self.fname, "line": getattr(node, "lineno", 0), "code": code, "msg_zh": msg})
@@ -173,6 +176,8 @@ class Linter(ast.NodeVisitor):
 
     # ---------- names / attributes ----------
     def visit_Name(self, node):
+        if node.id == "HelmShortCost":
+            self.borrow_cost = True
         if "__" in node.id and node.id.startswith("__") and node.id.endswith("__") and node.id not in SAFE_DUNDERS:
             self.err(node, "dunder", f"不能使用 {node.id}：双下划线的内部对象可以绕过限制，策略里不需要")
         if node.id in UNIVERSE_NAMES:
@@ -192,6 +197,10 @@ class Linter(ast.NodeVisitor):
 
     def visit_Attribute(self, node):
         a = node.attr
+        if isinstance(node.value, ast.Name) and node.value.id == "AccountType" and a.upper() == "CASH":
+            self.cash_account = self.cash_account or node
+        if a == "HelmShortCost":
+            self.borrow_cost = True
         if a.startswith("__") and a.endswith("__") and a not in SAFE_DUNDERS:
             self.err(node, "dunder", f"不能访问 .{a}：双下划线属性（如 __class__、__subclasses__）可以绕过限制，策略里不需要")
         if isinstance(node.value, ast.Name) and node.value.id == "Resolution" and a.lower() in BAD_RESOLUTIONS:
@@ -294,6 +303,14 @@ class Linter(ast.NodeVisitor):
             if v is not None and v != 0:
                 self.warn(node, "fixed-quantity",
                           f"{name} 下单数量写死为 {q.value if isinstance(q, ast.Constant) else v:g} 股：股价和资金变化后仓位会失控。改用 set_holdings(symbol, 权重) 或按 portfolio.total_portfolio_value 计算股数")
+        # 做空：负的目标权重 / 负的下单数量（-w 这种取负也算）
+        neg = lambda a: a is not None and ((num(a) is not None and num(a) < 0) or (isinstance(a, ast.UnaryOp) and isinstance(a.op, ast.USub)))
+        if name in ("set_holdings", "SetHoldings", "PortfolioTarget") and len(node.args) >= 2 and neg(node.args[1]):
+            self.short_nodes.append(node)
+        elif name in ORDER_CALLS and name not in ("sell", "Sell") and isinstance(f, ast.Attribute):
+            q = node.args[1] if len(node.args) >= 2 else next((k.value for k in node.keywords if k.arg == "quantity"), None)
+            if neg(q):
+                self.short_nodes.append(node)
         for k, (pascal, _) in SETUP_CALLS.items():
             if name in (k, pascal):
                 self.setup_seen.add(k)
@@ -388,6 +405,15 @@ def lint_source(src, fname="main.py", local_modules=(), entry=True):
             if tot > 1.0 + 1e-9:
                 L.warn(first, "holdings-over-1",
                        f"{n.name}() 里 set_holdings 的权重加起来是 {tot:g}，超过 1.0 会加杠杆，日线下单还容易因购买力不足被拒。满仓目标不要超过 0.98")
+    if L.short_nodes:
+        if not L.borrow_cost:
+            L.warn(L.short_nodes[0], "short-no-borrow-cost",
+                   "策略在做空，但没有算融券费：LEAN 回测默认不收，结果会偏乐观。from helm_data import HelmShortCost，"
+                   "initialize 里 self.borrow = HelmShortCost(rate=0.005)，每个交易日 self.borrow.charge(self)，"
+                   "on_end_of_algorithm 里 self.log(self.borrow.summary())")
+        if L.cash_account is not None:
+            L.warn(L.cash_account, "short-cash-account",
+                   "现金账户（AccountType.CASH）不能做空，空单会被拒。做空要用 AccountType.MARGIN，并在规格里写明空头上限")
     if L.random_uses and not L.seeded:
         L.warn(L.random_uses[0], "random-no-seed",
                "用了随机数但没有固定种子，每次回测结果会不一样。在 initialize 里加 random.seed(42) 或 np.random.seed(42)（或 np.random.default_rng(42)）")

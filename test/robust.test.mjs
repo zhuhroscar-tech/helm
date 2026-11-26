@@ -18,6 +18,8 @@ process.env.QS_SCRIPTS = path.join(TMP, 'qs');
 await mkdir(process.env.QS_SCRIPTS, { recursive: true });
 await writeFile(path.join(process.env.QS_SCRIPTS, 'run.sh'), '#!/bin/sh\nexit 0\n');
 await chmod(path.join(process.env.QS_SCRIPTS, 'run.sh'), 0o644);
+// 让「找 Python / qlib」这一步通过（CI 里没有 qlib），测试才会走到 run.sh 启动失败
+process.env.QS_PYTHON = process.execPath;
 
 const E = await import('../lib/engine.mjs');
 const Q = await import('../lib/qlib.mjs');

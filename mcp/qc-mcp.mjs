@@ -2,6 +2,7 @@
 // 本地 LEAN 引擎的 MCP 服务器（stdio，零依赖）
 // 工具名和 QuantConnect 的习惯保持一致，策略代码与 QC 云端完全兼容。
 import { readFileSync } from 'node:fs';
+import { postLocal } from '../lib/local-http.mjs';
 import path from 'node:path';
 import * as E from '../lib/engine.mjs';
 import { fetchMacro } from '../lib/macro.mjs';
@@ -10,6 +11,7 @@ import * as Q from '../lib/qlib.mjs';
 import * as Paper from '../lib/paper.mjs';
 import { GATE_RULES } from '../lib/stats.mjs';
 import { loadRobust, robustText } from '../lib/robust.mjs';
+import { loadAttribution } from '../lib/attribution.mjs';
 import { localize } from '../lib/i18n.mjs';
 
 // 界面语言（server.mjs 启动 agent 时通过 HELM_LANG 传进来）：en 时，工具返回的「错误：…」换成英文，其余内容不变。
@@ -18,7 +20,15 @@ const LANG = process.env.HELM_LANG === 'en' ? 'en' : 'zh';
 const userText = (text) => (LANG === 'en' && typeof text === 'string' && text.startsWith('错误：')
   ? `Error: ${text.slice(3).split('; ').map((x) => localize('en', x)).join('; ')}` : text);
 
-const AGENTS = JSON.parse(readFileSync(path.join(E.ROOT, 'agents.json'), 'utf8'));
+const AGENTS = JSON.parse(readFileSync(process.env.HELM_AGENTS_FILE || path.join(E.ROOT, 'agents.json'), 'utf8'));
+
+// 行为评测（evals/run.mjs）：设置了 HELM_EVAL_FIXTURES 时，除 handoff / ask_user 以外的工具都返回场景里写好的结果，
+// 不碰真实的引擎和项目。正常使用 Helm 时不会设置这个变量。
+// 自动研究（lib/autopilot.mjs）：服务端启动 agent 时给 HELM_AUTOPILOT=<runId>；交接出去的子对话也带着
+const AUTOPILOT = String(process.env.HELM_AUTOPILOT || '').trim() || null;
+// 工作台：server.mjs 启动的 agent 都带 HELM_URL 和 HELM_THREAD_ID；单独跑这个 MCP（没有 Helm 服务）时不检查
+const HARNESS = Boolean(process.env.HELM_URL && process.env.HELM_THREAD_ID) && process.env.HELM_HARNESS !== '0';
+const EVAL = process.env.HELM_EVAL_FIXTURES ? (await import('../evals/stub-tools.mjs')).createStub(process.env.HELM_EVAL_FIXTURES) : null;
 
 const int = { type: 'integer' };
 const str = { type: 'string' };
@@ -65,12 +75,16 @@ const TAGS = {
 async function helmPost(p, body, timeoutMs = 60000) {
   const url = process.env.HELM_URL;
   if (!url || !process.env.HELM_THREAD_ID) throw new Error('只能在 Helm 网站发起的对话里使用');
-  const r = await fetch(`${url}${p}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-helm-token': process.env.HELM_TOKEN || '' },
-    body: JSON.stringify({ threadId: process.env.HELM_THREAD_ID, ...body }),
-    signal: AbortSignal.timeout(timeoutMs),
-  });
+  const r = await postLocal(`${url}${p}`, { threadId: process.env.HELM_THREAD_ID, ...body }, { headers: { 'x-helm-token': process.env.HELM_TOKEN || '' }, timeoutMs });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+  return j;
+}
+// 工作台的检查：服务端没有这个接口（Helm 更新了代码但服务还没重启，旧服务回 403 / 404）时不拦，等重启后生效；
+// 其它失败（连不上、5xx）按「没有执行」处理
+async function harnessPost(p, body) {
+  const r = await postLocal(`${process.env.HELM_URL}${p}`, { threadId: process.env.HELM_THREAD_ID, ...body }, { headers: { 'x-helm-token': process.env.HELM_TOKEN || '' }, timeoutMs: 60000 });
+  if (r.status === 403 || r.status === 404) return null;
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
   return j;
@@ -107,7 +121,8 @@ const TOOLS = [
               question: { ...str, description: '完整的问题，以问号结尾' },
               header: { ...str, description: '很短的标签（≤12 字），比如「基准」「调仓」' },
               multiSelect: { type: 'boolean', description: '可以多选时为 true' },
-              options: { type: 'array', description: '2–4 个选项', items: { type: 'object', properties: { label: { ...str, description: '选项（1–5 个词）' }, description: { ...str, description: '选它会怎样' } }, required: ['label'] } },
+              category: { type: 'string', enum: ['spec', 'trial', 'holdout', 'promotion', 'other'], description: '问题类别：spec=规则说明的歧义；trial=会增加尝试次数（再测、换参数、多跑一版）；holdout=涉及验证期；promotion=标 main / 开模拟；other。自动研究按它自动回答' },
+              options: { type: 'array', description: '2–4 个选项', items: { type: 'object', properties: { label: { ...str, description: '选项（1–5 个词）' }, description: { ...str, description: '选它会怎样' }, conservative: { type: 'boolean', description: '不增加尝试、不碰验证期的那个选项（比如「不重测」「停下」）标 true' } }, required: ['label'] } },
             },
             required: ['question', 'options'],
           },
@@ -122,6 +137,25 @@ const TOOLS = [
       } catch (e) {
         return `错误：${e.message}`;
       }
+    },
+  },
+  {
+    name: 'autopilot_plan',
+    description: '自动研究专用：登记一批要试的想法（一个方向）。开工时先登记第一批，任何建项目、想法检验、回测都要在登记之后。每个想法写一句话（title）、经济逻辑（logic）、类型（kind）和怎样算失败（failIf）。每批最多 3 个，想法总数不超过预算。一批之内按顺序做，不换题、不加题；这一批都开始做了、还有方向和想法预算，可以再调用一次开新方向（direction.name + direction.whyNew：为什么是不同的收益来源）。每一批先过独立审核员，被筛掉的换掉再登记，不占预算。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        direction: { type: 'object', description: '这一批的方向（第一批可省略，换方向时必填）', properties: { name: { ...str, description: '方向名，比如「宏观利率」「财报质量变化」' }, whyNew: { ...str, description: '为什么是不同的收益来源（不是同一个想法换参数 / 窗口 / 股票池）' }, data: { ...str, description: '主要用什么数据' } } },
+        ideas: {
+          type: 'array', description: '想法清单（按要做的顺序）',
+          items: { type: 'object', properties: { title: { ...str, description: '一句话想法' }, logic: { ...str, description: '经济逻辑：为什么应该有效' }, kind: { type: 'string', enum: ['stock', 'timing'], description: 'stock=选股，timing=ETF 择时' }, failIf: { ...str, description: '怎样算失败' } }, required: ['title', 'logic'] },
+        },
+      },
+      required: ['ideas'],
+    },
+    async run({ ideas }) {
+      if (!process.env.HELM_AUTOPILOT) return '错误：autopilot_plan 只能在自动研究里用';
+      return `已登记 ${ideas.length} 个想法：\n${ideas.map((x, i) => `- ${x.title}`).join('\n')}\n按顺序做；建项目时 create_project 带 planIdea（想法在整个清单里的序号，从 1 开始，接着上一批往下数）。`;
     },
   },
   {
@@ -171,12 +205,8 @@ const TOOLS = [
       if (!url || !process.env.HELM_THREAD_ID) return '错误：handoff 只能在 Helm 网站发起的对话里使用';
       let r;
       try {
-        r = await fetch(`${url}/api/handoff`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-helm-token': process.env.HELM_TOKEN || '' },
-          body: JSON.stringify({ fromThreadId: process.env.HELM_THREAD_ID, agent, task, projectId, backtestId, wait }),
-          signal: AbortSignal.timeout(16 * 60 * 1000),
-        });
+        r = await postLocal(`${url}/api/handoff`, { fromThreadId: process.env.HELM_THREAD_ID, agent, task, projectId, backtestId, wait },
+          { headers: { 'x-helm-token': process.env.HELM_TOKEN || '' }, timeoutMs: 16 * 60 * 1000 });
       } catch (e) {
         if (e && (e.name === 'TimeoutError' || e.name === 'AbortError')) return '交接请求等待超时：对方很可能已经开始工作了。不要再交接一次（会开出重复的对话），请让用户在网站上查看对方的进度。';
         return `错误：交接请求失败（${e.message}）`;
@@ -187,6 +217,56 @@ const TOOLS = [
       if (!wait) return `已交给${j.agentName}，threadId=${j.threadId}。对方已经开始工作，用户可以点网站右侧的「${j.agentName}」标签实时查看。`;
       if (j.error && !j.text) return `错误：${j.agentName}运行出错（threadId=${j.threadId}）：${j.error}`;
       return `${j.agentName}已完成，threadId=${j.threadId}${j.stopped ? '（用户中途停止了它）' : ''}。它的最终回答：\n\n${j.text || '（没有文字回答）'}`;
+    },
+  },
+  {
+    name: 'subagent',
+    description: `并行派出几个子 agent，等它们都做完，一起拿回结果。适合几件互不依赖的事同时查（比如同时让两个子 agent 各读一个回测、各查一篇文献）；有先后依赖的阶段仍然用 handoff。mode=scout 是只读的（只能读项目、回测、研究结果和上网查，不能改任何东西）；mode=worker 有对方的完整权限（只有调度者能用）。能派给谁、一次几个、一共几个由你的工作台决定，超了会被拒绝。子 agent 看不到你的对话，也不能再往下派：每个 task 都要完整自洽（projectId / backtestId、要回答什么、怎样算完成）。可选 agent：${AGENTS.map((a) => `${a.id}（${a.name}）`).join('、')}。`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tasks: {
+          type: 'array', description: '子任务（1–3 个，同时运行）',
+          items: { type: 'object', properties: { agent: { type: 'string', enum: AGENTS.map((a) => a.id) }, task: { ...str, description: '完整的任务说明' }, mode: { type: 'string', enum: ['scout', 'worker'], description: 'scout=只读（默认）；worker=完整权限' }, projectId: { ...int, description: '相关项目（可选）' }, backtestId: { ...str, description: '相关回测（可选）' } }, required: ['agent', 'task'] },
+        },
+      },
+      required: ['tasks'],
+    },
+    async run({ tasks }) {
+      let j;
+      try { j = await helmPost('/api/subagent', { tasks }, 16 * 60 * 1000); } catch (e) {
+        if (e && (e.name === 'TimeoutError' || e.name === 'AbortError')) return '子 agent 的请求等待超时：它们很可能还在运行。不要再派一次，请让用户在网站上查看进度。';
+        return `错误：${e.message}`;
+      }
+      return (j.results || []).map((r, i) => {
+        const head = `### 子任务 ${i + 1}：${r.agentName}（${r.mode}）${r.threadId ? `，threadId=${r.threadId}` : ''}`;
+        if (!r.threadId) return `${head}\n没有启动：${r.error}`;
+        if (r.stillRunning) return `${head}\n还在运行（已等约 14 分钟）。不要再派一次；先用已有的结果，或告诉用户到网站上查看。`;
+        if (r.error && !r.text) return `${head}\n运行出错：${r.error}`;
+        return `${head}${r.stopped ? '（中途被停止）' : ''}\n${r.text || '（没有文字回答）'}`;
+      }).join('\n\n');
+    },
+  },
+  {
+    name: 'research_direction',
+    description: '研究方向的账本（一条研究线共用一份，Helm 在代码里记和限制）。action=read：看已经登记的方向、其他 agent 的建议、以前测过什么、手上有什么数据——定方向之前先读。action=set：登记一个方向（name、thesis 经济逻辑、1–3 个事先定好的假设，每个写明 failIf；第二个方向起要写 whyNew），登记后才开始检验，想法检验次数按假设数算。action=conclude：结束进行中的方向（outcome：signal 有信号 / weak 信号弱 / none 没有信号 / abandoned 没法检验；evidence 照抄工具结果里的关键数字）。action=suggest：不负责定方向的 agent 提一条建议（text）。只有总控和研究员能 set / conclude；方向数有上限，用完就停下汇总。用户已经给了具体想法时不需要登记。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['read', 'set', 'conclude', 'suggest'] },
+        name: { ...str, description: 'set：方向名' },
+        thesis: { ...str, description: 'set：经济逻辑，为什么应该有效' },
+        whyNew: { ...str, description: 'set（第二个方向起必填）：为什么是不同的收益来源' },
+        data: { ...str, description: 'set：主要用什么数据' },
+        hypotheses: { type: 'array', description: 'set：1–3 个事先定好的假设', items: { type: 'object', properties: { title: { ...str, description: '一句话假设' }, failIf: { ...str, description: '怎样算失败' } }, required: ['title', 'failIf'] } },
+        outcome: { type: 'string', enum: ['signal', 'weak', 'none', 'abandoned'], description: 'conclude：结论' },
+        evidence: { ...str, description: 'conclude：依据（关键数字、jobId / backtestId），或没法检验的原因' },
+        text: { ...str, description: 'suggest：建议研究什么、为什么' },
+      },
+      required: ['action'],
+    },
+    async run(args) {
+      try { return (await helmPost('/api/direction', args, 60000)).text; } catch (e) { return `错误：${e.message}`; }
     },
   },
   {
@@ -213,7 +293,8 @@ const TOOLS = [
   {
     name: 'create_project', description: '新建项目（Python）。可以同时提供 main.py 的完整代码，会写入并编译。一个策略想法只建一个项目：基准、对照、消融都放在同一个项目里（另写 benchmark.py 等文件，或直接用 LEAN 自带的基准曲线），不要为它们另建项目。',
     inputSchema: { type: 'object', properties: { name: { ...str, description: '项目名，用用户写想法时的语言' }, nameEn: { ...str, description: '项目的英文名（英文界面显示它）。name 不是英文时必须给' },
-      nameZh: { ...str, description: '项目的中文名（中文界面显示它）。name 不是中文时必须给' }, description: str, code: { ...str, description: 'main.py 完整代码（可选）' } }, required: ['name'] },
+      nameZh: { ...str, description: '项目的中文名（中文界面显示它）。name 不是中文时必须给' }, description: str, code: { ...str, description: 'main.py 完整代码（可选）' },
+      planIdea: { ...int, description: '自动研究：这个项目对应 autopilot_plan 里的第几个想法（从 1 开始）；平时不用' } }, required: ['name'] },
     async run({ name, nameEn, nameZh, description, code }) {
       if (code && String(process.env.HELM_WRITE_ONLY || '').trim()) {
         return '错误：你不能写策略代码。先不带 code 建项目、存好 spec.md，再用 handoff 交给 engineer（策略工程师）写 main.py。';
@@ -426,6 +507,19 @@ const TOOLS = [
     description: '稳健性分析（只读，只用这个回测已存的结果文件，不重跑）：按年和三等份的收益/夏普/回撤/超额、成交成本压力（额外 5/10/25/50 个基点，和让超额归零的临界成本；换手由成交额估算）、市场状态（基准 200 日均线趋势 × 20 日波动，只用前一日信息）、一句话结论。引用稳健性数字时用这个工具的结果，不要自己另算。',
     inputSchema: { type: 'object', properties: PB, required: ['projectId', 'backtestId'] },
     async run(a) { const r = await loadRobust(E.PROJECTS_DIR, a.projectId, a.backtestId, LANG); return r.success ? robustText(r.robust, LANG) : failText(r); },
+  },
+  {
+    name: 'attribute_backtest',
+    description: '因子归因（只读诊断，不跑回测、不计入尝试次数）：把这个回测的日收益（减无风险利率）对 Fama-French 五因子 + 动量（Kenneth French 数据库，日度）做回归，标准误用 Newey-West。输出每个因子的暴露 β 和 t 值、年化 alpha 和 t 值、R²、收益拆解（alpha + 各因子贡献），以及一段话结论：这个策略是不是其实就是市场 / 动量暴露。因子都是美股的，持有债券或海外的时期解释力低，R² 低不代表有 alpha。叠加一层之前先做这一步。',
+    inputSchema: { type: 'object', properties: PB, required: ['projectId', 'backtestId'] },
+    async run(a) {
+      const r = await loadAttribution({ projectsDir: E.PROJECTS_DIR, dataDir: path.join(E.ROOT, 'data'), projectId: a.projectId, backtestId: a.backtestId, lang: LANG });
+      if (!r.success) return failText(r);
+      const t = r.attribution;
+      if (!t.available) return t.reason;
+      const rows = t.exposures.map((e) => `- ${e.label}：β ${e.beta}（t ${e.t}${e.significant ? '，明确' : ''}），年化贡献 ${(e.contribution * 100).toFixed(2)}%`).join('\n');
+      return `因子归因（${t.start} → ${t.end}，${t.n} 天，Newey-West 滞后 ${t.lag}；因子数据到 ${t.factorsEnd}${t.stale ? '，下载失败用的是旧缓存' : ''}）\n${rows}\n- alpha：年化 ${(t.alpha.annual * 100).toFixed(2)}%（t ${t.alpha.t}）；R² ${t.r2}；平均年化超额收益 ${(t.excessAnnual * 100).toFixed(2)}%\n${t.summary}\n来源：${t.source}`;
+    },
   },
   {
     name: 'sensitivity_backtest',
@@ -695,6 +789,44 @@ target：sp500 / QQQ（纳指100）/ SOX / DIA / spy100 / iwm80，或 custom + t
     async run(a) { const r = await Q.stopResearch(a); return r.success ? (r.stopped ? '已停止' : '它本来就没在跑') : failText(r); },
   },
   {
+    name: 'build_breadth',
+    description: '用历史成分股算市场宽度（站上 200 日均线的比例 pct_above_200、52 周新高减新低 net_highs、成分股收益分化 dispersion），写到本地 LEAN 数据目录。股票池导出（prepare_universe）时会自动算一次；这里可以单独重算。要先 prepare_universe。策略里用 `from helm_data import HelmBreadth`，`HelmBreadth("sp500").value(self.time, "pct_above_200")` 只给严格早于今天的值。只有 sp500 是完整的历史成分股，其他股票池有幸存者偏差。',
+    inputSchema: { type: 'object', properties: { index: { ...str, description: '股票池，默认 sp500' } } },
+    async run({ index }) {
+      const r = await Q.breadthBuild({ index: index || 'sp500' });
+      if (!r.success) return failText(r);
+      const b = r.breadth;
+      return `✅ 市场宽度 ${b.index}：${b.start} → ${b.end}，${b.rows} 天，每天中位数 ${b.members_median} 只成分股。文件 ${b.csv}。`;
+    },
+  },
+  {
+    name: 'test_timing_signal',
+    description: `择时信号检验（叠加择时过滤的第一步）：检验市场宽度能不能预测后续大盘（股票池的基准，sp500 是 SPY）收益。只用开发期；信号在第 t 天收盘算出，和第 t+1 天起持有 h 天的收益比较；只用不重叠的样本（每 h 天一个），所以样本数就是真实的独立观察数。输出秩相关 IC 和 t 值、逐年方向一致的比例、一条事先定好的规则（pct_above_200 > 0.5、net_highs > 0、dispersion 低于开发期中位数）在场和离场时的平均收益，以及多重检验校正后的结论：有信号 / 信号弱 / 没有信号。
+每个（股票池、序列、持有天数）都会被记账，测得越多门槛越高。「没有信号」照实汇报，不要换序列、换持有天数一直试。择时每月才决定一次，20 年只有约 240 个独立样本，多数结果会是「弱」：这是真实情况，不要放宽。`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ...P,
+        index: { ...str, description: '股票池，默认 sp500（目前只有它是完整的历史成分股）' },
+        series: { type: 'array', items: str, description: '1–3 个：pct_above_200 / net_highs / dispersion。事先想好用哪个，别全测。' },
+        horizons: { type: 'array', items: { type: 'integer' }, description: '持有天数（交易日），1–3 个，默认 [21, 63]' },
+        devStart: { ...str, description: '开发期开始 YYYY-MM-DD，默认 2008-01-01' },
+        devEnd: { ...str, description: '开发期结束 YYYY-MM-DD；按 spec.md 的开发期填；不填则留最近 2 年做验证期' },
+      },
+      required: ['projectId', 'series'],
+    },
+    async run(a) {
+      const r = await Q.timingTest(a);
+      if (!r.success) return failText(r);
+      const t = r.timing;
+      const lines = Object.entries(t.series).map(([k, v]) => {
+        const hz = v.horizons.map((h) => `${h.horizon} 天：IC ${h.ic ?? '—'}，t ${h.t ?? '—'}，${h.n} 个独立样本，规则在场 ${h.rule.share_on != null ? Math.round(h.rule.share_on * 100) + '%' : '—'}（在场平均 ${h.rule.mean_on ?? '—'} / 离场 ${h.rule.mean_off ?? '—'}）`).join('；');
+        return `- ${v.label_zh}（${k}）：**${v.verdict_zh}**。${(v.reasons_zh || []).join('；')}。${hz}`;
+      });
+      return `择时信号检验（${t.index}，基准 ${t.benchmark}，开发期 ${t.dev_window.join(' → ')}；这个股票池已登记 ${t.tests_on_universe} 个检验，门槛 |t| ≥ ${t.t_threshold}）\n${lines.join('\n')}\n${t.summary_zh}\n记录：projects/${t.projectId}/research/timing/${t.id}.json`;
+    },
+  },
+  {
     name: 'export_signals',
     description: '把研究得到的每日打分导出到本地 LEAN，让策略按打分交易（真实订单、手续费、成交）。默认导出模型的滚动样本外预测（开发期每年用之前的数据训练，验证期用冻结的模型）；给 feature（如 WVMA60、F_EP）就导出单个因子的原始值。策略里用 `from helm_data import HelmSignals`，`sig.latest(self.time)` 只取严格早于今天的打分，没有前视。',
     inputSchema: { type: 'object', properties: { ...P, jobId: str, feature: { ...str, description: '可选：完整研究里的单个因子名' }, ideaFactor: { ...str, description: '想法检验：要导出的因子名（只有一个因子时可省略）' } }, required: ['projectId', 'jobId'] },
@@ -826,15 +958,41 @@ async function onMessage(msg) {
     }
     if (method === 'ping') return write({ jsonrpc: '2.0', id, result: {} });
     if (method === 'tools/list') {
-      return write({ jsonrpc: '2.0', id, result: { tools: TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) } });
+      return write({ jsonrpc: '2.0', id, result: { tools: (EVAL ? EVAL.tools(TOOLS) : TOOLS).map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) } });
     }
     if (method === 'tools/call') {
-      const tool = TOOLS.find((t) => t.name === params.name);
+      const tool = (EVAL ? EVAL.tools(TOOLS) : TOOLS).find((t) => t.name === params.name);
       if (!tool) return write({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: LANG === 'en' ? `Unknown tool ${params.name}` : `未知工具 ${params.name}` }], isError: true } });
       const bad = validateArgs(tool.inputSchema, params.arguments === undefined || params.arguments === null ? {} : params.arguments);
       if (bad) return write({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: userText(`错误：${bad}`) }], isError: true } });
-      const text = await tool.run(params.arguments || {});
-      return write({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: userText(text) }], isError: /^错误：|^没有运行回测|^下载失败/.test(text) } });
+      const args = params.arguments || {};
+      // 自动研究：调用之前问服务端硬规则（先登记、预算、验证期关卡、不标 main），被拒就不执行
+      if (AUTOPILOT && tool.name !== 'approve') {
+        const g = await helmPost('/api/autopilot/guard', { tool: tool.name, args }).catch((e) => ({ allow: false, message: `错误：自动研究规则检查失败（${e.message}），这次没有执行` }));
+        if (!g.allow) return write({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: userText(String(g.message || '错误：被自动研究规则拒绝')) }], isError: true } });
+      }
+      // 工作台（lib/harness/）：自动研究的规则先过，再过每个 agent 自己的循环上限和硬规则。只在 Helm 网站发起的对话里有（服务端按对话找到这次运行的状态）
+      if (HARNESS && tool.name !== 'approve') {
+        const g = await harnessPost('/api/harness/guard', { tool: tool.name, args }).catch((e) => ({ allow: false, message: `错误：工作台规则检查失败（${e.message}），这次没有执行` }));
+        if (g && !g.allow) return write({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: userText(String(g.message || '错误：被工作台规则拒绝')) }], isError: true } });
+      }
+      let text; let isError;
+      if (EVAL && EVAL.handles(tool.name)) {
+        const r = await EVAL.call(tool.name, args);
+        text = r.text; isError = r.isError;
+      } else {
+        text = await tool.run(args);
+        isError = /^错误：|^没有运行回测|^下载失败/.test(text);
+      }
+      if (HARNESS && tool.name !== 'approve') {
+        const rec = await harnessPost('/api/harness/record', { tool: tool.name, args, result: String(text).slice(0, 4000), isError }).catch(() => null);
+        if (rec && rec.note) text = `${text}\n${rec.note}`;
+      }
+      if (AUTOPILOT && tool.name !== 'approve') {
+        const rec = await helmPost('/api/autopilot/record', { tool: tool.name, args, result: String(text).slice(0, 4000), isError }).catch(() => null);
+        if (rec && rec.note) text = `${text}\n${rec.note}`;
+      }
+      return write({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: userText(text) }], isError } });
     }
     write({ jsonrpc: '2.0', id, error: { code: -32601, message: `Method not found: ${method}` } });
   } catch (e) {

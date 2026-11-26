@@ -141,19 +141,24 @@ function downloadText(name, text) {
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
-// 「搬回 QuantConnect」：复制 main.py、列出要一并添加的文件、提示 helm_data 依赖与差异
-function openQcDialog(files) {
+// 「搬回 QuantConnect」：直接发到用户自己的 QC 账户（建项目 + 上传 + 云端编译），或者手动复制 main.py 等文件；提示 helm_data 依赖与差异
+function openQcDialog(files, ctx = {}) {
   const py = files.filter((f) => /\.py$/i.test(f.name));
   const main = py.find((f) => f.name === 'main.py') || py[0];
   if (!main) { toast(_t('k0014')); return; }
   const others = py.filter((f) => f !== main);
-  const used = [...new Set(py.flatMap((f) => String(f.content).match(/\bHelm(?:Signals|Universe|Macro)\b/g) || []))];
+  const used = [...new Set(py.flatMap((f) => String(f.content).match(/\bHelm(?:Signals|Universe|Macro|Dataset)\b/g) || []))];
   const importsHd = py.some((f) => /^\s*(?:from|import)\s+helm_data\b/m.test(String(f.content)));
-  const warn = used.length || importsHd
+  const usesHd = Boolean(used.length || importsHd);
+  const warn = usesHd
     ? `<div class="error-box"><b>${_t('k0018')}</b><p style="margin:6px 0 0">${_t('k0019')}${used.length ? `${_t('k0016')}${used.map((u) => `<span class="mono">${esc(u)}</span>`).join(_t('k0015'))}${_t('k0017')}` : ''}${_t('k0020')}</p></div>`
     : '';
-  openModal({ cls: 'qc-dlg', labelId: 'qcT', html: `<div class="cd-body"><h2 id="qcT">${_t('k0023')}</h2>
+  const canSend = Boolean(ctx.projectId && ctx.backtestId);
+  const st = { status: null, busy: false, result: null, prev: null };
+  const { d } = openModal({ cls: 'qc-dlg', labelId: 'qcT', html: `<div class="cd-body"><h2 id="qcT">${_t('k0023')}</h2>
     ${warn}
+    ${canSend ? `<section class="qc-send" id="qcSend" aria-live="polite"><p class="meta">${_t('qc_checking')}</p></section>` : ''}
+    <details class="qc-manual"${canSend ? '' : ' open'}><summary>${_t('qc_manual')}</summary>
     <div class="qc-files"><div class="qc-row"><span class="mono">${esc(main.name)}</span><button type="button" class="btn primary sm" data-qc-copy="${esc(main.name)}">${_t('k0021', { v: esc(main.name) })}</button></div></div>
     ${others.length ? `<div class="cd-msg"><p>${_t('k0022', { n: others.length })}</p></div>
     <div class="qc-files">${others.map((f) => `<div class="qc-row"><span class="mono">${esc(f.name)}</span><button type="button" class="btn sm" data-qc-copy="${esc(f.name)}">${_t('k0021', { v: esc(f.name) })}</button></div>`).join('')}</div>` : ''}
@@ -162,13 +167,213 @@ function openQcDialog(files) {
       <li>${_t('k0025')}</li>
       <li>${_t('k0026')}</li>
       <li>${_t('k0027')}</li>
-    </ol>
+    </ol></details>
     <div class="modal-actions"><a class="btn" href="https://www.quantconnect.com/" target="_blank" rel="noopener noreferrer">${_t('k0028')}</a><button type="button" class="btn" data-qc-close>${_t('k0029')}</button></div></div>`,
-  onClick: (e, close) => {
+  onClick: async (e, close) => {
     if (e.target.closest('[data-qc-close]')) { close(); return; }
     const b = e.target.closest('[data-qc-copy]');
-    if (b) { const f = py.find((x) => x.name === b.dataset.qcCopy); if (f) copyText(f.content).then((ok) => toast(ok ? `${_t('k0030', { name: f.name })}` : _t('k0031'))); }
+    if (b) { const f = py.find((x) => x.name === b.dataset.qcCopy); if (f) copyText(f.content).then((ok) => toast(ok ? `${_t('k0030', { name: f.name })}` : _t('k0031'))); return; }
+    if (st.busy) return;
+    if (e.target.closest('[data-qc-connect]')) {
+      const userId = d.querySelector('#qcUid').value.trim(); const token = d.querySelector('#qcTok').value.trim();
+      if (!userId || !token) { toast(_t('qc_need')); return; }
+      st.busy = true; renderSend();
+      const r = await safePost('/api/actions/qc-connect', { userId, token });
+      st.busy = false;
+      if (!r.success) { renderSend(); d.querySelector('#qcTok').value = ''; d.querySelector('#qcUid').value = userId; toast(`${_t('qc_fail')}${(r.errors || []).join('; ')}`); return; }
+      st.status = r.status; renderSend(); toast(_t('qc_connected'));
+      return;
+    }
+    if (e.target.closest('[data-qc-disconnect]')) {
+      st.busy = true; renderSend();
+      await safePost('/api/actions/qc-disconnect', {});
+      st.busy = false; st.status = { connected: false }; st.result = null; renderSend();
+      return;
+    }
+    if (e.target.closest('[data-qc-push]')) {
+      let confirmHelmData = false;
+      if (usesHd) {
+        if (!await askConfirm({ title: _t('qc_hd_t'), message: _t('qc_hd_m'), ok: _t('qc_hd_ok') })) return;
+        confirmHelmData = true;
+      }
+      st.busy = true; st.result = null; renderSend();
+      const r = await safePost('/api/actions/qc-push', { projectId: ctx.projectId, backtestId: ctx.backtestId, confirmHelmData });
+      st.busy = false; st.result = r;
+      if (r.project) st.prev = { url: r.project.url, qcName: r.project.name, at: new Date().toISOString() };
+      if (!r.success && /QuantConnect 拒绝|rejected these credentials|还没有连接|No QuantConnect account/.test((r.errors || []).join(' '))) st.status = { connected: false };
+      renderSend();
+    }
   } });
+  function renderSend() {
+    const box = d.querySelector('#qcSend');
+    if (!box || !st.status) return;
+    const dis = st.busy ? ' disabled' : '';
+    let html = `<h3>${_t('qc_send_h')}</h3>`;
+    if (!st.status.connected) {
+      html += `<p class="meta">${_t('qc_send_p')}</p>
+        <div class="qc-form"><label class="field"><span>User ID</span><input id="qcUid" inputmode="numeric" autocomplete="off" spellcheck="false" placeholder="123456"></label>
+        <label class="field"><span>API token</span><input id="qcTok" type="password" autocomplete="off" spellcheck="false"></label></div>
+        <p class="meta">${_t('qc_help')} <a href="https://www.quantconnect.com/settings" target="_blank" rel="noopener noreferrer">quantconnect.com/settings</a></p>
+        <div class="qc-actions"><button type="button" class="btn primary sm" data-qc-connect${dis}>${st.busy ? _t('qc_checking') : _t('qc_connect')}</button></div>`;
+    } else {
+      html += `<p class="meta">${_t('qc_as', { v: esc(st.status.userIdMasked || '') })} · <button type="button" class="linkish" data-qc-disconnect${dis}>${_t('qc_disc')}</button></p>
+        <p class="meta">${_t('qc_what')}</p>
+        <div class="qc-actions"><button type="button" class="btn primary sm" data-qc-push${dis}>${st.busy ? _t('qc_sending') : _t('qc_send')}</button></div>`;
+      const r = st.result;
+      if (r && !r.success && !r.needsConfirm) html += `<div class="error-box"><p style="margin:0">${esc((r.errors || []).join('; '))}</p>${r.project ? `<p style="margin:6px 0 0"><a href="${esc(r.project.url)}" target="_blank" rel="noopener noreferrer">${_t('qc_open')}</a></p>` : ''}</div>`;
+      if (r && r.success) {
+        const c = r.compile || {};
+        const line = c.state === 'BuildSuccess' ? `<span class="qc-ok">${_t('qc_build_ok')}</span>` : c.state === 'BuildError' ? `<span class="qc-bad">${_t('qc_build_err')}</span>` : `<span class="meta">${esc(c.error || _t('qc_build_q'))}</span>`;
+        html += `<div class="qc-result"><p style="margin:0">${_t('qc_done', { n: (r.uploaded || []).length })} <a href="${esc(r.project.url)}" target="_blank" rel="noopener noreferrer">${_t('qc_open')}</a></p><p style="margin:6px 0 0">${line}</p>
+          ${c.state === 'BuildError' && c.logs && c.logs.length ? `<pre class="qc-logs">${esc(c.logs.join('\n'))}</pre>` : ''}
+          <p class="meta" style="margin:6px 0 0">${_t('qc_next')}</p></div>`;
+      } else if (st.prev && !r) {
+        html += `<p class="meta">${_t('qc_prev', { v: esc(st.prev.at && parseDate(st.prev.at) ? parseDate(st.prev.at).toLocaleString(LOC(), { dateStyle: 'short', timeStyle: 'short' }) : '—') })} <a href="${esc(st.prev.url)}" target="_blank" rel="noopener noreferrer">${_t('qc_open')}</a></p>`;
+      }
+    }
+    box.innerHTML = html;
+  }
+  if (canSend) {
+    Promise.all([safePost('/api/qc/status', {}), safePost('/api/actions/qc-exports', { projectId: ctx.projectId, backtestId: ctx.backtestId })]).then(([s1, s2]) => {
+      st.status = s1.success ? s1.status : { connected: false };
+      const ex = s2.success ? s2.exports.filter((x) => x.url && x.ok) : []; // 只算成功编译的那次
+      st.prev = ex.length ? ex[ex.length - 1] : null;
+      renderSend();
+    });
+  }
+}
+
+// 「叠加一层」：预检 → 智能体评估 qlib 选股方案，再加上不选股的方案（仓位层、策略组合 / 互补策略）→ Kahoot 式色块让用户选 → 交给总控。
+// 选股层前景弱或之前没有信号时，不选股的方案排前面并标「推荐」。
+// 色块颜色 + 形状一起区分（不只靠颜色）；键盘 1–9 选方案、0 选「不加这一层」、Enter 确认、Esc 关闭。
+const LY_TILES = [['red', '▲'], ['blue', '◆'], ['yellow', '●'], ['green', '■']];
+function openLayerModal() {
+  const projectId = S.route.projectId;
+  if (!projectId) return;
+  const st = { phase: 'check', pc: null, layer: null, sel: null, busy: false, timer: null, err: null, ready: null };
+  const { d, close } = openModal({ cls: 'layer-dlg', labelId: 'lyT', html: `<div class="cd-body"><h2 id="lyT">${_t('ly_title')}</h2><div class="ly-body" aria-live="polite"></div></div>`,
+    onClick: async (e, cl) => {
+      if (e.target.closest('[data-ly-close]')) { cl(); return; }
+      if (st.busy) return;
+      if (e.target.closest('[data-ly-start]')) { start(); return; }
+      if (e.target.closest('[data-ly-prev]')) { st.phase = 'run'; poll(st.ready); return; }
+      if (e.target.closest('[data-ly-back]')) { st.sel = null; render(); return; }
+      if (e.target.closest('[data-ly-retry]')) { start(); return; }
+      const t = e.target.closest('[data-ly-opt]');
+      if (t) { st.sel = t.dataset.lyOpt; render(); return; }
+      if (e.target.closest('[data-ly-go]')) choose();
+    },
+    onClose: () => { clearTimeout(st.timer); document.removeEventListener('keydown', onKey, true); } });
+  const box = d.querySelector('.ly-body');
+  const opts = () => (st.layer && st.layer.result ? st.layer.result.options : []);
+  function onKey(e) {
+    if (!d.open || st.phase !== 'pick' || st.busy || e.metaKey || e.ctrlKey || e.altKey || e.target.closest('input, textarea')) return; // ⌘/Ctrl+0 是复位缩放，别吞掉
+    const list = opts();
+    if (/^[1-9]$/.test(e.key)) { const o = list.filter((x) => x.kind !== 'none')[Number(e.key) - 1]; if (o) { st.sel = o.id; render(); e.preventDefault(); } }
+    else if (e.key === '0') { st.sel = 'none'; render(); e.preventDefault(); }
+    else if (e.key === 'Enter' && st.sel && !e.target.closest('button')) { choose(); e.preventDefault(); }
+  }
+  document.addEventListener('keydown', onKey, true);
+  const pitLabel = (p) => (p === 'pit' ? _t('ly_pit') : p === 'partial' ? _t('ly_pit_part') : _t('ly_pit_no'));
+  const riskLabel = (r) => _t(r === 'high' ? 'ly_risk_h' : r === 'low' ? 'ly_risk_l' : 'ly_risk_m');
+  function tileHTML(o, i) {
+    if (o.kind === 'none') return `<button type="button" class="ly-tile ly-none${st.sel === o.id ? ' sel' : ''}${st.sel && st.sel !== o.id ? ' dim' : ''}" data-ly-opt="none" aria-pressed="${st.sel === o.id}"><span class="ly-key">0</span><span class="ly-shape" aria-hidden="true">✕</span><span class="ly-tx"><b>${esc(o.title)}</b><i>${esc(o.tests)}</i></span></button>`;
+    const [color, shape] = LY_TILES[i % 4];
+    const what = o.kind === 'timing' ? _t('ly_k_timing') : o.kind === 'vol' ? _t('ly_k_vol') : o.kind === 'portfolio' ? _t('ly_k_port', { n: (o.peers || []).length + 1 }) : o.kind === 'complement' ? _t('ly_k_comp') : `${esc(o.replaces)} → ${esc(o.universeLabel || o.universe)}`;
+    return `<button type="button" class="ly-tile ly-${color}${st.sel === o.id ? ' sel' : ''}${(st.sel && st.sel !== o.id) || (o.review && o.review.verdict === 'drop' && st.sel !== o.id) ? ' dim' : ''}" data-ly-opt="${esc(o.id)}" aria-pressed="${st.sel === o.id}">
+      <span class="ly-key">${i + 1}</span><span class="ly-shape" aria-hidden="true">${shape}</span>
+      <span class="ly-tx"><b>${o.recommended ? `<span class="ly-rec">${_t('ly_rec')}</span>` : ''}${esc(o.title)}</b><i>${esc(o.tests)}</i>
+      <span class="ly-badges"><em>${what}</em><em>${_t('ly_trials', { n: o.trials })}</em><em>${riskLabel(o.risk)}</em>${o.review ? `<em class="ly-cr ly-cr-${esc(o.review.verdict)}">${_t(CRITIC_V[o.review.verdict] ? CRITIC_V[o.review.verdict][1] : 'cr_caution')}</em>` : ''}</span></span></button>`;
+  }
+  function detailHTML(o) {
+    if (o.kind === 'none') return `<div class="ly-detail"><p>${_t('ly_none_d')}</p><div class="modal-actions"><button type="button" class="btn" data-ly-back>${_t('ly_back')}</button><button type="button" class="btn primary" data-ly-go>${_t('ly_keep')}</button></div></div>`;
+    return `<div class="ly-detail"><h3>${esc(o.title)}</h3>
+      ${o.how ? `<p>${esc(o.how)}</p>` : ''}
+      ${o.review ? `<p class="ly-crd">${criticTag(o.review)}</p>` : ''}
+      <dl class="ly-dl">
+        <dt>${_t('ly_d_signal')}</dt><dd>${o.kind === 'layer' ? `${o.signalType === 'full' ? _t('ly_sig_full') : _t('ly_sig_idea')}${o.signal ? ` · ${esc(o.signal)}` : ''}` : esc(o.signal || '')}</dd>
+        ${o.holdings ? `<dt>${_t('ly_d_hold')}</dt><dd>${esc(o.holdings)}</dd>` : ''}
+        ${o.kind === 'layer' ? `<dt>${_t('ly_d_data')}</dt><dd>${esc(o.universeLabel || o.universe)} · ${pitLabel(o.pit)}${o.dataReady === false ? ` · ${_t('ly_prep')}` : ''}</dd>` : ''}
+        ${o.kind === 'portfolio' ? `<dt>${_t('ly_d_peers')}</dt><dd><ul>${(o.peers || []).map((p) => `<li>${esc(p.name)}${p.sharpe != null ? ` · ${_t('ly_sharpe')} ${esc(Number(p.sharpe).toFixed(2))}` : ''}</li>`).join('')}</ul></dd>` : ''}
+        <dt>${_t('ly_d_trials')}</dt><dd>${_t('ly_trials', { n: o.trials })} · ${_t('ly_trials_d')}</dd>
+        ${o.risks && o.risks.length ? `<dt>${_t('ly_d_risks')}</dt><dd><ul>${o.risks.map((r) => `<li>${esc(r)}</li>`).join('')}</ul></dd>` : ''}
+      </dl>
+      <p class="meta">${_t('ly_guard')}</p>
+      <div class="modal-actions"><button type="button" class="btn" data-ly-back>${_t('ly_back')}</button><button type="button" class="btn primary" data-ly-go>${_t('ly_go')}</button></div></div>`;
+  }
+  function render() {
+    let h = '';
+    if (st.phase === 'check') h = `<p class="meta">${_t('ly_checking')}</p>`;
+    else if (st.phase === 'fail') h = `<div class="error-box"><p style="margin:0">${esc(st.err || '')}</p></div><div class="modal-actions"><button type="button" class="btn" data-ly-close>${_t('k0029')}</button></div>`;
+    else if (st.phase === 'intro') {
+      const legs = st.pc.legs.map((l) => `<span class="ly-chip"><b>${esc(l.etf)}</b> → ${esc(l.label)} <i>${pitLabel(l.pit)}${l.ready === false ? ` · ${_t('ly_prep')}` : ''}</i></span>`).join('');
+      const notes = [st.pc.qlibBlocked ? esc(st.pc.qlibBlocked) : '', st.pc.noSignal ? _t('ly_nosig', { n: st.pc.noSignal }) : ''].filter(Boolean);
+      h = `<p>${_t('ly_intro', { v: esc(st.pc.backtest ? st.pc.backtest.name : '') })}</p>
+        ${legs ? `<p class="meta">${_t('ly_legs')}</p><div class="ly-chips">${legs}</div>` : ''}
+        ${notes.length ? `<p class="ly-sum">${notes.join('<br>')}${_t('ly_alt_first')}</p>` : ''}
+        ${st.pc.attribution ? `<p class="meta"><b>${_t('ly_attr')}</b>${esc(st.pc.attribution.summary)}</p>` : ''}
+        <ol class="qc-list"><li>${_t('ly_s1')}</li><li>${_t('ly_s2')}</li><li>${_t('ly_s3')}</li></ol>
+        <p class="meta">${_t('ly_cost')}</p>
+        <div class="modal-actions">${st.ready ? `<button type="button" class="btn" data-ly-prev>${_t('ly_prev')}</button>` : ''}<button type="button" class="btn" data-ly-close>${_t('k0033')}</button><button type="button" class="btn primary" data-ly-start>${_t('ly_start')}</button></div>`;
+    } else if (st.phase === 'run') {
+      h = `<div class="ly-wait"><div class="ly-shapes" aria-hidden="true">${LY_TILES.map(([c, s2]) => `<span class="ly-${c}">${s2}</span>`).join('')}</div><p>${_t('ly_running')}</p><p class="meta">${_t('ly_running_d')}</p></div>
+        <div class="modal-actions"><button type="button" class="btn" data-ly-close>${_t('ly_bg')}</button></div>`;
+    } else if (st.phase === 'error') {
+      h = `<div class="error-box"><p style="margin:0">${esc(st.err || '')}</p></div><div class="modal-actions"><button type="button" class="btn" data-ly-close>${_t('k0029')}</button><button type="button" class="btn primary" data-ly-retry>${_t('ly_retry')}</button></div>`;
+    } else if (st.phase === 'pick') {
+      const list = opts();
+      const layers = list.filter((o) => o.kind !== 'none');
+      const none = list.find((o) => o.kind === 'none');
+      const sel = list.find((o) => o.id === st.sel);
+      const R = st.layer.result;
+      h = `${R.summary ? `<p class="ly-sum">${esc(R.summary)}</p>` : ''}
+        ${R.recommendAlt && R.why && R.why.length ? `<p class="meta">${_t('ly_why', { v: R.why.map(esc).join(_t('k0007')) })}</p>` : ''}
+        ${R.review ? criticBanner({ status: 'done', ...R.review }) : ''}
+        ${layers.length ? '' : `<p class="meta">${_t('ly_nofit')}</p>`}
+        <div class="ly-grid${layers.length === 1 ? ' one' : ''}">${layers.map((o, i) => tileHTML(o, i)).join('')}</div>
+        ${none ? tileHTML(none, 4) : ''}
+        ${sel ? detailHTML(sel) : `<p class="meta ly-hint">${_t('ly_hint')}</p>`}`;
+    }
+    box.innerHTML = h;
+    if (st.phase === 'pick' && st.sel) { const dt = box.querySelector('.ly-detail'); if (dt) dt.scrollIntoView({ block: 'nearest' }); }
+  }
+  async function poll(layerId) {
+    clearTimeout(st.timer);
+    const r = await safePost('/api/actions/layer-read', { projectId, layerId });
+    if (!d.open) return;
+    if (!r.success) { st.phase = 'error'; st.err = (r.errors || []).join('; '); render(); return; }
+    st.layer = r.layer;
+    if (r.layer.status === 'running') { if (st.phase !== 'run') { st.phase = 'run'; render(); } st.timer = setTimeout(() => poll(layerId), 2500); return; }
+    if (r.layer.status === 'error') { st.phase = 'error'; st.err = r.layer.error; render(); return; }
+    if (r.layer.status === 'ready') { st.phase = 'pick'; st.sel = null; render(); return; }
+    st.phase = 'error'; st.err = _t('ly_used'); render();
+  }
+  async function start() {
+    st.busy = true;
+    const r = await safePost('/api/actions/layer-assess', { projectId });
+    st.busy = false;
+    if (!r.success) { st.phase = 'error'; st.err = (r.errors || []).join('; '); render(); return; }
+    st.phase = 'run'; render(); poll(r.layerId);
+  }
+  async function choose() {
+    if (!st.sel || st.busy) return;
+    st.busy = true;
+    const r = await safePost('/api/actions/layer-choose', { projectId, layerId: st.layer.layerId, optionId: st.sel });
+    st.busy = false;
+    if (!r.success) { toast((r.errors || []).join('; ')); return; }
+    close(true);
+    if (r.declined) { toast(_t('ly_kept')); return; }
+    toast(_t('ly_sent'));
+    askAgent(r.agent || 'mia', r.message);
+  }
+  render();
+  safePost('/api/actions/layer-precheck', { projectId }).then((r) => {
+    if (!d.open) return;
+    if (!r.success) { st.phase = 'fail'; st.err = (r.errors || []).join('; '); render(); return; }
+    if (r.running) { st.phase = 'run'; render(); poll(r.running); return; }
+    if (!r.precheck.ok) { st.phase = 'fail'; st.err = r.precheck.reason; render(); return; }
+    st.pc = r.precheck; st.ready = r.ready; st.phase = 'intro'; render();
+  });
 }
 
 // 应用内对话框的公共骨架（确认框、搬回 QuantConnect 共用）：原生 <dialog>.showModal()，页面其余部分自动不可聚焦；
@@ -194,7 +399,9 @@ function openModal({ cls = '', labelId, describedBy, role, html, onClick, onClos
   d.addEventListener('cancel', (e) => { e.preventDefault(); close(false); }); // Esc
   d.addEventListener('keydown', (e) => {
     if (e.key !== 'Tab') return;
-    const f = [...d.querySelectorAll('input:not([type=hidden]), textarea, select, button:not([disabled]), a[href]')];
+    // 只算真的能拿到焦点的：收起的 <details> 里的按钮看不见，<summary> 自己可以聚焦
+    const f = [...d.querySelectorAll('input:not([type=hidden]), textarea, select, button:not([disabled]), a[href], summary')].filter((el) => el.getClientRects().length);
+    if (!f.length) return;
     const i = f.indexOf(document.activeElement);
     if (e.shiftKey && i <= 0) { e.preventDefault(); f[f.length - 1].focus(); } else if (!e.shiftKey && i === f.length - 1) { e.preventDefault(); f[0].focus(); }
   });
@@ -278,11 +485,21 @@ const S = {
 // agents.json 里的默认名字 / 定位 / 示例任务是中文；英文界面下换成字典里的英文。用户改过的（和默认不一样）原样显示。
 function localizeAgents(raw) {
   const zh = HELM_I18N.dict.zh;
-  return raw.map((x) => {
+  const list = raw.map((x) => {
     const loc = (v, key) => (v === zh[key] ? _t(key) : v);
     const name = loc(x.name, `ag_${x.id}_name`);
     return { ...x, name, role: loc(x.role, `ag_${x.id}_role`), starters: (x.starters || []).map((s, i) => loc(s, `ag_${x.id}_s${i + 1}`)), color: 'var(--muted)', glyph: String(name || '?').slice(0, 1) };
   });
+  // 首字母撞了（英文界面的 Risk Officer / Researcher 都是 R）：流水线上的小圆章分不出是谁，撞的改用两个字母
+  const seen = {};
+  for (const x of list) (seen[x.glyph] = seen[x.glyph] || []).push(x);
+  for (const g of Object.keys(seen)) if (seen[g].length > 1) for (const x of seen[g]) x.glyph = agentGlyph2(x.name);
+  return list;
+}
+// 两个词取两个首字母（Risk Officer → RO），一个词取前两个字母（Researcher → Re）
+function agentGlyph2(name) {
+  const w = String(name || '?').trim().split(/\s+/);
+  return w.length > 1 ? (w[0].slice(0, 1) + w[1].slice(0, 1)).toUpperCase() : w[0].slice(0, 2);
 }
 // 模型 / 思考深度选项（服务器给的是中文说明）：默认文字换成字典里的英文，用户设置的原样显示
 function localizeOpt(m) {
@@ -469,15 +686,27 @@ async function loadProjectsNow() {
   btn.classList.remove('spin');
   // 读取失败不等于「没有项目」：保留上一次的列表，并明确提示
   S.projectsError = r.success ? null : (r.errors || []).join(_t('k0007')) || _t('k0097');
+  const firstLoad = !S.projects;
   S.projects = r.success ? r.projects : (S.projects || []);
   if (S.route.projectId) S.project = S.projects.find((p) => p.projectId === S.route.projectId) || S.project;
   renderProjects();
-  if (onHomePage()) { renderHomeSoon(); loadLatest(); }
+  if (onHomePage()) { renderHomeSoon(); loadLatest(); loadInbox(); }
+  // 想法记录、流水线先于项目列表画出来时，项目名是服务端的原名（可能是另一种语言）：名字到了重画一次
+  else if (firstLoad && (S.route.journal || S.route.page === 'pipeline')) renderMain();
   renderCrumbs();
 }
+// 首页要知道每个项目走到哪一步：之前只读最近改过的 8 个，更早的项目（比如一直在跑模拟实盘的那个）
+// 既不会出现在首页，出了问题也不会算进「等你处理」。现在全部读（上限 HOME_LOAD_MAX），分批以免一次发太多请求。
+const HOME_LOAD_MAX = 60;
 async function loadLatest() {
-  const top = (S.projects || []).slice(0, 8);
+  const all = (S.projects || []).slice(0, HOME_LOAD_MAX);
   S.home = S.home || {};
+  for (let i = 0; i < all.length; i += 8) {
+    await loadLatestBatch(all.slice(i, i + 8));
+    renderHomeSoon();
+  }
+}
+async function loadLatestBatch(top) {
   await Promise.all(top.map(async (p) => {
     const pid = p.projectId;
     const [r, rs, pp] = await Promise.all([
@@ -488,7 +717,6 @@ async function loadLatest() {
     if (r.success) S.latest[pid] = r.backtests.find((b) => !isRunning(b) && !isFailed(b)) || r.backtests[0] || null;
     S.home[pid] = { bts: r.success ? r.backtests : [], rs: rs.success ? rs.jobs : [], pap: pp.success ? pp.sessions : [] };
   }));
-  renderHomeSoon();
 }
 function renderProjects() {
   const ul = $('#projectList');
@@ -806,7 +1034,8 @@ function projectHTML() {
         </div>
         ${moreMenu('projMore', [
     menuItem(`data-dk="new"`, _t('dk002')),
-    menuItem(`data-action="research"`, _t('k0747')),
+    // 完整 qlib 研究是从零找选股因子：只放在还没有回测的空项目里；已有策略的项目给「叠加 Qlib 选股」
+    count ? menuItem(`data-action="layer"`, `${_t('ly_menu')}${ELL}`, _t('ly_menu_d')) : count === 0 ? menuItem(`data-action="research"`, _t('k0747')) : '',
     menuItem(`data-action="compile"`, _t('k0046'), _t('ux002')),
     menuItem(`data-action="project-rename"`, `${_t('pr_rename')}${ELL}`),
     menuSep,
@@ -1143,6 +1372,7 @@ let ROB_WHY; _regT(() => { ROB_WHY = {
   seg: _t('k0293'),
   cost: _t('k0294'),
   reg: _t('k0295'),
+  attr: _t('at_why'),
 }; });;
 let rbHead; _regT(() => { rbHead = (title, meta, key) => `<div class="panel-head"><h2>${esc(title)}</h2><span class="meta">${esc(meta)}</span><button type="button" class="gate-i" data-rob-why aria-expanded="false" aria-label="${_t('k0296', { v: esc(title) })}" title="${_t('k0297')}">ⓘ</button></div><p class="gate-why rob-why" hidden>${esc(ROB_WHY[key])}</p>`; });
 const rbFact = (k, v, cls = '') => `<div class="rob-fact"><div class="k">${esc(k)}</div><div class="v ${cls}">${v}</div></div>`;
@@ -1291,7 +1521,24 @@ function robustTabHTML(backtestId) {
     <tr class="grp"><td colspan="6">${_t('k0415')}</td></tr>${g.marginals.map(row).join('')}</tbody></table></div>
     <p class="data-note">${_t('k0416', { v: esc(g.rule) })}</p></div>`;
   }
-  return `<div class="rob">${concl}${sec1}${sec2}${sec3}${sensSectionHTML(backtestId)}${tuneSectionHTML(backtestId)}</div>`;
+  return `<div class="rob">${concl}${sec1}${sec2}${sec3}${attrSectionHTML(backtestId)}${sensSectionHTML(backtestId)}${tuneSectionHTML(backtestId)}</div>`;
+}
+
+// 因子归因（只读诊断，不计入尝试次数）：收益来自哪些已知因子，剩下的 alpha 是否显著
+function attrSectionHTML(backtestId) {
+  const ab = S.attrBt && S.attrBt.id === backtestId ? S.attrBt : null;
+  const head = rbHead(_t('at_h'), _t('at_sub'), 'attr');
+  if (!ab || ab.loading) return `<div class="panel section rob-sec">${head}<div class="skeleton" style="height:120px"></div></div>`;
+  if (ab.error) return `<div class="panel section rob-sec">${head}<p class="data-note">${esc(ab.error)}</p></div>`;
+  const a = ab.a;
+  if (!a || !a.available) return `<div class="panel section rob-sec">${head}<p class="data-note">${esc((a && a.reason) || '')}</p></div>`;
+  const rows = a.exposures.map((e) => `<tr class="static"><td>${esc(e.label)}</td><td class="r ${e.significant ? 'strong' : ''}">${e.beta >= 0 ? '+' : ''}${num(e.beta)}</td><td class="r">${num(e.t)}</td><td class="r">${pc(e.contribution)}</td></tr>`).join('');
+  return `<div class="panel section rob-sec">${head}
+    <p class="rob-text">${esc(a.summary)}</p>
+    <div class="rob-facts">${rbFact(_t('at_r2'), `${Math.round(a.r2 * 100)}%`)}${rbFact(_t('at_alpha'), `${pc(a.alpha.annual)} · t ${num(a.alpha.t)}`, a.alpha.significant ? '' : 'muted')}${rbFact(_t('at_excess'), pc(a.excessAnnual))}${rbFact(_t('at_days'), `${a.n}`)}</div>
+    <div class="table-wrap"><table class="data rob-table"><thead><tr><th>${_t('at_factor')}</th><th class="r">${_t('at_beta')}</th><th class="r">t</th><th class="r">${_t('at_contrib')}</th></tr></thead><tbody>${rows}
+    <tr class="static"><td>${_t('at_alpha_row')}</td><td class="r">—</td><td class="r">${num(a.alpha.t)}</td><td class="r">${pc(a.alpha.annual)}</td></tr></tbody></table></div>
+    <p class="data-note">${_t('at_note', { v: esc(a.start), v2: esc(a.end), v3: esc(a.factorsEnd || '?') })}${a.stale ? ` ${_t('at_stale')}` : ''}</p></div>`;
 }
 
 async function runSens(btn) {
@@ -1485,7 +1732,7 @@ function drawCompare() {
 /* ================= backtest view（概览 / 订单 / 日志 / 代码） ================= */
 async function loadBacktestView(silent = false) {
   const { projectId, backtestId } = S.route;
-  if (!silent) { S.orderSort = null; S.backtest = null; S.charts = null; S.orders = null; S.logs = null; S.code = null; S.robustBt = null; S.sensBt = null; S.tuneBt = null; S.validation = null; renderMain(); }
+  if (!silent) { S.orderSort = null; S.backtest = null; S.charts = null; S.orders = null; S.logs = null; S.code = null; S.robustBt = null; S.attrBt = null; S.sensBt = null; S.tuneBt = null; S.validation = null; renderMain(); }
   ensureProject(projectId).then(() => { renderCrumbs(); renderCtx(); });
   const r = await data('backtests/read', { projectId, backtestId });
   if (S.route.backtestId !== backtestId) return;
@@ -1561,6 +1808,14 @@ async function loadTabData() {
     const r = await dget('backtests/robust', { projectId, backtestId });
     S.robustBt = { id: backtestId, robust: r.success ? r.robust : null, error: r.success ? null : (r.errors || []).join(_t('k0007')) };
     if (S.route.backtestId === backtestId) renderMain();
+  }
+  if (tab === 'robust' && (!S.attrBt || S.attrBt.id !== backtestId)) {
+    // 因子归因：第一次要下载 French 因子数据（几秒），之后缓存 7 天
+    S.attrBt = { id: backtestId, loading: true };
+    dget('backtests/attribution', { projectId, backtestId }).then((r) => {
+      S.attrBt = { id: backtestId, a: r.success ? r.attribution : null, error: r.success ? null : (r.errors || []).join(_t('k0007')) };
+      if (S.route.backtestId === backtestId && S.route.tab === 'robust') renderMain();
+    });
   }
   if (tab === 'robust' && (!S.sensBt || S.sensBt.id !== backtestId)) loadSens(backtestId);
   if (tab === 'robust' && (!S.tuneBt || S.tuneBt.id !== backtestId)) loadTune(backtestId);
@@ -2314,13 +2569,15 @@ function universesHTML() {
       const job = u.job && u.job.status === 'running' ? u.job : null;
       const ex = u.exported;
       // 已有旧数据、但最近一次更新失败：之前这里只显示「已就绪」，失败被藏起来，用户只能一遍遍点「更新」
+      // 已经到最近一个完整交易日：写明「已是最新」，按钮变成不显眼的「重新准备」（之前一直显示「更新」，用户更新完还以为要再更新）
+      const fresh = Boolean(ex && u.upToDate && !(u.job && u.job.status === 'failed'));
       const lastFail = ex && u.job && u.job.status === 'failed' ? `<i class="u-fail" title="${esc(u.job.error || '')}">${_t('u_fail', { v: esc(String(u.job.error || '').slice(0, 80)) })}</i>` : '';
       const st = job ? `${_t('k0904')} ${Math.round((job.progress || 0) * 100)}%<i>${esc(job.phase || '')}</i></span>`
-        : ex ? `<span class="u-st ok">${_t('k0905', { v: esc(ex.start), v2: esc(ex.end) })} ${esc(ex.members_per_day ? ex.members_per_day.median : '?')} ${_t('k0906')}${lastFail}</span>`
+        : ex ? `<span class="u-st ok">${_t('k0905', { v: esc(ex.start), v2: esc(ex.end) })} ${esc(ex.members_per_day ? ex.members_per_day.median : '?')} ${_t('k0906')}${fresh ? `<i class="u-fresh">${_t('u_fresh')}</i>` : ''}${lastFail}</span>`
           : u.job && u.job.status === 'failed' ? `<span class="u-st bad" title="${esc(u.job.error || '')}">${_t('k0907')}${esc(String(u.job.error || '').slice(0, 60))}</i></span>` : _t('k0908');
       return `<div class="uni"><div class="u-n"><b>${esc(u.label)}</b><span class="u-k ${u.kind === 'snapshot' ? 'snap' : u.kind === 'partial-point-in-time' ? 'part' : 'pit'}" ${u.kind === 'partial-point-in-time' ? `${_t('k0909')} ${esc(u.qlib_as_of || '?')}${_t('k0910')}` : u.membership_source ? `${_t('k0911', { v: esc(u.membership_source) })}` : ''}>${u.kind === 'snapshot' ? _t('k0912') : u.kind === 'partial-point-in-time' ? `${_t('k0913')} ${esc(String(u.qlib_as_of || '?').slice(0, 7))}` : u.membership_source ? `${_t('k0913')} ${esc(String(u.qlib_as_of || '?').slice(0, 7))}` : _t('k0914')}</span></div>
         <div class="u-m">${_t('k0920')} ${esc(u.names_ever ?? '?')} ${_t('k0921', { v: esc(u.bench) })}</div>${u.data_warning ? `<div class="u-warn" title="${esc(u.data_warning)}">${_t('k0915')}</div>` : ''}${st}
-        ${job ? '' : `<button type="button" class="btn sm" data-prepare="${esc(u.key)}" aria-label="${ex ? _t('k0916') : _t('k0917')} ${_t('k0919', { v: esc(u.label) })}">${lastFail ? _t('u_retry') : ex ? _t('k0916') : _t('k0918')}</button>`}</div>`;
+        ${job ? '' : `<button type="button" class="btn sm${fresh ? ' quiet' : ''}" data-prepare="${esc(u.key)}" title="${fresh ? esc(_t('u_fresh_t')) : ''}" aria-label="${ex ? _t('k0916') : _t('k0917')} ${_t('k0919', { v: esc(u.label) })}">${lastFail ? _t('u_retry') : fresh ? _t('u_rebuild') : ex ? _t('k0916') : _t('k0918')}</button>`}</div>`;
     }).join('')}</div>`;
   return `<div class="panel" id="uniPanel"><div class="panel-head"><h2>${_t('k0922')}</h2><span class="meta">${_t('k0923')}</span></div>${body}</div>`;
 }
@@ -2430,7 +2687,7 @@ function journalHTML() {
   if (!entries.length) return `<div class="page">${head}<div class="panel empty"><div class="big">${_t('k0955')}</div><p>${_t('k0956')}</p></div></div>`;
   const cell = (k, v, sub) => `<div class="pg-cell"><div class="pg-k">${k}</div><div class="pg-v mono">${v}</div>${sub ? `<div class="pg-sub">${sub}</div>` : ''}</div>`;
   const st = S0.byStage || {};
-  const holdSub = (S0.holdout || []).filter((h) => h.looks).map((h) => `${esc(h.name.split(/[（(]/)[0].trim().slice(0, 12))} ${h.looks}`).join('<br>') || _t('k0957');
+  const holdSub = (S0.holdout || []).filter((h) => h.looks).map((h) => { const n = pNameById(h.projectId, h.name).split(/[（(]/)[0].trim(); return `<span class="jr-ho" title="${esc(n)}">${esc(n)}</span> · ${_t('hm_looks', { n: h.looks })}`; }).join('<br>') || _t('k0957');
   const tr = S0.trials || {};
   const stages = [_t('k0115'), _t('k0958'), _t('k0058'), _t('k0176'), _t('k0116')];
   const sum = `<div class="pg-grid jr-sum">
@@ -2528,17 +2785,55 @@ function autoPickHTML(a) {
   const v = [a.model ? modelLabel(a.model) : '', eff ? _t('k1441', { v: eff }) : ''].filter(Boolean).join(' · ');
   return `<span class="auto-pick" title="${esc(a.reason || '')}">${esc(_t('am_picked', { v }))}</span>`;
 }
+// 首页项目表按「状态」分组，而不是只按最近修改时间排：
+//   等你处理 → 模拟实盘中 → 进行中 → 未开始 → 想法检验没有信号（收成一行，点开才展开）。
+// 之前按修改时间取前 8 个：一直在跑的模拟实盘项目会被几个刚试过、已经没信号的想法挤出首页。
+const HOME_ROWS_MAX = 12;
+function homeGroup(p) {
+  if (attnScore(p) > 0) return 'attn';
+  const st = projStage(p);
+  if (!st) return null; // 这个项目的数据还没读到
+  if (st.step === 4) return 'live';
+  if (st.step === 1 && st.next && st.next.ask) return 'closed';
+  return st.step === 0 ? 'new' : 'work';
+}
+function homeProjects() {
+  if (!S.projects) return null;
+  const all = S.projects;
+  const grp = (label) => `<tr class="static grp"><td colspan="6">${label}</td></tr>`;
+  const groups = { attn: [], live: [], work: [], new: [], closed: [] };
+  let pending = 0;
+  for (const p of all) { const g = homeGroup(p); if (g) groups[g].push(p); else pending += 1; }
+  // 数据还没到齐：先按原来的顺序画（最近改过的在前），不分组，免得标题一行行跳出来
+  if (pending) {
+    const top = all.slice(0, HOME_ROWS_MAX);
+    return { all, rows: top.map(projRow).join(''), more: all.length - top.length };
+  }
+  const open = Boolean(store.get('homeClosed', false));
+  const live = [...groups.attn, ...groups.live, ...groups.work, ...groups.new];
+  const shown = new Set(live.slice(0, HOME_ROWS_MAX));
+  let rows = '';
+  for (const [k, key] of [['attn', 'hm_gAttn'], ['live', 'hm_gLive'], ['work', 'hm_gWork'], ['new', 'hm_gNew']]) {
+    const list = groups[k].filter((p) => shown.has(p));
+    if (list.length) rows += grp(_t(key)) + list.map(projRow).join('');
+  }
+  if (groups.closed.length) {
+    rows += `<tr class="static grp grp-closed"><td colspan="6"><button type="button" class="grp-toggle" data-home-closed aria-expanded="${open}"><svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="m6 3 5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>${_t('hm_gClosed', { n: groups.closed.length })}<span class="grp-act">${open ? _t('hm_hide') : _t('hm_show')}</span></button></td></tr>`;
+    if (open) rows += groups.closed.map(projRow).join('');
+  }
+  return { all, rows, more: live.length - shown.size };
+}
 // 首页视线：① 标题直接说「有几件事卡在你这里」→ ② 项目表，需要你处理的排最前、下一步用强调色 → ③ 写下一个想法 → ④ 直接问智能体。
 // 回访用户的顺序固定不变（不随状态跳动）；第一次用、还没有项目时，输入框就是全部重点，放最前。
 function homeHTML() {
   const h = new Date().getHours();
   const greet = h < 5 ? _t('k0999') : h < 11 ? _t('k1000') : h < 14 ? _t('k1001') : h < 18 ? _t('k1002') : _t('k1003');
   const setup = healthHTML();
-  const projs = S.projects ? S.projects.slice().sort((a, b) => attnScore(b) - attnScore(a)).slice(0, 8) : null;
+  const hp = homeProjects();
+  const projs = hp ? hp.all : null;
   const firstRun = projs && !projs.length && !S.projectsError;
   const attn = attnSummary();
-  const nHot = projs ? projs.filter((p) => attnScore(p) > 0).length : 0;
-  const rows = projs ? projs.map((p, i) => (i === nHot && nHot ? `<tr class="static grp"><td colspan="6">${_t('hm_other')}</td></tr>` : '') + projRow(p)).join('') : '<tr class="static"><td colspan="6"><div class="skeleton" style="height:40px"></div></td></tr>';
+  const rows = hp ? hp.rows : '<tr class="static"><td colspan="6"><div class="skeleton" style="height:40px"></div></td></tr>';
   const projSec = S.projectsError && !(projs && projs.length) ? errorBox(_t('k1004'), S.projectsError)
     : firstRun ? `<ol class="first-run" aria-label="${_t('k1005')}">
         <li>${_t('k1006')}</li>
@@ -2548,7 +2843,7 @@ function homeHTML() {
       </ol>
       <p class="empty-line">${_t('k1010')}<button type="button" class="linkish" data-new-project>${_t('k1011')}</button>${_t('k1012')}</p>`
       : `<div class="table-wrap"><table class="data home-proj"><thead><tr><th>${_t('k0268')}</th><th>${_t('k0974')}</th><th class="r">${_t('k0272')}</th><th class="r">${_t('k0273')}</th><th class="r">${_t('k1014')}</th><th class="r">${_t('k0173')}</th></tr></thead><tbody>${rows}</tbody></table></div>
-      ${S.projects && S.projects.length > 8 ? `<p class="data-note">${_t('k1013')}</p>` : ''}`;
+      ${hp && hp.more ? `<p class="data-note">${_t('hm_more', { n: hp.more })}</p>` : ''}`;
   const composer = `<form class="idea" id="ideaForm">
       <textarea id="ideaInput" rows="3" aria-label="${_t('k1021')}" aria-describedby="ideaHint" placeholder="${_t('k1022')}"></textarea>
       <div class="idea-foot">
@@ -2568,6 +2863,7 @@ function homeHTML() {
   if (firstRun || S.projectsError) return `<div class="page">
     <div class="hero"><h1>${_t('k1019')}</h1><p class="sub">${_t('k1020')}</p></div>
     ${composer}
+    ${inboxHTML()}
     ${setup}
     <section class="home-sec"><div class="sec-head"><h2>${firstRun ? _t('k1018') : _t('h015')}</h2></div>${projSec}</section>
     ${quick}
@@ -2577,6 +2873,7 @@ function homeHTML() {
   return `<div class="page">
     <div class="hero home-status ${attn && attn.n ? 'has-attn' : ''} ${attn && attn.bad ? 'bad' : ''}"><h1>${title}</h1>${sub ? `<p class="sub">${esc(sub)}</p>` : ''}</div>
     ${setup}
+    ${inboxHTML()}
     <section class="home-sec home-proj-sec">
       <div class="sec-head"><h2>${_t('h015')}</h2><span class="meta">${S.projects && S.projects.length ? S.projects.length : ''}</span></div>
       ${projSec}
@@ -2830,6 +3127,8 @@ function paperRunsHTML(s, P, run) {
   </tbody></table></div>`;
 }
 
+// 买 / 卖 / 卖空 / 平空：计划里的订单带 intent，Alpaca 的订单从 clientOrderId 的结尾（-short / -cover）看出来
+const sideLabel = (o) => { const it = o.intent || (/-short$/.test(o.clientOrderId || '') ? 'short' : /-cover$/.test(o.clientOrderId || '') ? 'cover' : ''); return it === 'short' ? _t('shrt01') : it === 'cover' ? _t('shrt02') : o.side === 'buy' ? _t('k1125') : _t('k1126'); };
 let ALP_STATUS_ZH; _regT(() => { ALP_STATUS_ZH = { new: _t('k1101'), accepted: _t('k1102'), pending_new: _t('k1103'), partially_filled: _t('k0635'), filled: _t('k1104'), canceled: _t('k1105'), expired: _t('k1106'), rejected: _t('k1107'), done_for_day: _t('k1108'), replaced: _t('k1109') }; });
 let LEAN_STATUS_ZH; _regT(() => { LEAN_STATUS_ZH = { 0: _t('k1110'), 1: _t('k1101'), 2: _t('k0635'), 3: _t('k1104'), 5: _t('k1105'), 7: _t('k0633') }; });
 
@@ -2851,7 +3150,7 @@ function paperDriftHTML(s, P) {
       ${T.untargetedCount ? ` ${_t('k1120')}${(D.untargeted || []).map((u) => `${_t('k1119', { v: esc(u.symbol), v2: num(u.qty, 0), v3: pct(u.weight, false) })}`).join(_t('k0015'))}</span>` : ''}
       ${T.missingPrice && T.missingPrice.length ? ` ${_t('k1121')}${esc(T.missingPrice.join(_t('k0015')))}` : ''}</p>`;
   const rows = (D.rows || []).map((r) => `<tr class="static${r.status === 'rejected' ? ' bad' : r.status === 'none' ? ' dim' : ''}" title="${esc([r.refSource ? `${_t('k1124', { refSource: r.refSource })}` : '', r.error || ''].filter(Boolean).join(_t('k0007')))}">
-      <td class="mono">${esc(r.symbol)} ${r.side ? (r.side === 'buy' ? _t('k1125') : _t('k1126')) : ''}</td>
+      <td class="mono">${esc(r.symbol)} ${r.side ? sideLabel(r) : ''}</td>
       <td>${r.status === 'filled' || r.status === 'none' ? esc(r.statusZh) : `<span class="warn-t">${esc(r.statusZh)}</span>`}</td>
       <td class="r">${r.side ? `${num(r.filledQty, 0)}/${num(r.qty, 0)}` : '—'}</td>
       <td class="r">${r.refPrice != null ? num(r.refPrice) : '—'} → ${r.fillPrice != null ? num(r.fillPrice) : '—'}</td>
@@ -2864,7 +3163,7 @@ function paperDriftHTML(s, P) {
 }
 
 // KPI 里的资金：放得下又不过粗（$1.02M），完整金额在悬停提示里
-const moneyM = (v) => (v == null || !Number.isFinite(+v) ? '—' : Math.abs(+v) >= 1e6 ? `$${(+v / 1e6).toFixed(2)}M` : money0(v));
+const moneyM = (v) => (v == null || !Number.isFinite(+v) ? '—' : Math.abs(+v) >= 1e6 ? `$${(+v / 1e6).toFixed(2)}M` : Math.abs(+v) >= 1e5 ? `$${(+v / 1e3).toFixed(0)}k` : money0(v)); // 六位数写成 $956k：指标格放不下 $956,234 会被截成 $956,…（完整数字在悬停提示里）
 function paperHTML() {
   const P = S.paper;
   const { projectId } = S.route;
@@ -2907,7 +3206,7 @@ function paperHTML() {
     const ao = P.alpacaOrders;
     orders = `<div class="panel section"><div class="panel-head"><h2>${_t('k1177')}</h2><span class="meta">${_t('k1178')}</span></div>
       ${ao && ao.error ? `<div class="error-box">${_t('k1173', { v: esc(ao.error) })}</div>` : Array.isArray(ao) && ao.length ? `<div class="table-wrap"><table class="data"><thead><tr><th>${_t('k1174')}</th><th>${_t('k0114')}</th><th>${_t('k0626')}</th><th>${_t('k0627')}</th><th>${_t('k0632')}</th><th>${_t('k1175')}</th><th>${_t('k0269')}</th></tr></thead><tbody>
-        ${ao.map((o) => `<tr><td class="when">${esc((o.submittedAt || '').replace('T', ' ').slice(0, 16))}</td><td class="mono">${esc(o.symbol)}</td><td>${o.side === 'buy' ? _t('k1125') : _t('k1126')}</td><td class="mono">${num(o.qty, 0)}</td><td class="mono">${num(o.filledQty, 0)}</td><td class="mono">${o.filledAvgPrice != null ? `$${num(o.filledAvgPrice)}` : '—'}</td><td>${esc(ALP_STATUS_ZH[o.status] || o.status)}</td></tr>`).join('')}
+        ${ao.map((o) => `<tr><td class="when">${esc((o.submittedAt || '').replace('T', ' ').slice(0, 16))}</td><td class="mono">${esc(o.symbol)}</td><td>${sideLabel(o)}</td><td class="mono">${num(o.qty, 0)}</td><td class="mono">${num(o.filledQty, 0)}</td><td class="mono">${o.filledAvgPrice != null ? `$${num(o.filledAvgPrice)}` : '—'}</td><td>${esc(ALP_STATUS_ZH[o.status] || o.status)}</td></tr>`).join('')}
       </tbody></table></div>` : _t('k1176')}</div>`;
   } else if (L) {
     orders = `<div class="panel section"><div class="panel-head"><h2>${_t('k1181')}</h2><span class="meta">${_t('k1182')}</span></div>
@@ -3036,10 +3335,71 @@ function setAlpHTML() {
     <label class="field"><span>Secret Key</span><input id="setAlpSecret" type="password" autocomplete="new-password" spellcheck="false"></label>
     <div class="set-btns"><button type="button" class="btn sm primary" data-set-alp-connect>${_t('h086')}</button></div>`;
 }
+// 更新（lib/updater.mjs）：自动更新开关、当前版本、GitHub 上的新版本、为什么暂时不能更新
+const UPD_INSTALL = 'curl -fsSL https://raw.githubusercontent.com/zhuhroscar-tech/helm/main/install.sh | bash';
+function updBlockerText(b, st) {
+  if (b === 'branch') return _t('upd_b_branch', { b: esc(st.branch || '?') });
+  if (b === 'dirty') return _t('upd_b_dirty', { n: st.dirty });
+  if (b === 'ahead') return _t('upd_b_ahead');
+  if (b === 'diverged') return _t('upd_b_diverged');
+  if (b === 'busy') return _t('upd_b_busy');
+  if (b === 'no-remote') return _t('upd_b_noremote');
+  return _t('upd_b_notgit');
+}
+function setUpdHTML() {
+  const U = S.upd;
+  if (!U) return `<p class="modal-hint">${_t('upd15')}</p>`;
+  if (U.error && !U.state) return `<p class="modal-hint">${esc(U.error)}</p>`;
+  const st = U.state || {}; const set = U.settings || {}; const av = set.available;
+  const ver = st.git ? `<span class="mono">${esc(st.short || '')}</span> · ${esc(String(st.date || '').slice(0, 10))}` : '—';
+  const news = av && av.behind ? _t('upd06', { n: av.behind }) : set.lastCheck ? _t('upd05') : '';
+  const when = set.lastCheck ? ` · ${_t('upd09')} ${esc(new Date(set.lastCheck).toLocaleString(LOC(), { hour12: false }))}` : '';
+  const list = av && av.commits && av.commits.length ? `<ul class="upd-list">${av.commits.slice(0, 5).map((c) => `<li><span class="mono">${esc(c.sha)}</span> ${esc(c.subject)}</li>`).join('')}</ul>` : '';
+  const bl = (U.blockers || []).length ? `<p class="set-line down">${_t('upd10')} ${U.blockers.map((b) => updBlockerText(b, st)).join('; ')}</p>` : '';
+  const setup = av && (av.needsSetup || av.needsApp) ? `<p class="modal-hint">${_t('upd14')} <code>${esc(UPD_INSTALL)}</code></p>` : '';
+  const err = set.lastError ? `<p class="set-line down">${esc(set.lastError)}</p>` : '';
+  return `<label class="upd-toggle"><input type="checkbox" id="setUpdAuto" data-upd-toggle ${set.autoUpdate ? 'checked' : ''}> <span>${_t('upd02')}</span></label>
+    <p class="modal-hint">${_t('upd03')}</p>
+    <dl class="set-kv"><dt>${_t('upd04')}</dt><dd>${ver}</dd><dt>GitHub</dt><dd>${news ? esc(news) : '—'}${when}</dd></dl>${list}${bl}${setup}${err}
+    <div class="set-btns"><button type="button" class="btn sm" data-upd-check>${_t('upd07')}</button>${av && av.behind ? `<button type="button" class="btn sm primary" data-upd-apply ${(U.blockers || []).length ? 'disabled' : ''}>${_t('upd08')}</button>` : ''}</div>`;
+}
+/* ---- 手机伴侣（lib/companion.mjs）：设置里开关、配对；首页显示手机发来的想法 ---- */
+async function loadCompanion() {
+  try { const keep = S.comp && S.comp.pair; S.comp = await api('/api/companion'); if (keep && keep.expiresAt > Date.now() && !S.comp.pairedAt) S.comp.pair = keep; } catch (e) { S.comp = { error: e.message }; }
+  renderSettings('comp');
+}
+function setCompHTML() {
+  const c = S.comp;
+  if (!c) return '<div class="skeleton" style="height:48px"></div>';
+  if (c.error) return `<p class="modal-hint warn-t">${esc(c.error)}</p>`;
+  if (!c.enabled) return `<p class="modal-hint">${_t('cp02')}</p><div class="set-row"><button type="button" class="btn" data-comp="enable">${_t('cp04')}</button></div>`;
+  const urls = (c.urls || []).map((u) => `<code class="cp-url">${esc(u)}</code>`).join('');
+  const pair = c.pair && c.pair.expiresAt > Date.now() ? `<div class="cp-pair"><span class="cp-code mono">${esc(c.pair.code.slice(0, 3))} ${esc(c.pair.code.slice(3))}</span><span class="modal-hint">${_t('cp08', { v: new Date(c.pair.expiresAt).toLocaleTimeString(LOC(), { hour: '2-digit', minute: '2-digit' }) })}</span></div>` : '';
+  return `<p class="modal-hint">${_t('cp05')}</p><div class="cp-urls">${urls || `<span class="modal-hint warn-t">${_t('cp06')}</span>`}</div>
+    <p class="modal-hint">${c.paired ? _t('cp09', { v: c.pairedAt ? ago(c.pairedAt) : '' }) : _t('cp07')}</p>${pair}
+    <div class="set-row cp-acts"><button type="button" class="btn" data-comp="pair">${_t('cp10')}</button>${c.paired ? `<button type="button" class="btn" data-comp="reset">${_t('cp11')}</button>` : ''}<button type="button" class="btn" data-comp="disable">${_t('cp13')}</button></div>`;
+}
+async function loadInbox() {
+  try { const r = await api('/api/inbox'); S.inbox = (r.ideas || []).filter((x) => x.status === 'new'); } catch { /* 伴侣没开过：没有收件箱 */ }
+  renderHomeSoon();
+}
+function inboxHTML() {
+  const list = S.inbox || [];
+  if (!list.length) return '';
+  return `<section class="home-sec home-inbox" aria-label="${_t('cp20')}"><div class="sec-head"><h2>${_t('cp20')}</h2><span class="meta">${list.length}</span></div>
+    <ul class="inbox-list">${list.map((x) => `<li><p>${esc(x.text)}</p><div class="inbox-foot"><span class="when">${agoT(x.at)}</span><span><button type="button" class="linkish" data-inbox-act="dismissed" data-inbox-id="${esc(x.id)}">${_t('cp22')}</button><button type="button" class="btn sm" data-inbox-act="used" data-inbox-id="${esc(x.id)}">${_t('cp21')}</button></span></div></li>`).join('')}</ul></section>`;
+}
+async function loadUpdate() {
+  try { S.upd = await api('/api/update/status'); } catch (e) { S.upd = { error: e.message }; }
+  renderSettings('upd');
+}
+
 function settingsBodyHTML() {
   return `<h2 id="setH">${_t('ux049')}</h2>
     <section class="set-sec" id="setAi" aria-labelledby="setAiH"><h3 id="setAiH">${_t('h092')}</h3><div class="set-in">${setAiHTML()}</div></section>
     <section class="set-sec" id="setAlp" aria-labelledby="setAlpH"><h3 id="setAlpH">${_t('h081')}</h3><div class="set-in">${setAlpHTML()}</div></section>
+    <section class="set-sec" id="setUpd" aria-labelledby="setUpdH"><h3 id="setUpdH">${_t('upd01')}</h3><div class="set-in">${setUpdHTML()}</div></section>
+    <section class="set-sec" id="setComp" aria-labelledby="setCompH"><h3 id="setCompH">${_t('cp01')}</h3><div class="set-in">${setCompHTML()}</div></section>
     <section class="set-sec" id="setLook" aria-labelledby="setLookH"><h3 id="setLookH">${_t('ux056')}</h3><div class="set-in side-foot">${lookRowsHTML()}</div></section>
     <div class="modal-actions"><button type="button" class="btn" data-onb-open>${_t('ob080')}</button><button type="button" class="btn primary" data-set-close>${_t('ux057')}</button></div>`;
 }
@@ -3049,6 +3409,8 @@ function renderSettings(part) {
   const d = settingsDlg.d;
   if (part === 'ai') { const el = d.querySelector('#setAi .set-in'); if (el) el.innerHTML = setAiHTML(); return; }
   if (part === 'alp') { const el = d.querySelector('#setAlp .set-in'); if (el) el.innerHTML = setAlpHTML(); return; }
+  if (part === 'upd') { const el = d.querySelector('#setUpd .set-in'); if (el) el.innerHTML = setUpdHTML(); return; }
+  if (part === 'comp') { const el = d.querySelector('#setComp .set-in'); if (el) el.innerHTML = setCompHTML(); return; }
   const body = d.querySelector('.set-body'); if (body) body.innerHTML = settingsBodyHTML();
 }
 async function loadAlpacaStatus() {
@@ -3058,6 +3420,39 @@ async function loadAlpacaStatus() {
 }
 async function onSettingsClick(e, close) {
   if (e.target.closest('[data-set-close]') || e.target.closest('[data-onb-open]')) { close(); return; }
+  const cp = e.target.closest('[data-comp]');
+  if (cp) {
+    const act = cp.dataset.comp;
+    if (act === 'reset' && !(await askConfirm({ title: _t('cp01'), message: _t('cp12') }))) return;
+    if (act === 'enable' && !(await askConfirm({ title: _t('cp01'), message: _t('cp03') }))) return;
+    cp.disabled = true;
+    try { const keep = S.comp && S.comp.pair; S.comp = await api('/api/companion', { method: 'POST', body: JSON.stringify({ action: act }) }); if (act !== 'pair' && act !== 'disable' && act !== 'reset' && keep) S.comp.pair = keep; } catch (err) { toast(err.message); }
+    renderSettings('comp');
+    return;
+  }
+  const ut = e.target.closest('[data-upd-toggle]');
+  if (ut) {
+    const r = await safePost('/api/update/settings', { autoUpdate: ut.checked });
+    if (!r.success) { ut.checked = !ut.checked; toast((r.errors || [r.error]).join('; ')); }
+    loadUpdate();
+    return;
+  }
+  const uc = e.target.closest('[data-upd-check]');
+  if (uc) {
+    uc.disabled = true; uc.textContent = _t('upd15');
+    const r = await safePost('/api/update/check', {});
+    if (!r.success) toast(_t('upd11', { e: r.detail || r.error || (r.errors || []).join('; ') }));
+    await loadUpdate();
+    return;
+  }
+  const ua = e.target.closest('[data-upd-apply]');
+  if (ua) {
+    ua.disabled = true;
+    const r = await safePost('/api/update/apply', {});
+    if (!r.success) toast(r.error === 'rolled-back' ? _t('upd16') : (r.blockers || []).map((b) => updBlockerText(b, (S.upd && S.upd.state) || {})).join('; ') || String(r.error || ''));
+    await loadUpdate();
+    return;
+  }
   if (e.target.closest('[data-set-ai-change]')) { openAiModal(); return; }
   const t = e.target.closest('[data-set-ai-test]');
   if (t) { t.disabled = true; await testAiUI(); S.aiCheckedAt = Date.now(); renderSettings('ai'); return; }
@@ -3088,6 +3483,8 @@ function openSettings(section) {
     settingsDlg = openModal({ cls: 'settings-dlg', labelId: 'setH', html: `<div class="cd-body set-body">${settingsBodyHTML()}</div>`, onClick: onSettingsClick, onClose: () => { settingsDlg = null; } });
     loadAi(true).then(() => { S.aiCheckedAt = Date.now(); renderSettings('ai'); });
     loadAlpacaStatus();
+    loadUpdate();
+    loadCompanion();
   }
   const sec = section === 'alpaca' ? settingsDlg.d.querySelector('#setAlp') : null;
   if (sec) { sec.scrollIntoView({ block: 'start' }); setTimeout(() => { const k = settingsDlg && settingsDlg.d.querySelector('#setAlpKey'); if (k) k.focus(); }, 300); }
@@ -3309,6 +3706,7 @@ const pill = ([t, c]) => `<span class="st-pill ${c}">${esc(t)}</span>`;
 async function loadPipeline() {
   if (!S.pipe) S.pipe = { data: null, error: null, tl: null };
   try { const r = await api('/api/pipeline'); S.pipe.data = r; S.pipe.error = null; } catch (e) { S.pipe.error = e.message; }
+  try { S.pipe.ap = await api('/api/autopilot'); } catch { /* 自动研究面板拿不到就不显示 */ }
   const sel = S.route.pipeProject;
   if (sel) {
     try { const r = await api(`/api/pipeline/${sel}`); S.pipe.tl = { projectId: sel, items: r.timeline }; } catch (e) { S.pipe.tl = { projectId: sel, error: e.message }; }
@@ -3341,7 +3739,7 @@ function pipeCardHTML(c) {
   const segs = c.stages.map((s, i) => `<span class="seg ${i <= c.stageIdx && s.gate ? GATE_CLS[s.gate.state] || '' : ''} ${i === c.stageIdx ? 'cur' : ''}" title="${esc(s.zh)}${s.gate ? `${_t('k1232', { v: esc(s.gate.label) })}` : _t('k1233')}"></span>`).join('');
   const w = c.working[0];
   const doing = c.drafting
-    ? `<div class="pc-doing">${agentGlyph(c.drafting.from, 'live')}${_t('k1234', { v: esc(agentOf(c.drafting.from).name) })}${c.drafting.agent ? ` → ${esc(agentOf(c.drafting.agent).name)}` : ''}</span></div>`
+    ? `<div class="pc-doing">${agentGlyph(c.drafting.from, 'live')}<span>${_t('k1234', { v: esc(agentOf(c.drafting.from).name) })}${c.drafting.agent ? ` → ${esc(agentOf(c.drafting.agent).name)}` : ''}</span></div>`
     : w ? `<div class="pc-doing">${agentGlyph(w.agent, 'live')}<span>${_t('k1235', { v: esc(agentOf(w.agent).name), v2: esc(w.title) })}</span></div>` : '';
   const last = c.last ? `<div class="pc-last"><span class="pc-stage">${esc(c.last.stage)}</span>${esc(c.last.outcome)}${c.key ? ` · ${esc(c.key.label)} <b class="mono">${num(c.key.value)}</b>` : ''}</div>` : _t('k1236');
   return `<article class="pipe-card ${sel ? 'sel' : ''} ${c.status === 'active' ? 'is-active' : ''}">
@@ -3420,7 +3818,69 @@ function pipelineHTML() {
       <div class="pcol-body">${cards.map(pipeCardHTML).join('') || '<div class="pcol-empty">—</div>'}</div></section>`;
   }).join('');
   const un = d.unassigned.length ? `<details class="pipe-un"><summary>${_t('k1259', { n: d.unassigned.length })}</summary><ul>${d.unassigned.map((t) => `<li>${agentGlyph(t.agent)}<button type="button" class="linkish" data-open-thread="${esc(t.id)}">${esc(t.title)}</button>${pill(TASK_STATUS[t.status] || TASK_STATUS.done)}<span class="muted">${agoT(t.updatedAt)}</span></li>`).join('')}</ul></details>` : '';
-  return `<div class="page wide">${head}${liveStripHTML(d)}<div class="pipe-board">${cols}</div>${pipeDetailHTML(d)}${un}</div>`;
+  return `<div class="page wide">${head}${liveStripHTML(d)}${autopilotHTML(P.ap)}<div class="pipe-board">${cols}</div>${pipeDetailHTML(d)}${un}</div>`;
+}
+
+/* ---------- Autopilot research (lib/autopilot.mjs, docs/AUTOPILOT.md) ---------- */
+const AP_REASON = { user: 'ap31', time: 'ap32', cost: 'ap33', restart: 'ap34' };
+function apVerdict(x) {
+  if (x.devPassed && x.holdoutPassed) return _t('ap38');
+  if (x.holdoutFailed) return _t('ap39');
+  if (x.devPassed) return _t('ap40');
+  if (x.devVersions && !x.devValidated) return _t('ap43');
+  if (x.devVersions) return _t('ap41');
+  if (x.tests) return _t('ap42');
+  return _t('ap37');
+}
+function apRunHTML(r, live) {
+  const L = r.ledger || {};
+  const st = live ? pill([_t('ap13'), 'st-active']) : pill(r.status === 'done' ? [_t('ap23'), 'st-done'] : r.status === 'error' ? [_t('ap25'), 'st-error'] : r.status === 'interrupted' ? [_t('ap26'), 'st-stopped'] : [_t('ap24'), 'st-stopped']);
+  const reason = r.reason ? `<span class="muted">${esc(AP_REASON[r.reason] ? _t(AP_REASON[r.reason]) : r.reason)}</span>` : '';
+  const canResume = !live && ['error', 'interrupted', 'stopped'].includes(r.status);
+  const nums = `<div class="ap-nums">${L.directions ? `${_t('ap49', { a: L.directions, b: r.budget.directions || 1 })} · ` : ''}${_t('ap16', { a: L.ideas || 0, b: r.budget.ideas, t: L.tests || 0, v: L.devVersions || 0, h: L.holdoutLooks || 0, c: Number(r.cost || 0).toFixed(2) })}${L.refusals ? ` · ${_t('ap17', { n: L.refusals })}` : ''}${L.decisions ? ` · ${_t('ap18', { n: L.decisions })}` : ''}</div>`;
+  const bs = r.batches || [];
+  const plan = r.plan ? r.plan.map((x, i) => {
+    const per = (L.per || []).find((y) => y.planIdea === i + 1);
+    const b = x.batch || 1;
+    const head = bs.length > 1 && (i === 0 || (r.plan[i - 1].batch || 1) !== b) ? `<li class="ap-dir-h">${_t('ap48', { n: b })}${bs[b - 1] && bs[b - 1].name ? `：${esc(bs[b - 1].name)}` : ''}${bs[b - 1] && bs[b - 1].whyNew ? ` <span class="muted">${esc(bs[b - 1].whyNew)}</span>` : ''}</li>` : '';
+    return `${head}<li><b>${i + 1}. ${esc(x.title)}</b> <span class="muted">${esc(x.logic || '')}</span> — ${per ? `<a href="#/pipeline/${per.projectId}">#${per.projectId}</a> ${esc(apVerdict(per))}` : esc(_t('ap37'))}</li>`;
+  }).join('') : `<li class="muted">${_t('ap28')}</li>`;
+  const dirLine = (r.direction ? `<div class="muted">${_t('ap46')}：${esc(r.direction)}</div>` : '') + (r.timingGate === 'risk-adjusted' ? `<div class="muted">${_t('ap50')}：${_t('ap53')}</div>` : '') + apChainLine(r, live);
+  const wait = (r.found || []).map((f) => `<div class="ap-wait"><b>${_t('ap19')}</b> ${_t('ap20', { p: f.projectId })} <a class="btn sm" href="#/p/${f.projectId}/b/${encodeURIComponent(f.devBacktestId || f.backtestId)}">${_t('ap21')}</a></div>`).join('');
+  const dec = (r.decisions || []).length ? `<details class="ap-more"><summary>${_t('ap29')} (${r.decisions.length})</summary><ul>${r.decisions.map((d) => `<li>${agentGlyph(d.agent || 'mia')}${esc(d.question)} → <b>${esc(d.picked || '—')}</b> <span class="muted">${esc(d.why || '')}</span></li>`).join('')}</ul></details>` : '';
+  const ref = (r.refusals || []).length ? `<details class="ap-more"><summary>${_t('ap30')} (${r.refusals.length})</summary><ul>${r.refusals.map((d) => `<li>${agentGlyph(d.agent || 'mia')}<code>${esc(d.tool)}</code> <span class="muted">${esc(d.message || '')}</span></li>`).join('')}</ul></details>` : '';
+  const acts = `<div class="ap-acts">${r.rootThreadId ? `<button type="button" class="btn sm" data-open-thread="${esc(r.rootThreadId)}">${_t('ap15')}</button>` : ''}${live ? `<button type="button" class="btn sm danger" data-ap-stop="${esc(r.runId)}">${_t('ap14')}</button>` : ''}</div>`;
+  return `<div class="ap-run"><div class="ap-run-h">${st}${reason}<span class="muted">${agoT(r.createdAt)}</span>${acts}</div>${canResume ? `<div class="muted">${_t('ap44')}</div>` : ''}${dirLine}${nums}${wait}<div class="ap-plan-h">${_t('ap27')}</div><ul class="ap-plan">${plan}</ul>${dec}${ref}</div>`;
+}
+// 连续模式的一行：第几轮、合计花了多少；结束时写明为什么不再接着找
+let AP_CHAIN_END; _regT(() => { AP_CHAIN_END = { usd: _t('ap59'), time: _t('ap60'), rounds: _t('ap61'), 'no-progress': _t('ap62'), 'holdout-pending': _t('ap64') }; });
+function apChainLine(r, live) {
+  if (!r.untilFound || !r.chain) return '';
+  const spent = (Number(r.chain.spent) || 0) + (Number(r.cost) || 0);
+  const head = _t('ap57', { n: r.chain.round, c: spent.toFixed(2), t: r.chain.usdTotal });
+  const tail = live ? '' : r.chainEnd ? ` · ${esc(AP_CHAIN_END[r.chainEnd] || _t('ap63', { v: r.chainEnd }))}` : r.status === 'done' && !(r.found || []).length && !r.nextRunId ? ` · ${_t('ap58')}` : '';
+  return `<div class="muted ap-chain">${head}${tail}</div>`;
+}
+function autopilotHTML(A) {
+  if (!A || !A.runs) return '';
+  const live = A.runs.find((r) => r.status === 'running');
+  const last = live ? null : A.runs[0];
+  const d = A.defaults || {};
+  const opt = (n, sel) => `<option value="${n}" ${n === sel ? 'selected' : ''}>${n}</option>`;
+  const form = live ? '' : `<form id="apForm" class="ap-form">
+      <label>${_t('ap03')}<select name="ideas">${[1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => opt(n, d.ideas || 6)).join('')}</select></label>
+      <label>${_t('ap45')}<select name="directions">${[1, 2, 3, 4, 5].map((n) => opt(n, d.directions || 3)).join('')}</select></label>
+      <label>${_t('ap04')}<select name="versions">${[1, 2, 3].map((n) => opt(n, d.versions || 2)).join('')}</select></label>
+      <label>${_t('ap05')}<select name="scope"><option value="any">${_t('ap06')}</option><option value="stock">${_t('ap07')}</option><option value="timing">${_t('ap08')}</option></select></label>
+      <label title="${esc(_t('ap52'))}">${_t('ap50')}<select name="timingGate"><option value="return" ${d.timingGate === 'risk-adjusted' ? '' : 'selected'}>${_t('ap51')}</option><option value="risk-adjusted" ${d.timingGate === 'risk-adjusted' ? 'selected' : ''}>${_t('ap53')}</option></select></label>
+      <label>${_t('ap09')}<input name="usd" type="number" min="1" max="500" step="1" value="${d.usd || 20}"></label>
+      <label>${_t('ap10')}<input name="minutes" type="number" min="10" max="1440" step="10" value="${d.minutes || 180}"></label>
+      <label class="ap-dir">${_t('ap46')}<input name="direction" type="text" maxlength="300" placeholder="${esc(_t('ap47'))}"></label>
+      <label class="ap-chk"><input name="stopOnFind" type="checkbox" ${d.stopOnFind === false ? '' : 'checked'}>${_t('ap11')}</label>
+      <label class="ap-chk" title="${esc(_t('ap55'))}"><input name="untilFound" type="checkbox" ${store.get('apUntil', true) ? 'checked' : ''}>${_t('ap54')}</label>
+      <button type="submit" class="btn primary">${_t('ap12')}</button></form>`;
+  return `<section class="ap-panel ${live ? 'is-live' : ''}" aria-label="${_t('ap01')}"><details ${live || (last && (last.found || []).length) ? 'open' : ''}><summary><b>${_t('ap01')}</b><span class="muted">${_t('ap02')}</span></summary>
+    ${form}${live ? apRunHTML(live, true) : last ? `<div class="ap-last-h">${_t('ap22')}</div>${apRunHTML(last, false)}` : ''}</details></section>`;
 }
 
 /* ---------- Agents ---------- */
@@ -3567,6 +4027,30 @@ function agentFormPatch(form) {
   };
 }
 function wirePipelineAgents() {
+  document.addEventListener('submit', async (e) => {
+    if (e.target.id !== 'apForm') return;
+    e.preventDefault();
+    const f = new FormData(e.target);
+    // 模型和思考深度跟对话框里选的一致（默认「自动」）：不传的话 claude 用它自己的默认模型，账号不一定能用
+    const body = { budget: { ideas: Number(f.get('ideas')), versions: Number(f.get('versions')), directions: Number(f.get('directions')) }, direction: String(f.get('direction') || '').trim(), scope: String(f.get('scope') || 'any'), timingGate: String(f.get('timingGate') || 'return'), untilFound: f.get('untilFound') === 'on', usd: Number(f.get('usd')), minutes: Number(f.get('minutes')), stopOnFind: f.get('stopOnFind') === 'on', model: S.model || 'auto', effort: S.effort || 'auto' };
+    store.set('apUntil', body.untilFound);
+    if (!(await askConfirm({ title: _t('ap01'), message: body.untilFound ? `${_t('ap35')} ${_t('ap56', { usd: body.usd, min: body.minutes })}` : _t('ap35') }))) return;
+    const btn = e.target.querySelector('button[type=submit]'); if (btn) btn.disabled = true;
+    try {
+      const r = await api('/api/autopilot/start', { method: 'POST', body: JSON.stringify(body) });
+      toast(_t('ap36'));
+      await loadPipeline();
+      if (r.threadId) openThread(r.threadId);
+    } catch (err) { if (btn) btn.disabled = false; toast(err.message); }
+  });
+  document.addEventListener('click', async (e) => {
+    const st = e.target.closest('[data-ap-stop]');
+    if (!st) return;
+    e.preventDefault();
+    st.disabled = true;
+    try { await api('/api/autopilot/stop', { method: 'POST', body: JSON.stringify({ runId: st.dataset.apStop }) }); } catch (err) { toast(err.message); }
+    loadPipeline();
+  });
   document.addEventListener('click', (e) => {
     const nt = e.target.closest('[data-new-task]');
     if (nt) { e.preventDefault(); e.stopPropagation(); newTaskFor(nt.dataset.newTask); return; }
@@ -3630,15 +4114,30 @@ function qDraft(q) {
   if (!S.qDraft.has(q.id)) S.qDraft.set(q.id, { sel: q.questions.map(() => []), other: q.questions.map(() => '') });
   return S.qDraft.get(q.id);
 }
+// 审核员的结论（选项上的小标签）：值得做 / 有保留 / 筛掉，附问题和一句理由
+const CRITIC_V = { keep: ['cr-keep', 'cr_keep'], caution: ['cr-caution', 'cr_caution'], drop: ['cr-drop', 'cr_drop'] };
+function criticTag(r) {
+  if (!r) return '';
+  const [cls, key] = CRITIC_V[r.verdict] || CRITIC_V.caution;
+  return `<span class="cr-tag ${cls}">${_t(key)}${r.flags && r.flags.length ? ` · ${r.flags.map((f) => esc(_t(`cr_f_${f}`))).join(' · ')}` : ''}</span>${r.reason ? `<span class="cr-why">${esc(r.reason)}</span>` : ''}`;
+}
+function criticBanner(rv) {
+  if (!rv) return '';
+  if (rv.status === 'running') return `<p class="cr-note">${_t('cr_running')}</p>`;
+  if (rv.status !== 'done') return '';
+  if (rv.noneWorth) return `<div class="cr-none"><b>${_t('cr_none')}</b>${rv.summary ? ` ${esc(rv.summary)}` : ''}${rv.fix ? `<br>${_t('cr_fix')}${esc(rv.fix)}` : ''}</div>`;
+  return rv.summary ? `<p class="cr-note">${_t('cr_summary')}${esc(rv.summary)}</p>` : '';
+}
 function questionCardHTML(q) {
   const d = qDraft(q); const ag = agentOf(q.agent);
   const left = Math.max(0, Math.round((q.expiresAt - Date.now()) / 60000));
+  const rv = q.review && q.review.status === 'done' ? q.review : null;
   const items = q.questions.map((qq, i) => `<fieldset class="qq"><legend>${qq.header ? `<span class="qq-h">${esc(qq.header)}</span>` : ''}${esc(qq.question)}${qq.multiSelect ? _t('k1331') : ''}</legend>
-    <div class="qq-opts">${qq.options.map((o) => { const on = d.sel[i].includes(o.label); return `<button type="button" class="qq-opt ${on ? 'on' : ''}" data-q-opt="${i}" data-label="${esc(o.label)}" aria-pressed="${on}"><b>${esc(o.label)}</b>${o.description ? `<i>${esc(o.description)}</i>` : ''}</button>`; }).join('')}</div>
+    <div class="qq-opts">${qq.options.map((o) => { const on = d.sel[i].includes(o.label); const r = rv && rv.questions[i] && rv.questions[i].applicable ? rv.questions[i].options[o.label] : null; return `<button type="button" class="qq-opt ${on ? 'on' : ''}${r && r.verdict === 'drop' ? ' cr-dim' : ''}" data-q-opt="${i}" data-label="${esc(o.label)}" aria-pressed="${on}"><b>${esc(o.label)}</b>${o.description ? `<i>${esc(o.description)}</i>` : ''}${criticTag(r)}</button>`; }).join('')}</div>
     <input type="text" class="qq-other" data-q-other="${i}" value="${esc(d.other[i])}" placeholder="${_t('k1332')}" maxlength="1000" aria-label="${_t('k1333')}"></fieldset>`).join('');
   return `<form class="qcard" data-q="${esc(q.id)}">
     <div class="qc-top">${_t('k1334', { v: esc(ag.glyph), v2: esc(ag.name), left })}</div>
-    ${q.intro ? `<p class="qc-intro">${esc(q.intro)}</p>` : ''}${items}
+    ${q.intro ? `<p class="qc-intro">${esc(q.intro)}</p>` : ''}${criticBanner(q.review)}${items}
     <div class="ap-act"><button type="submit" class="btn sm primary">${_t('k1335')}</button><button type="button" class="btn sm" data-q-skip>${_t('k1336')}</button></div>
   </form>`;
 }
@@ -4555,6 +5054,9 @@ function connectBus() {
       if (window.HelmDecks) HelmDecks.onEvent(ev);
     } else if (ev.type === 'universe_started') {
       if (S.route.view === 'home') loadUniverses(true);
+    } else if (ev.type === 'update_applied') {
+      toast(ev.autoRestart ? _t('upd12', { v: ev.to }) : _t('upd13', { v: ev.to }), { sticky: !ev.autoRestart });
+      if (settingsDlg) loadUpdate();
     } else if (ev.type === 'agents_changed') {
       reloadAgentList();
     } else if (ev.type === 'approval_request') {
@@ -4570,18 +5072,24 @@ function connectBus() {
       if (!(S.thread && S.thread.id === ev.question.threadId && $('#app').classList.contains('chat-open'))) {
         toast(`${_t('k1493', { name: agentOf(ev.question.agent).name, n: ev.question.questions.length })}`, { label: _t('k1494'), run: () => openThread(ev.question.threadId), sticky: true });
       }
+    } else if (ev.type === 'question_reviewed') {
+      const x = S.questions.get(ev.id); if (x) { x.review = ev.review; onApprovalsChanged(); }
     } else if (ev.type === 'question_settled') {
       const x = S.questions.get(ev.id); if (x) x.state = ev.state;
       onApprovalsChanged();
     } else if (ev.type === 'approval_settled') {
       const x = S.approvals.get(ev.id); if (x) x.state = ev.state;
       onApprovalsChanged();
+    } else if (ev.type === 'inbox_updated') {
+      loadInbox();
+    } else if (ev.type === 'companion_updated') {
+      if (settingsDlg) { if (S.comp) S.comp.pair = null; loadCompanion(); }
     } else if (ev.type === 'changes_updated') {
       if (S.route.page === 'agents' && S.route.agentsView === 'changes') loadChanges().then(() => renderMain());
       refreshRestart();
     }
     // 流水线和 Agents 页跟着实时刷新：谁开始、谁交给谁、谁做完、工具做完了什么
-    if (['hello', 'run_start', 'run_end', 'tool_done', 'handoff_draft', 'project_created', 'project_deleted', 'backtest_started', 'research_started', 'paper_updated'].includes(ev.type)) {
+    if (['hello', 'run_start', 'run_end', 'tool_done', 'handoff_draft', 'project_created', 'project_deleted', 'backtest_started', 'research_started', 'paper_updated', 'autopilot_updated'].includes(ev.type)) {
       refreshPipelineSoon();
       if (ev.type !== 'tool_done' && ev.type !== 'handoff_draft') refreshAgentsSoon();
     }
@@ -5116,10 +5624,23 @@ function wire() {
     const ex = e.target.closest('[data-example]');
     if (ex) { const t = $('#ideaInput'); if (t) { t.value = ex.dataset.example; store.set('ideaDraft', t.value); t.focus(); t.setSelectionRange(t.value.length, t.value.length); } return; }
     if (e.target.closest('[data-idea-retry]')) { const f = $('#ideaForm'); if (f) f.requestSubmit(); return; }
+    const ib = e.target.closest('[data-inbox-act]');
+    if (ib) {
+      const it = (S.inbox || []).find((x) => x.id === ib.dataset.inboxId);
+      const act = ib.dataset.inboxAct;
+      api('/api/inbox', { method: 'POST', body: JSON.stringify({ id: ib.dataset.inboxId, action: act }) }).then(() => {
+        S.inbox = (S.inbox || []).filter((x) => x.id !== ib.dataset.inboxId);
+        renderMain();
+        // 「用这个想法」：填进想法框，由你看一眼再交给团队
+        if (act === 'used' && it) { const t = $('#ideaInput'); if (t) { t.value = it.text; store.set('ideaDraft', t.value); t.scrollIntoView({ block: 'center' }); t.focus(); t.setSelectionRange(t.value.length, t.value.length); } }
+      }).catch((err) => toast(err.message));
+      return;
+    }
     if (e.target.closest('#runsBtn')) { const rm = $('#runsMenu'); rm.hidden = !rm.hidden; return; }
     const ot = e.target.closest('[data-open-thread]');
     if (ot) { const rm = $('#runsMenu'); if (rm) rm.hidden = true; openThread(ot.dataset.openThread); return; }
     if (e.target.closest('[data-new-project]')) { openProjectModal(); return; }
+    if (e.target.closest('[data-home-closed]')) { store.set('homeClosed', !store.get('homeClosed', false)); renderMain(); const b = $('[data-home-closed]'); if (b) b.focus(); return; }
     const r2 = e.target.closest('[data-route2]');
     if (r2) { S.route2 = r2.dataset.route2; store.set('ideaRoute', S.route2); const box = r2.closest('.route-pick'); box.querySelectorAll('[data-route2]').forEach((b) => { const on = b === r2; b.classList.toggle('active', on); b.setAttribute('aria-checked', on); }); const rt = (ROUTES.find((x) => x[0] === S.route2) || ROUTES[0]); const tipEl = box.querySelector('.route-tip'); tipEl.textContent = rt[3]; tipEl.title = rt[2]; return; }
     const prep = e.target.closest('[data-prepare]');
@@ -5153,6 +5674,7 @@ function wire() {
       const k = act.dataset.action;
       // 打开菜单/对话框的按钮立即响应；会发请求的按钮在返回前不能再点
       if (k === 'backtest') doAction(k, { kb: e.detail === 0 ? '1' : '0' });
+      else if (k === 'layer') openLayerModal();
       else if (k === 'research' || k === 'paper-new' || k === 'project-rename') doAction(k, act.dataset);
       else once(`action:${k}`, act, () => doAction(k, act.dataset));
       return;
@@ -5182,7 +5704,7 @@ function wire() {
       renderMain();
       return;
     }
-    if (e.target.closest('[data-qc-export]')) { if (Array.isArray(S.code)) openQcDialog(S.code); return; }
+    if (e.target.closest('[data-qc-export]')) { if (Array.isArray(S.code)) openQcDialog(S.code, { projectId: S.route.projectId, backtestId: S.route.backtestId }); return; }
     const cb = e.target.closest('[data-code-copy], [data-code-dl]');
     if (cb) {
       const list = cb.dataset.src === 'bt' ? S.code : S.files;
@@ -5220,8 +5742,9 @@ function wire() {
       if (m) { e.preventDefault(); if (m.hidden) toggleMenu(m, true); else { const f = m.querySelector('button:not([disabled])'); if (f) f.focus(); } return; }
     }
     const mod = e.metaKey || e.ctrlKey;
-    if (mod && e.key.toLowerCase() === 'j') { e.preventDefault(); $('#chatToggle').click(); }
-    if (mod && e.key.toLowerCase() === 'k') { e.preventDefault(); openChat(); input.focus(); }
+    const dlg = Boolean(document.querySelector('dialog[open]')); // 对话框开着时，对话面板在它后面、拿不到焦点
+    if (mod && !dlg && e.key.toLowerCase() === 'j') { e.preventDefault(); $('#chatToggle').click(); }
+    if (mod && !dlg && e.key.toLowerCase() === 'k') { e.preventDefault(); openChat(); input.focus(); }
     if (e.key === 'Escape') {
       if (!$('#threadMenu').hidden) { $('#threadMenu').hidden = true; $('#threadBtn').focus(); return; }
       if (document.querySelector('dialog[open]')) return;

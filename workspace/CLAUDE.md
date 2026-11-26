@@ -9,10 +9,10 @@
 通过 `mcp__qc__*` 工具操作：
 `list_projects`、`read_project`、`create_project`、`update_project`、`read_file`、`write_file`、`compile`、
 `create_backtest`、`wait_for_backtest`、`read_backtest`、`list_backtests`、`read_backtest_orders`、
-`read_backtest_log`、`read_backtest_code`、`update_backtest`、`validate_backtest`、`fetch_data`、`fetch_macro`、`list_data`、`save_dataset`、`list_datasets`、`read_dataset`、`handoff`、`list_paper_sessions`、`read_paper_session`，以及受保护的 `delete_file`、`delete_backtest`。
+`read_backtest_log`、`read_backtest_code`、`update_backtest`、`validate_backtest`、`fetch_data`、`fetch_macro`、`list_data`、`save_dataset`、`list_datasets`、`read_dataset`、`handoff`、`list_paper_sessions`、`read_paper_session`、`attribute_backtest`（因子归因，只读），以及受保护的 `delete_file`、`delete_backtest`。
 
 qlib 工具（用户本机的 qlib + 项目里已测试的研究引擎）：
-`list_universes`、`universe_members`、`prepare_universe`、`test_idea`、`start_research`、`research_status`、`read_research`、`resume_research`、`stop_research`、`export_signals`、`list_signals`。
+`list_universes`、`universe_members`、`prepare_universe`、`test_idea`、`start_research`、`research_status`、`read_research`、`resume_research`、`stop_research`、`export_signals`、`list_signals`、`build_breadth`、`test_timing_signal`。
 
 ## 数据（重要）
 
@@ -105,7 +105,7 @@ qlib 工具（用户本机的 qlib + 项目里已测试的研究引擎）：
 | 预热 | 预热多少根日线（`set_warm_up`），预热期内不下单 |
 | 信号时间 → 成交时间 | 按下面的日线成交规则写，例如“T 日收盘价算信号 → T+1 开盘价成交” |
 | 仓位 | 每个标的权重、总仓位上限（默认 0.98）、整股取整（LEAN 按整股下单，向下取整） |
-| 现金 | 不持仓时钱放哪里（现金不计息 / 停放某个 ETF）；账户类型，是否允许杠杆和做空 |
+| 现金 | 不持仓时钱放哪里（现金不计息 / 停放某个 ETF）；账户类型，是否允许杠杆和做空（做空见下面「做空」一节：保证金账户、空头上限、融券费率） |
 | 调仓 | 信号一变就调 / 每月第一个交易日 / 每周…，以及“调仓日”的精确定义 |
 | 成本 | 手续费和滑点假设（不设 brokerage model 时，LEAN 默认股票按 IB 费率收手续费、滑点为 0） |
 | 基准 | 按下面的基准规则 |
@@ -143,6 +143,55 @@ qlib 工具（用户本机的 qlib + 项目里已测试的研究引擎）：
 - **默认值就是规则说明里的值**，行为和写死数字完全一样；不要把默认值改成别的，也不要为了“好看”调它。
 - `get_parameter` 只用来声明这些数字，不要拿它读别的东西（路径、开关、密钥）。最多声明 6 个关键参数。
 - 用户在稳健性页跑「参数敏感性」时，Helm 会把每个参数 ×0.8、×1.2 重跑，只是诊断；不要自己根据变体结果挑参数，那是调参，要作为新回测重跑并计入尝试次数。
+
+## 波动率目标（HelmVol）：按预测波动率调仓位
+收益很难预测，波动率好预测。`from helm_data import HelmVol` 给一个**只用过去数据**的波动率预测（HAR 模型，历史不够时用 EWMA），用来缩放仓位：策略选什么、何时买卖都不变，只改「买多少」。目的是降低回撤和波动，不是提高收益。
+```python
+from helm_data import HelmVol
+# initialize：
+self.target_vol = self.get_parameter("target_vol", 0.10)   # 年化波动率目标，写进 spec
+self.vol = HelmVol(target=self.target_vol, max_leverage=1.0) # 现金账户：max_leverage 必须是 1.0
+# 用 history 预热（只用开始日期之前的数据）：self.vol.warmup([(t, r), ...])
+# 每个交易日：先用 self.vol.scale() 决定今天的仓位，收盘后再 self.vol.update(self.time, 当天日收益)
+# 下单：目标权重 × self.vol.scale()
+```
+- 喂什么收益：喂**策略当前持有资产**的日收益（单资产 / 轮动策略就喂当时持有的那个 ETF；多资产组合喂组合按目标权重算的日收益），写进 spec。
+- 调仓频率不变：仓位系数只在策略原本的调仓日应用（比如每月第一个交易日），不要每天按它调仓（换手和成本会大增）；如果 spec 写了「系数变化超过 0.2 才调」，照写。
+- spec 里要写清：目标波动率（默认 10%）、max_leverage = 1.0、method = "har"、horizon = 21、喂的是哪条收益、在哪些日子应用。这些在看结果之前定死。
+- **实验规则（终止条件）**：带波动率目标的版本和原策略是同一个项目里的两个回测，算一次新的尝试。
+  1. 只跑一个预先写好的版本（默认参数）。不要试多个 target_vol 挑最好的；真要调，用 `tune_backtest`（计入尝试次数、看 PBO）。
+  2. 开发期合格线（事先定好）：最大回撤相对原策略**至少降 25%**，且夏普**不比原策略低 0.05 以上**，并通过 validate_backtest。达不到就停，结论写「波动率目标对这个策略没有可信的帮助」，保持原策略。
+  3. 合格后验证期只跑一次，和原策略的验证期比回撤和夏普；不论好坏都照实报告，不再改。
+- 结论里要说清：这是降风险，不是加收益；回撤低了多少、收益少了多少、换手多了多少。
+
+## 择时过滤（市场宽度，HelmBreadth）：用成分股看大盘内部
+ETF 择时策略只看得到 ETF 价格；qlib 的历史成分股能看到大盘「内部」有多少股票在走好。`build_breadth`（股票池导出时也会自动算）生成三条每日序列：`pct_above_200`（站上 200 日均线的成分股比例）、`net_highs`（52 周新高减新低的比例）、`dispersion`（成分股 21 日收益的分化程度，越高越差）。只有 sp500 是完整的历史成分股。
+```python
+from helm_data import HelmBreadth
+self.breadth = HelmBreadth("sp500")
+# 调仓日：只用严格早于今天的值（今天收盘算出的宽度明天才能用）
+b = self.breadth.value(self.time, "pct_above_200")
+risk_on = original_signal and (b is None or b > 0.5)   # 宽度作为风险开关的确认条件，写进 spec
+```
+- **先检验再用**：`test_timing_signal`（只用开发期、不重叠样本、多重检验计数）。结论「没有信号」就停，保持原策略；「信号弱」要明说只是弱，由用户决定要不要做成候选。
+- **事先定死一个规则**：序列、阈值（默认 pct_above_200 > 0.5 / net_highs > 0 / dispersion 低于开发期中位数）、作用方式（只在原策略要持有股票时作为确认，不满足时转到原策略的避险资产）、在哪些日子判断（原策略的调仓日）。不要试多个阈值挑最好的。
+- 叠加后的版本跑成候选，原策略原样做消融对照；合格线：通过 validate_backtest，且夏普不低于原策略、最大回撤不大于原策略。验证期只跑一次。
+- 结论要说清：独立样本有多少（每月一次判断，20 年约 240 个），以及这只是对大盘内部的判断，不预测个股。
+
+## 做空（多空 / 对冲 / 配对）
+Helm 支持做空：回测在 LEAN 里用负的目标权重（`set_holdings(x, -0.3)`），Alpaca 模拟实盘会照着开空、平空。默认（用户没说）仍然只做多；用户的想法本身需要空头（多空、市场中性、配对、对冲、做空某个板块）时才做空，并在规格里写清。
+- **规格（spec）必须写**：「现金」行写**保证金账户**（`self.set_brokerage_model(BrokerageName.INTERACTIVE_BROKERS_BROKERAGE, AccountType.MARGIN)`）；「仓位」行写多头和空头各自的上限、总仓位 Σ|权重| 上限（默认 ≤ 1.6，例如 130/30 或 80/80）、单只空头上限（默认 ≤ 10%）；「成本」行写**融券费率**假设。
+- **融券费必须算**：LEAN 回测默认不收融券费，做空的回测会偏乐观。`from helm_data import HelmShortCost`：
+```python
+self.borrow = HelmShortCost(rate=0.005)            # 大盘股默认年化 0.5%；难借的写进 hard_to_borrow=[...]（默认 10%），或 rates={"XYZ": 0.03}
+# 每个交易日调用一次（on_data 开头即可）：按空头市值 × 费率 × 自然日/360 从现金里扣
+self.borrow.charge(self)
+# on_end_of_algorithm：self.log(self.borrow.summary())   把融券成本合计写进日志，结论里要报
+```
+  代码检查看到负权重 / 负下单数量却没有 HelmShortCost 会提醒（short-no-borrow-cost），用现金账户做空也会提醒（short-cash-account）。这两条提醒必须处理，不能忽略。
+- **股票池**：只空流动性好的大盘股 / 宽基 ETF。小盘、低价、高空头比例的股票在现实里经常借不到或费率很高（Alpaca 只能空「容易借」的股票），回测里空它们的收益不可信；要空就把它们放进 hard_to_borrow 并在结论里写明。
+- **风险要报**：空头的亏损没有上限（逼空）。结论里除了夏普和回撤，再报空头腿单独的收益、最差单月、融券成本合计；多空策略的基准按「基准规则」照常（市场中性策略可以由用户选 risk-adjusted 标准，规则同上）。
+- **模拟实盘（Alpaca）**：账户必须是保证金账户并打开做空（模拟盘默认是）；账户不能空时一笔都不下。借不到的股票这次不开空并写明；从多翻空（或从空翻多）这次只平仓，反向仓位下一个交易日再开。总仓位超过 1.6 倍会按比例缩小。
 
 ## 调参（超参数搜索）：只用 Helm 自带的方法
 不要自己写循环、手动改参数一次次回测来「找最好的参数」。要调就用下面两个工具，它们只在开发期打分、每个候选都计入尝试次数、用 PBO 检查是不是调出了噪音：

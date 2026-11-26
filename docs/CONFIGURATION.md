@@ -111,3 +111,16 @@ Not part of the schema and not accepted in `helm.config.json`:
 - `HELM_WRITE_ONLY`: Set by the server: restricts which files an agent may write via MCP.
 - `HELM_CONFIG`: Path of the config file itself (read by loadConfig, not a setting).
 - `QS_TRA_BUDGET`: Tests: "epochs,steps" budget for fast TRA smoke tests.
+
+## Connecting an AI
+
+Click **AI** in the top bar. Every option is tested before it is saved:
+
+| Option | What you need | Notes |
+|---|---|---|
+| Automatic (default) | `claude` already signed in, or `ANTHROPIC_API_KEY` in your shell | Same as before this setting existed |
+| Claude subscription | Run `claude` once in a terminal and sign in with your Pro / Max / Team account | Uses your plan's usage; any API key in the environment is ignored |
+| Anthropic API key | A key from console.anthropic.com | Checked with a free `GET /v1/models` call |
+| Other compatible API | Endpoint URL, key and model ID from the provider, e.g. `https://api.deepseek.com/anthropic` + `deepseek-chat` | The endpoint must speak the Anthropic Messages API (often a URL ending in `/anthropic`). Checked with a 1-token request. Agents use this model for everything |
+
+Keys are stored only in a local `secrets/ai.json` (mode 0600; `~/Library/Application Support/Helm/secrets/` on new installs, `data/secrets/` on older ones, see [Where keys and data are stored](#where-keys-and-data-are-stored)) and handed to Claude Code through its `apiKeyHelper` setting, never through environment variables. The page only ever sees the last four characters, and agent-run commands can't read the file or the key. Helm relies heavily on tool calls, so weaker models may fail at multi-step work.

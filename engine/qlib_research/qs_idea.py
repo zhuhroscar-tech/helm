@@ -11,7 +11,8 @@ Pure functions (no Qlib import at module level; tested by test_qs_idea.py):
   * t_threshold, registry_*        multiple-testing control across ideas on one universe
   * evaluate_factor, judge         statistics and verdict for one factor
 
-Qlib-dependent helpers (import qlib lazily): qlib_expr_wide, factor_scores (signal export).
+Data helpers (no qlib: formulas run in qs_expr on the run's data directory): set_provider, expr_wide,
+component_frames, factor_scores (signal export).
 """
 from __future__ import annotations
 
@@ -252,8 +253,9 @@ def _check_node(node):
                 if s == "q" and not (0 <= a[1] <= 1):
                     raise IdeaError(f"{op} 的分位数参数要在 0 到 1 之间")
             else:
-                if s == "f" and a[0] == "num":
-                    raise IdeaError(f"{op} 的第一个参数应该是数据表达式，不是数字")
+                # 不只是光秃秃的数字：2*3、1+1 这种不含数据字段的式子也不行（否则算的时候才崩，或者整个因子悄悄变成全空）
+                if s == "f" and (a[0] == "num" or not _has_feature(a)):
+                    raise IdeaError(f"{op} 的这个参数应该是数据表达式（要用到 $close 这类字段），不是数字或只由数字组成的式子")
                 _check_node(a)
     elif kind == "bin":
         _check_node(node[2])
@@ -739,26 +741,39 @@ def summary_zh(factors: list) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Qlib-dependent helpers
+# Formula evaluation on the run's data directory (qs_expr; no qlib)
 # ---------------------------------------------------------------------------
 
-def qlib_expr_wide(expr: str, instruments: list, start, end) -> pd.DataFrame:
-    """Evaluate a validated expression with Qlib's D.features -> dates x tickers. The string is checked by
-    parse_expr again here, and Qlib's own expression object must not need future data."""
-    parse_expr(expr)
-    from qlib.data import D
-    from qlib.data.data import ExpressionD
-    lft, rght = ExpressionD.get_expression_instance(expr).get_extended_window_size()
-    if rght > 0:
-        raise IdeaError(f"表达式 {expr} 用到了未来的数据，不允许")
-    df = D.features(instruments, [expr], start_time=str(pd.Timestamp(start).date()),
-                    end_time=str(pd.Timestamp(end).date()) if end is not None else None, freq="day")
-    s = df.iloc[:, 0]
-    if s.index.names[0] != "datetime":
-        s = s.swaplevel().sort_index()
-    w = s.unstack()
-    w.index = pd.DatetimeIndex(w.index)
-    return w.astype("float64").replace([np.inf, -np.inf], np.nan)
+_PROVIDER: dict = {"uri": None, "data": None}
+
+
+def set_provider(uri) -> None:
+    """The run's data directory (Qlib binary layout) that formulas are evaluated on."""
+    if uri and _PROVIDER["uri"] != str(uri):
+        import qs_expr
+        _PROVIDER.update(uri=str(uri), data=qs_expr.BinData(uri))
+
+
+def expr_wide(expr: str, instruments: list, start, end) -> pd.DataFrame:
+    """Evaluate a validated expression on the current provider -> dates x tickers (float64, inf -> NaN).
+    qs_expr reproduces qlib 0.9.7's results (fixtures/ and test_qs_expr.py) without importing qlib; formulas
+    can only look back (literal, non-negative windows are enforced by parse_expr)."""
+    import qs_expr
+    if _PROVIDER["data"] is None:
+        raise RuntimeError("expr_wide: no data directory set (set_provider)")
+    w = qs_expr.expr_wide(expr, instruments, start, end, _PROVIDER["data"])
+    failed = w.attrs.get("failed") or {}
+    if instruments and failed and len(failed) >= len(instruments):
+        # 每只股票都算失败：不能当成「没有信号」记进多重检验登记（会抬高所有人的门槛），直接报错
+        first = next(iter(failed.values()))
+        raise IdeaError(f"表达式 {expr} 在每只股票上都算不出来：{first}")
+    out = w.loc[w.attrs["rows"], sorted(w.attrs["present"])]  # the frame shape qlib's D.features + unstack gave
+    out.index.name, out.columns.name = "datetime", "instrument"
+    out.attrs = {}  # do not carry qs_expr's bookkeeping into later frames
+    return out
+
+
+qlib_expr_wide = expr_wide  # old name, kept for callers
 
 
 def component_frames(factor: dict, instruments: list, start, end, fund_panel: dict | None, index: pd.DatetimeIndex):
@@ -766,7 +781,7 @@ def component_frames(factor: dict, instruments: list, start, end, fund_panel: di
     parts = []
     for c in factor["components"]:
         if "expr" in c:
-            w = qlib_expr_wide(c["expr"], instruments, start, end)
+            w = expr_wide(c["expr"], instruments, start, end)
         else:
             if fund_panel is None or c["fundamental"] not in fund_panel:
                 raise IdeaError(f"这次运行没有基本面数据 {c['fundamental']}")
@@ -788,9 +803,7 @@ def factor_scores(run_dir, factor_name: str):
     if fac is None:
         raise IdeaError(f"这次想法检验里没有因子 {factor_name}；有：{', '.join(f['name'] for f in spec['factors'])}")
     da = json.loads((rd / "data_audit.json").read_text())
-    import qlib
-    from qlib.constant import REG_US
-    qlib.init(provider_uri=da["provider_uri"], region=REG_US, kernels=1)
+    set_provider(da["provider_uri"])
     el = pd.read_pickle(rd / "data" / "eligible.pkl")
     cols = [t for t in da["tickers_with_data"] if t in el.columns]
     el = el[cols]

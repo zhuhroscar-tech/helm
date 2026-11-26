@@ -22,7 +22,8 @@
     "config": "node bin/helm.mjs config",
     "doctor": "node bin/helm.mjs doctor",
     "test": "node test/all.mjs",
-    "test:smoke": "node test/smoke.mjs"
+    "test:smoke": "node test/smoke.mjs",
+    "eval": "node evals/run.mjs"
   },
   "engines": {
     "node": ">=20"

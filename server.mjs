@@ -13,7 +13,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { engineStatus, listProjects, DATA_DIR, READ_ENDPOINTS, runSensitivity, sensitivityRead, runTune, tuneRead, PROJECTS_DIR, compileProject, createBacktest, createProject, trashProject, updateBacktest, reconcileLedgers, templateCode, secretDirs, setMainByUser, leanSandboxState, updateProjectFileByUser, renameProject } from './lib/engine.mjs';
+import { engineStatus, listProjects, DATA_DIR, READ_ENDPOINTS, runSensitivity, sensitivityRead, runTune, tuneRead, PROJECTS_DIR, compileProject, createBacktest, createProject, trashProject, setProjectValidation, updateBacktest, reconcileLedgers, templateCode, secretDirs, setMainByUser, leanSandboxState, updateProjectFileByUser, renameProject } from './lib/engine.mjs';
 import { setupHints, setupCommand } from './lib/setup-hints.mjs';
 import * as Q from './lib/qlib.mjs';
 import { loadRobust } from './lib/robust.mjs';
@@ -22,13 +22,22 @@ import { loadJournal } from './lib/journal.mjs';
 import { listDatasets } from './lib/datasets.mjs';
 import * as Paper from './lib/paper.mjs';
 import * as Alpaca from './lib/alpaca.mjs';
+import * as QC from './lib/quantconnect.mjs';
+import * as Layer from './lib/layer.mjs';
+import { loadAttribution } from './lib/attribution.mjs';
+import * as Critic from './lib/critic.mjs';
+import * as Autopilot from './lib/autopilot.mjs';
+import { Companion, lanUrls, buildSummary } from './lib/companion.mjs';
+import * as Harness from './lib/harness/index.mjs';
+import { writeJsonAtomic } from './lib/fs-atomic.mjs';
 import * as AI from './lib/ai.mjs';
 import { sensitiveReadDenies } from './lib/agent-perms.mjs';
-import { effectiveTools, localTools, validateAgentPatch, saveAgentPatch, isQcTool } from './lib/agents.mjs';
+import { effectiveTools, localTools, validateAgentPatch, saveAgentPatch, isQcTool, QC_TOOLS } from './lib/agents.mjs';
 import { decide as decideChange, scopeKey, simpleDiff } from './lib/change-policy.mjs';
 import { sandboxReady, wrapAgentCommand } from './lib/exec-sandbox.mjs';
 import { ChangeStore, readTextSync, defaultRunTests } from './lib/changes.mjs';
 import { loadTasks, buildPipeline, projectTimeline } from './lib/pipeline.mjs';
+import { localState, blockers as updateBlockers, checkForUpdate, applyUpdate, readUpdateState, setAutoUpdate, startAutoUpdater, UPDATE_BRANCH } from './lib/updater.mjs';
 import { loadConfig, applyToEnv } from './lib/config.mjs';
 import { langOf, isLang, langPrompt, localize, localizeData, HEALTH_EN } from './lib/i18n.mjs';
 import { Translator, translateData, translatePrompt, parseArray } from './lib/translate.mjs';
@@ -83,9 +92,13 @@ const safeEqual = (a, b) => {
 // 会把正在运行的 Helm 的 agent 指到测试环境的 node 和路径上
 const MCP_CONFIG = process.env.HELM_MCP_CONFIG || path.join(ROOT, 'data', 'mcp.json');
 mkdirSync(path.dirname(MCP_CONFIG), { recursive: true });
-writeFileSync(MCP_CONFIG, JSON.stringify({
+// 交给 claude 的 MCP 配置直接以 JSON 字符串传（--mcp-config 接受文件或 JSON）：不依赖共享的 data/mcp.json。
+// 以前读文件时，别的进程（比如在沙盒里跑的测试服务）改写了它，正在运行的 Helm 的 agent 就连不上 qc 工具
+// （报错 "mcp__qc__approve ... not found. Available MCP tools: none"）。文件仍然写一份，只供查看。
+const MCP_INLINE = JSON.stringify({
   mcpServers: { [MCP_NAME]: { type: 'stdio', command: process.execPath, args: [path.join(ROOT, 'mcp', 'qc-mcp.mjs')] } },
-}, null, 2));
+});
+writeFileSync(MCP_CONFIG, JSON.stringify(JSON.parse(MCP_INLINE), null, 2));
 
 const MODELS = [
   { id: 'fable', label: 'Fable 5.1', desc: '最强，账号不支持时 Claude 会自动换成别的模型' },
@@ -156,9 +169,10 @@ function cleanQuestions(list) {
     const opts = Array.isArray(q && q.options) ? q.options : [];
     if (!text || text.length > 500) return { error: '每个问题要有 1–500 字的 question' };
     if (opts.length < 2 || opts.length > 4) return { error: `「${text.slice(0, 30)}」要有 2–4 个选项（options）` };
-    const options = opts.map((o) => ({ label: String((o && (o.label ?? o)) || '').trim().slice(0, 80), description: String((o && o.description) || '').trim().slice(0, 300) }));
+    // conservative / category：自动研究按它们自动回答（lib/autopilot.mjs autoAnswer）；平时只是附带信息
+    const options = opts.map((o) => ({ label: String((o && (o.label ?? o)) || '').trim().slice(0, 80), description: String((o && o.description) || '').trim().slice(0, 300), ...(o && o.conservative === true ? { conservative: true } : {}) }));
     if (options.some((o) => !o.label)) return { error: '每个选项都要有 label' };
-    out.push({ question: text, header: String(q.header || '').trim().slice(0, 16), multiSelect: q.multiSelect === true, options });
+    out.push({ question: text, header: String(q.header || '').trim().slice(0, 16), multiSelect: q.multiSelect === true, options, ...(Autopilot.CATEGORIES.has(q.category) ? { category: q.category } : {}) });
   }
   return { questions: out };
 }
@@ -178,16 +192,42 @@ function settleQuestion(q, { answers = null, freeText = '', skipped = false, by 
 }
 // 给 agent 的文字版回答
 function answerText(q) {
+  const rv = q.review && q.review.status === 'done' ? q.review : null;
   if (q.state === 'skipped') {
-    return q.by === 'timeout' ? `用户 ${Math.round(QUESTION_WAIT_MS / 60000)} 分钟没有回答。按你推荐的选项（每题第一个）继续，并在最终总结里说明用了哪些默认。`
-      : q.by === 'system' ? '对话已经结束，问题作废。' : '用户跳过了提问，让你按推荐的选项（每题第一个）继续。在最终总结里说明用了哪些默认。';
+    if (q.by === 'system') return '对话已经结束，问题作废。';
+    const { note, defaults } = Critic.agentNote(q, rv, { skipped: true });
+    const head = q.by === 'timeout' ? `用户 ${Math.round(QUESTION_WAIT_MS / 60000)} 分钟没有回答。` : '用户跳过了提问。';
+    if (rv && rv.noneWorth) return `${head}\n${note}`;
+    const picks = defaults.some((d, i) => d !== (q.questions[i].options[0] && q.questions[i].options[0].label))
+      ? `按这些默认继续：${q.questions.map((qq, i) => `${i + 1}.「${defaults[i] || '（没有可用的选项）'}」`).join('；')}`
+      : '按你推荐的选项（每题第一个）继续';
+    return `${head}${picks}，并在最终总结里说明用了哪些默认。${note ? `\n${note}` : ''}`;
   }
   const lines = q.questions.map((qq, i) => {
     const a = q.answers[i];
     const pick = a.selected.length ? a.selected.join('、') : '（没选）';
     return `${i + 1}. ${qq.question}\n   → ${pick}${a.other ? `；补充：${a.other}` : ''}`;
   });
-  return `用户回答了：\n${lines.join('\n')}${q.freeText ? `\n用户另外说：${q.freeText}` : ''}\n\n照这些回答继续做，不用再确认。`;
+  const { note } = Critic.agentNote(q, rv);
+  return `用户回答了：\n${lines.join('\n')}${q.freeText ? `\n用户另外说：${q.freeText}` : ''}\n\n照这些回答继续做，不用再确认。${note ? `\n\n${note}` : ''}`;
+}
+
+// 审核员的材料：用户的原话（这个对话的第一条和最近一条消息）、项目说明和规则说明、之前的想法检验结论
+async function criticForQuestion(thread, q) {
+  const users = (thread.messages || []).filter((m) => m.role === 'user');
+  const request = [users[0] && users[0].text, users.length > 1 ? users[users.length - 1].text : ''].filter(Boolean).join('\n---\n');
+  const pid = Number((users.map((m) => m.context && m.context.projectId).filter(Boolean).pop()) || 0);
+  let project = null; let spec = ''; let priorIdeas = [];
+  if (Number.isSafeInteger(pid) && pid > 0) {
+    const pr = await READ_ENDPOINTS['projects/read']({ projectId: pid }).catch(() => null);
+    project = pr && pr.success ? pr.projects[0] : null;
+    spec = await readFile(path.join(PROJECTS_DIR, String(pid), 'spec.md'), 'utf8').catch(() => '');
+    const rj = await Q.listResearch({ projectId: pid }).catch(() => null);
+    priorIdeas = Layer.priorIdeaResults(rj && rj.success ? rj.jobs : []);
+  }
+  const items = q.questions.map((qq) => ({ header: qq.header, question: qq.question, options: qq.options }));
+  const lang = thread.lang === 'en' ? 'en' : 'zh';
+  return Critic.review({ input: Critic.buildInput({ kind: 'ask', intro: q.intro, items, request, project, spec, priorIdeas }), items, lang, runModel: runModelOnce });
 }
 async function handleAsk(req, res) {
   if (!safeEqual(req.headers['x-helm-token'], HANDOFF_TOKEN)) return sendJson(res, 403, { error: 'bad token' });
@@ -196,6 +236,7 @@ async function handleAsk(req, res) {
   if (!run) return sendJson(res, 400, { error: '找不到正在运行的对话' });
   const c = cleanQuestions(body.questions);
   if (c.error) return sendJson(res, 400, { error: c.error });
+  if (run.thread.autopilot) return answerAutopilot(run, { intro: body.intro, questions: c.questions }, res);
   if ([...questions.values()].some((x) => x.threadId === run.thread.id && x.state === 'pending')) return sendJson(res, 409, { error: '已经有一组问题在等用户回答' });
   const q = {
     id: `q${Date.now().toString(36)}${crypto.randomBytes(3).toString('hex')}`, threadId: run.thread.id, agent: run.thread.agent, threadTitle: run.thread.title,
@@ -205,11 +246,165 @@ async function handleAsk(req, res) {
   q.timer = setTimeout(() => settleQuestion(q, { skipped: true, by: 'timeout' }), QUESTION_WAIT_MS);
   questions.set(q.id, q);
   for (const [k, v] of questions) if (v.state !== 'pending' && Date.now() - v.at > 24 * 3600 * 1000) questions.delete(k);
+  // 审核员：独立地逐个审这些选项（不挡流程；审完再推一次，用户在审完之前就能回答）
+  if (Critic.enabled()) {
+    q.review = { status: 'running' };
+    criticForQuestion(run.thread, q).then((rv) => {
+      q.review = rv ? { status: 'done', ...rv } : { status: 'failed' };
+      broadcast({ type: 'question_reviewed', id: q.id, threadId: q.threadId, review: q.review });
+    });
+  }
   broadcast({ type: 'question_request', question: questionView(q) });
   // 用 res 的 close：请求体读完之后 req 的 close 在 Node 22 上不一定触发，MCP 进程崩了卡片会一直挂 15 分钟
   res.on('close', () => { if (q.state === 'pending' && !res.writableFinished) settleQuestion(q, { skipped: true, by: 'system' }); });
   await done;
   return sendJson(res, 200, { id: q.id, state: q.state, text: answerText(q), answers: q.answers, freeText: q.freeText });
+}
+
+/* ---------------- 自动研究（lib/autopilot.mjs，设计见 docs/AUTOPILOT.md） ---------------- */
+// 运行记录存在 data/autopilot/<runId>.json；正在跑的放在内存里，每次变化都落盘
+const AUTOPILOT_DIR = path.join(path.dirname(THREADS_DIR), 'autopilot');
+const apRuns = new Map();
+const apTimers = new Map(); // runId → 时间上限的定时器（不放进运行记录：定时器对象不能写成 JSON）
+const apSave = (ap) => writeJsonAtomic(path.join(AUTOPILOT_DIR, `${ap.runId}.json`), ap).catch(() => {});
+const apTouch = (ap) => { apSave(ap); broadcast({ type: 'autopilot_updated', runId: ap.runId, status: ap.status }); };
+async function apLoad(runId) {
+  if (!/^ap[a-z0-9]{4,24}$/.test(String(runId || ''))) return null;
+  if (apRuns.has(runId)) return apRuns.get(runId);
+  try {
+    const ap = JSON.parse(await readFile(path.join(AUTOPILOT_DIR, `${runId}.json`), 'utf8'));
+    // 不在内存里却标着 running：服务重启过，那一轮已经断了
+    if (ap.status === 'running') { ap.status = 'interrupted'; ap.reason = ap.reason || 'restart'; ap.endedAt = ap.endedAt || Date.now(); await apSave(ap); }
+    return ap;
+  } catch { return null; }
+}
+async function apList() {
+  const files = (await readdir(AUTOPILOT_DIR).catch(() => [])).filter((f) => /^ap[a-z0-9]+\.json$/.test(f));
+  const out = [];
+  for (const f of files) { const ap = await apLoad(f.slice(0, -5)); if (ap) out.push(Autopilot.runView(ap)); }
+  return out.sort((a, b) => b.createdAt - a.createdAt).slice(0, 30);
+}
+function apEnd(ap, status, reason = null) {
+  if (ap.status !== 'running') return;
+  ap.status = status; ap.reason = reason; ap.endedAt = Date.now();
+  clearTimeout(apTimers.get(ap.runId)); apTimers.delete(ap.runId);
+  apTouch(ap);
+}
+// 自动研究里的提问：不弹给用户，先等审核员（最多 60 秒），再按规则回答
+async function answerAutopilot(run, q, res) {
+  const ap = apRuns.get(run.thread.autopilot);
+  if (!ap) return sendJson(res, 200, { text: '自动研究已经结束：不要继续，停下汇报。' });
+  let review = null;
+  if (Critic.enabled()) {
+    const qq = { intro: q.intro || '', questions: q.questions };
+    review = await Promise.race([criticForQuestion(run.thread, qq).catch(() => null), new Promise((r) => setTimeout(() => r(null), 60_000))]);
+  }
+  const a = Autopilot.autoAnswer(ap, q, review);
+  for (const d of a.decisions) ap.decisions.push({ ...d, agent: run.thread.agent, threadId: run.thread.id, reviewed: Boolean(review) });
+  for (const w of a.awaiting) ap.awaiting = [...(ap.awaiting || []), w];
+  apTouch(ap);
+  return sendJson(res, 200, { id: null, state: 'autopilot', text: a.text, answers: a.answers });
+}
+// 开工背景：已经试过的（想法记录）、可以用的数据（股票池、财报字段、宏观、宽度、自建数据集）。每样都有超时，拿不到就省略
+async function apContext(lang) {
+  const soon = (p, ms, dflt) => Promise.race([p.catch(() => dflt), new Promise((r) => setTimeout(() => r(dflt), ms))]);
+  const [journal, uni, ds] = await Promise.all([
+    soon(loadJournal(), 20_000, null),
+    soon(Q.listUniverses(), 20_000, null),
+    soon(listDatasets({ dataDir: DATA_DIR }), 5_000, null),
+  ]);
+  const universes = uni && uni.success ? uni.universes.map((u) => ({ key: u.key, kind: u.kind })) : [];
+  return {
+    tested: Autopilot.testedText((journal && journal.entries) || [], { lang }),
+    menu: Autopilot.dataMenu({ universes, fundFields: Q.FUND_FIELDS || {}, datasets: (ds && ds.datasets) || [], breadth: existsSync(path.join(DATA_DIR, 'helm', 'breadth', 'sp500.csv')), lang }),
+  };
+}
+async function startAutopilot(body, lang, { chain = null } = {}) {
+  if ([...apRuns.values()].some((x) => x.status === 'running')) throw httpError(409, localize(lang, '已经有一轮自动研究在跑，等它结束或先停掉。'));
+  const ap = Autopilot.newRun(body || {}, { lang, chain });
+  ap.start = { model: body && body.model ? String(body.model).slice(0, 80) : null, effort: body && body.effort ? String(body.effort).slice(0, 40) : null }; // 连续模式的下一轮沿用
+  // 评测的快速探针：从一轮的中途开始（只在评测模式下允许，平时忽略 seed）
+  const seeded = Boolean(process.env.HELM_EVAL_FIXTURES && body && body.seed && typeof body.seed === 'object');
+  if (seeded) Autopilot.applySeed(ap, body.seed);
+  const thread = newThread('mia', lang === 'en' ? `Autopilot research ${new Date(ap.createdAt).toISOString().slice(0, 16).replace('T', ' ')}` : `自动研究 ${new Date(ap.createdAt).toLocaleString('zh-CN', { hour12: false }).slice(0, 16)}`, { autopilot: ap.runId, lang });
+  if (ap.chain && ap.chain.round > 1) thread.title = `${thread.title} · ${lang === 'en' ? `round ${ap.chain.round}` : `第 ${ap.chain.round} 轮`}`.slice(0, 60);
+  ap.rootThreadId = thread.id;
+  apRuns.set(ap.runId, ap);
+  await mkdir(AUTOPILOT_DIR, { recursive: true });
+  await apSave(ap);
+  // 时间上限：到点就停整棵对话树（guard 也会拒绝新的工作）
+  const timer = setTimeout(() => { if (ap.status === 'running') { stopRunTree(ap.rootThreadId); apEnd(ap, 'stopped', 'time'); } }, ap.caps.minutes * 60000);
+  if (timer.unref) timer.unref();
+  apTimers.set(ap.runId, timer);
+  try {
+    const ctx = await apContext(ap.lang);
+    if (process.env.HELM_EVAL_FIXTURES && body && typeof body.tested === 'string') ctx.tested = body.tested.slice(0, 6000); // 评测：给定「已经试过的」
+    await startRun(thread, { message: seeded ? Autopilot.progressMessage(ap, body.note, ctx) : Autopilot.kickoffMessage(ap, ctx), model: body && body.model, effort: body && body.effort });
+  } catch (e) { apEnd(ap, 'error', e.message); throw e; }
+  apTouch(ap);
+  return { runId: ap.runId, threadId: thread.id };
+}
+async function resumeAutopilot(thread) {
+  const ap = apRuns.get(thread.autopilot) || await apLoad(thread.autopilot);
+  if (!ap || ap.rootThreadId !== thread.id || ap.status === 'running' || !Autopilot.RESUMABLE.has(ap.status)) return;
+  if ([...apRuns.values()].some((x) => x.status === 'running' && x.runId !== ap.runId)) return; // 另一轮在跑：这条消息就当普通追问（只能看结果）
+  Autopilot.resume(ap);
+  apRuns.set(ap.runId, ap);
+  clearTimeout(apTimers.get(ap.runId));
+  const timer = setTimeout(() => { if (ap.status === 'running') { stopRunTree(ap.rootThreadId); apEnd(ap, 'stopped', 'time'); } }, ap.caps.minutes * 60000);
+  if (timer.unref) timer.unref();
+  apTimers.set(ap.runId, timer);
+  apTouch(ap);
+}
+// 连续模式：一轮正常结束、没找到候选，就自动开下一轮（新的运行记录、新的对话），直到找到、总用量或总时间用完。
+// 出错 / 被停掉 / 中断的那一轮不接；用户重发消息恢复后做完，照样会走到这里。
+async function apChainNext(ap) {
+  const nx = Autopilot.nextRound(ap);
+  if (!nx) return;
+  if (nx.stop) { if (nx.stop !== 'found') { ap.chainEnd = nx.stop; apTouch(ap); } return; }
+  try {
+    const r = await startAutopilot({ ...nx.options, model: ap.start && ap.start.model, effort: ap.start && ap.start.effort }, ap.lang, { chain: nx.chain });
+    ap.nextRunId = r.runId; apTouch(ap);
+  } catch (e) { ap.chainEnd = `error: ${String(e.message || e).slice(0, 200)}`; apTouch(ap); }
+}
+
+// MCP（qc-mcp.mjs）在自动研究的对话里，每次调用工具之前问 guard、成功之后报 record
+async function handleAutopilotTool(req, res, kind) {
+  if (!safeEqual(req.headers['x-helm-token'], HANDOFF_TOKEN)) return sendJson(res, 403, { error: 'bad token' });
+  const body = await readJsonRaw(req, 8_000_000);
+  const run = runs.get(body.threadId);
+  const ap = run && run.thread.autopilot ? apRuns.get(run.thread.autopilot) : null;
+  if (!ap) return sendJson(res, 200, kind === 'guard' ? { allow: true } : { ok: true });
+  const tool = String(body.tool || '');
+  const args = body.args && typeof body.args === 'object' ? body.args : {};
+  if (kind === 'guard') {
+    let g = Autopilot.guard(ap, tool, args);
+    // 登记一批想法：硬规则过了之后，再交给独立审核员（已知因子换个名字、已经测过、事后挑选、数据不够的会被筛掉；最多等 90 秒，出错就放行）
+    if (g.allow && tool === 'autopilot_plan' && Critic.enabled()) {
+      const items = Autopilot.planReviewItems(args, ap.lang);
+      const ctx = await apContext(ap.lang).catch(() => ({}));
+      const input = Critic.buildInput({ kind: 'autopilot-plan', items, request: [ap.direction ? `用户指定的方向：${ap.direction}` : '', `范围：${ap.scope}，股票池：${ap.universe}`, ap.timingGate === 'risk-adjusted' ? '择时想法的判定标准：风险调整（夏普差显著为正且最大回撤 ≤ 基准的 2/3）' : '择时想法的判定标准：收益要跑赢所交易资产的买入持有（纯防守、只为少跌的切换几乎过不了）'].filter(Boolean).join('\n'), facts: { alreadyTested: ctx.tested || '', availableData: ctx.menu || '' } });
+      const rv = await Promise.race([Critic.review({ input, items, lang: ap.lang, runModel: runModelOnce }).catch(() => null), new Promise((r) => setTimeout(() => r(null), 90_000))]);
+      g = Autopilot.planReviewVerdict(rv, items, ap.lang);
+      if (rv) ap.planReviews = [...(ap.planReviews || []), { at: Date.now(), ideas: items[0].options.map((o) => o.label), verdicts: Object.fromEntries(Object.entries((rv.questions[0] || {}).options || {}).map(([k, v]) => [k, v.verdict])), summary: rv.summary || '' }];
+    }
+    if (!g.allow) { ap.refusals.push({ at: Date.now(), agent: run.thread.agent, tool, message: g.message }); apTouch(ap); }
+    return sendJson(res, 200, g);
+  }
+  const r = Autopilot.record(ap, tool, args, String(body.result || ''), { isError: body.isError === true });
+  // 用户开工前选了「择时按风险调整标准」：择时想法的项目一建好就写进 project.json（在任何回测之前），之后不再改
+  let gateNote = '';
+  if (tool === 'create_project' && ap.current != null && ap.projects[ap.current] === Number(args.planIdea) && Autopilot.wantsRiskAdjusted(ap, args.planIdea)) {
+    const sv = await setProjectValidation({ projectId: ap.current, mode: 'risk-adjusted' }).catch(() => null);
+    // 没写成（比如项目目录不在）：照实告诉 agent 这个项目仍按收益标准判，不假装已经设好
+    gateNote = sv && sv.success
+      ? (ap.lang === 'en' ? 'This timing project is judged on the risk-adjusted standard (set by the user before the run).' : '这个择时项目按风险调整标准判（用户开工前选定）。')
+      : (ap.lang === 'en' ? 'Helm could not set the risk-adjusted standard on this project; it is judged on return.' : 'Helm 没能给这个项目设上风险调整标准，它仍按收益标准判。');
+  }
+  if (gateNote) r.note = [r.note, gateNote].filter(Boolean).join('\n');
+  if (r.found) ap.awaiting = [...(ap.awaiting || []), { at: Date.now(), projectId: r.found.projectId, backtestId: r.found.backtestId, devBacktestId: r.found.devBacktestId, what: 'main' }];
+  apTouch(ap);
+  return sendJson(res, 200, { ok: true, note: r.note || '' });
 }
 
 /* ---------------- utils ---------------- */
@@ -279,16 +474,16 @@ async function readJsonRaw(req, limit = 2_000_000) {
 
 
 // ---- 请求体校验：所有 POST 接口在进业务代码之前先过这一关，类型不对 / 缺字段 / 太长一律 400 + 中文说明 ----
-const STR_MAX = { name: 120, description: 2000, template: 40, backtestId: 64, sessionId: 64, jobId: 64, index: 40, start: 10, role: 20, period: 20, mode: 20, title: 120, target: 40, benchmark: 20, features: 30, neutralize: 30, advanced: 30, idea: 4000, keyId: 200, secret: 400, message: 200000, threadId: 64, feature: 40, ideaFactor: 60, file: 120, model: 40, effort: 20, agent: 40, aiMode: 20, apiKey: 500, baseUrl: 300, aiModel: 120, nameEn: 120, nameZh: 120, deckId: 64, audience: 20, quality: 20, length: 20, note: 2000, notes: 2000, firm: 200, presenter: 200, disclaimer: 4000, disclaimerEn: 4000 };
+const STR_MAX = { name: 120, description: 2000, template: 40, backtestId: 64, sessionId: 64, jobId: 64, index: 40, start: 10, role: 20, period: 20, mode: 20, title: 120, target: 40, benchmark: 20, features: 30, neutralize: 30, advanced: 30, idea: 4000, keyId: 200, secret: 400, userId: 20, token: 200, layerId: 40, optionId: 8, message: 200000, threadId: 64, feature: 40, ideaFactor: 60, file: 120, model: 40, effort: 20, agent: 40, aiMode: 20, apiKey: 500, baseUrl: 300, aiModel: 120, nameEn: 120, nameZh: 120, deckId: 64, audience: 20, quality: 20, length: 20, note: 2000, notes: 2000, firm: 200, presenter: 200, disclaimer: 4000, disclaimerEn: 4000 };
 const NUM_FIELDS = ['costBps', 'holdoutYears', 'capital'];
-const BOOL_FIELDS = ['full', 'fresh', 'allowDanger', 'wait', 'reviewOutline', 'clearTemplate', 'clearLogo'];
+const BOOL_FIELDS = ['full', 'fresh', 'allowDanger', 'wait', 'reviewOutline', 'clearTemplate', 'clearLogo', 'confirmHelmData', 'verify'];
 const ARR_MAX = { tickers: 2000, factors: 20, horizons: 20, backtestIds: 6 };
 const REQUIRED = {
   '/api/actions/project': ['name'], '/api/actions/project-delete': ['projectId'], '/api/actions/project-rename': ['projectId', 'name'], '/api/actions/compile': ['projectId'], '/api/actions/backtest': ['projectId'],
   '/api/actions/backtest-tag': ['projectId', 'backtestId'], '/api/actions/backtest-main': ['projectId', 'backtestId'], '/api/actions/sensitivity': ['projectId', 'backtestId'], '/api/actions/tune': ['projectId', 'backtestId'], '/api/actions/universe': ['index'], '/api/actions/research': ['projectId'], '/api/actions/idea': ['projectId'],
   '/api/actions/research-stop': ['projectId', 'jobId'], '/api/actions/research-resume': ['projectId', 'jobId'],
   '/api/actions/paper-start': ['projectId', 'backtestId'], '/api/actions/paper-stop': ['projectId', 'sessionId'], '/api/actions/paper-run': ['projectId', 'sessionId'],
-  '/api/actions/alpaca-connect': ['keyId', 'secret'], '/api/actions/ai-save': ['aiMode'], '/api/actions/signals': ['projectId', 'jobId'], '/api/chat': ['message'], '/api/chat/stop': ['threadId'],
+  '/api/actions/alpaca-connect': ['keyId', 'secret'], '/api/actions/qc-connect': ['userId', 'token'], '/api/actions/qc-push': ['projectId', 'backtestId'], '/api/actions/layer-precheck': ['projectId'], '/api/actions/layer-assess': ['projectId'], '/api/actions/layer-read': ['projectId', 'layerId'], '/api/actions/layer-choose': ['projectId', 'layerId', 'optionId'], '/api/actions/ai-save': ['aiMode'], '/api/actions/signals': ['projectId', 'jobId'], '/api/chat': ['message'], '/api/chat/stop': ['threadId'],
   '/api/data/files/read': ['projectId'], '/api/data/files/update': ['projectId', 'name'], '/api/data/backtests/list': ['projectId'], '/api/data/backtests/read': ['projectId', 'backtestId'],
   '/api/data/backtests/chart/read': ['projectId', 'backtestId'], '/api/data/backtests/orders/read': ['projectId', 'backtestId'], '/api/data/backtests/log/read': ['projectId', 'backtestId'],
   '/api/data/backtests/code/read': ['projectId', 'backtestId'], '/api/data/backtests/validate': ['projectId', 'backtestId'],
@@ -324,6 +519,10 @@ const shortToolName = (name) => String(name || '').replace(/^mcp__.*?__/i, '');
 
 /* ---------------- status ---------------- */
 
+const layerRunning = new Map(); // projectId → layerId：正在评估「叠加 Qlib 选股」的项目（一次一个）
+const layerStarting = new Set(); // 正在准备评估（读回测、代码、股票池）的项目：同步占位，防连点 / 两个标签页各起一次付费评估
+const layerChoosing = new Set(); // 正在处理选择的 layerId：防两次选择都把任务交给总控
+const qcPushing = new Set(); // 正在发到 QuantConnect 的项目：同一项目不并发发送
 let statusCache = null;
 let statusAt = 0;
 async function getStatus(force = false) {
@@ -410,8 +609,11 @@ async function computeHealth(force) {
       hintEn: sb.off ? 'The sandbox is off: AI-written strategy code can read and write your files and use the network while it runs. Only do this if you trust the code.' : 'This machine has no /usr/bin/sandbox-exec (not macOS), so backtests are refused for safety. To run them anyway, add HELM_EXEC_SANDBOX=off to .env and restart Helm.' },
     { id: 'priceData', zh: '行情数据', required: false, ok: st.engine.tickers > 0, detail: `本地已有 ${st.engine.tickers} 个代码的日线`,
       hint: '不用手动准备：第一次运行回测时，会自动下载代码里用到的股票 / ETF 日线（可以忽略这一项）' },
-    { id: 'qlib', zh: 'qlib 研究引擎', required: false, ok: Boolean(q && q.ok), detail: q ? (q.python || (q.runSh ? '找不到装了 qlib 的 Python' : '找不到 engine/qlib_research/run.sh')) : '检查超时或出错',
-      hint: '只有「想法检验 / 完整研究 / 股票池」需要。在 helm 目录运行：engine/qlib_research/run.sh --which-python ，看它报缺什么（推荐装到 engine/.qlib-venv，也可以在 .env 里加一行 QS_PYTHON=/绝对路径/python）' },
+    // 想法检验 / 股票池 / 导出信号只要 engine/.venv（公式在 qs_expr 里算）；qlib 只有完整因子研究要用
+    { id: 'research', zh: '研究引擎（想法检验、股票池）', required: false, ok: Boolean(q && q.ok), detail: q ? (q.python || (q.runSh ? '找不到研究用的 Python（engine/.venv）' : '找不到 engine/qlib_research/run.sh')) : '检查超时或出错',
+      hint: '用的是 Helm 自己的 engine/.venv（和回测同一个环境），不需要 qlib。缺的话先把上面的「Python 虚拟环境」装好' },
+    { id: 'qlib', zh: 'qlib（只有完整因子研究要用）', required: false, ok: Boolean(q && q.qlib), detail: q ? (q.qlibPython || '没装：想法检验、股票池不受影响') : '检查超时或出错',
+      hint: '只有完整因子研究（LightGBM、qlib 回测）需要。在 helm 目录运行：engine/qlib_research/run.sh --which-python ，看它报缺什么（推荐装到 engine/.qlib-venv，也可以在 .env 里加一行 QS_PYTHON=/绝对路径/python）' },
     { id: 'qlibData', zh: 'qlib 美股数据', required: false, ok: Boolean(q && q.data), detail: '~/.qlib/qlib_data/us_data',
       hint: '只有 qlib 研究需要：把 qlib 的美股日线数据放到 ~/.qlib/qlib_data/us_data（目录里要有 calendars、features、instruments）' },
   // detail 里可能带绝对路径（DOTNET_BIN、qlib 的 Python、claude 的报错）：把用户主目录换成 ~，不把目录结构给网页
@@ -623,11 +825,17 @@ function askPrompt(thread) {
 }
 
 function buildArgs(agent, thread, context, allowDanger, opts) {
+  // 这个 agent 这次运行用的工作台（lib/harness/）：提示词里说明代码会强制什么，下面按它收紧工具
+  const hx = Harness.resolve(agent, thread);
   let sys = agent.prompt + teamPrompt(agent) + (agent.orchestrator ? orchestratorPrompt(agent) : selfFixPrompt()) + askPrompt(thread) + langPrompt(thread.lang);
+  sys += Harness.promptFor(hx, { autopilot: Boolean(thread.autopilot), sub: thread.sub || null });
   if (thread.from) {
     const src = agentById(thread.from.agent);
     sys += `\n\n## 交接来源\n这个对话是「${src ? src.name : thread.from.agent}」交接给你的任务。完成后给出清晰的最终总结（结论、关键数字、projectId/backtestId），对方会读到你的最终回答。`;
     if (src && src.orchestrator) sys += `\n${src.name}在按阶段调度整个流程：只完成交给你的这一段，做完就给出最终总结并结束；不要自己再交给下一个阶段的 agent（除非任务说明明确要求），需要下一步时在总结里写明建议交给谁、做什么，由${src.name}安排。`;
+  }
+  if (thread.autopilot) {
+    sys += `\n\n## 自动研究\n这个对话属于一轮自动研究（用户不在，不会回答问题）。Helm 在代码里强制这些规则：先登记想法清单、想法和版本预算、验证期只在开发期通过后看一次、不能标 main。工具返回「自动研究规则」的错误时，这条路就到此为止：不要换别的工具或参数绕过去，在总结里写明被拒的原因，交回给调度者。要拍板时照常用 ask_user，给问题标 category、给保守选项标 conservative，Helm 会自动回答。`;
   }
   if (context && Object.keys(context).length) {
     sys += `\n\n## 用户此刻在网站上看的内容\n用户说“这个”“它”“当前”时，指的就是下面这些：\n${formatContext(context)}`;
@@ -638,7 +846,7 @@ function buildArgs(agent, thread, context, allowDanger, opts) {
 
   const args = ['-p', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
     '--append-system-prompt', sys, '--permission-mode', 'default',
-    '--mcp-config', MCP_CONFIG, '--strict-mcp-config', '--permission-prompt-tool', `mcp__${MCP_NAME}__approve`];
+    '--mcp-config', MCP_INLINE, '--strict-mcp-config', '--permission-prompt-tool', `mcp__${MCP_NAME}__approve`];
   // 用兼容接口时只能用对方的模型：忽略网页上选的 Claude 模型
   const model = opts.forceModel || opts.model || agent.model || process.env.CLAUDE_MODEL;
   if (model) args.push('--model', model);
@@ -647,9 +855,9 @@ function buildArgs(agent, thread, context, allowDanger, opts) {
   if (thread.sessionId) args.push('--resume', thread.sessionId);
   args.push('--allowedTools', `mcp__${MCP_NAME}`, ...BASE_TOOLS, ...(agent.extraTools || []));
   // 敏感路径（含 Alpaca 密钥目录）：agent 的 Read/Grep/Glob 都读不到。拒绝优先于上面的裸 Read 允许
-  const agentDenied = (agent.deniedTools || []).filter(isQcTool).map((t) => `mcp__${MCP_NAME}__${t}`);
+  const agentDenied = [...new Set([...(agent.deniedTools || []), ...Harness.deniedTools(hx, QC_TOOLS.map((t) => t.id))])].filter(isQcTool).map((t) => `mcp__${MCP_NAME}__${t}`);
   // 调度者：改文件和跑命令直接禁用（不走审批）；其它 agent 的 Edit/Write/Bash 走 approve
-  const orchestratorBlocked = agent.orchestrator ? ['Bash', 'Edit', 'Write', 'MultiEdit'] : [];
+  const orchestratorBlocked = agent.orchestrator || hx.sub === 'scout' ? ['Bash', 'Edit', 'Write', 'MultiEdit'] : []; // 只读的子 agent 也一样
   args.push('--disallowedTools', ...READ_DENIES, ...ALWAYS_BLOCKED, ...orchestratorBlocked, ...agentDenied, ...(allowDanger ? [] : DANGEROUS.map((t) => `mcp__${MCP_NAME}__${t}`)));
   if (opts.extraArgs) args.push(...opts.extraArgs);
   return args;
@@ -680,6 +888,8 @@ async function startRun(thread, { message, context = null, allowDanger = false, 
   thread.messages.push(assistant);
 
   const run = { thread, assistant, opts, subs: new Set(), child: null, key: `${thread.id}:${assistant.at}`, dirty: false };
+  // 工作台：这次运行的循环状态（工具调用计数、读过哪些 spec、提交了哪些回测…），MCP 每次调用工具前后来问（handleHarnessTool）
+  run.hx = { h: Harness.resolve(agent, thread), state: Harness.newState({ carry: thread.harness || null, autopilot: Boolean(thread.autopilot) }) };
   let resolveDone;
   run.done = new Promise((r) => { resolveDone = r; });
   // 先登记再做任何 await：否则同一个对话的两个并发请求（连点两次发送）都能通过上面的检查，
@@ -691,7 +901,7 @@ async function startRun(thread, { message, context = null, allowDanger = false, 
 
   // spawn 的参数校验错误（比如上下文或 agent 提示里有 NUL 字符）是同步抛出的：不收拾的话 finish() 永远不跑，
   // 这个对话永远显示「运行中」、永远 409，还一直占着一个 MAX_RUNS 名额
-  let child;
+  let child; let launchOpts; let spawnOpts;
   try {
   // 用户在「AI 连接」里选的方式：订阅 / API key / 兼容接口（密钥经 apiKeyHelper 读，不进环境变量）
   const launch = AI.claudeLaunch(await AI.loadAi());
@@ -704,7 +914,19 @@ async function startRun(thread, { message, context = null, allowDanger = false, 
     assistant.effort = opts.effort;
     assistant.auto = { model: pick.model || null, effort: pick.effort || null, reason: pick.reason || '', error: pick.error || null };
   }
-  child = spawn(CLAUDE_BIN, buildArgs(agent, thread, context, allowDanger, { ...opts, forceModel: launch.model, extraArgs: launch.args }), {
+  // 自动选模型最多要几十秒，这期间还没有 claude 进程：用户点了停止（stopRunTree 只能记下来），就不再启动
+  if (run.stopRequested) {
+    assistant.stopped = true;
+    await saveThread(thread).catch(() => {});
+    runs.delete(thread.id);
+    send({ type: 'end', stopped: true });
+    for (const res of run.subs) if (!res.writableEnded) res.end();
+    broadcast({ type: 'run_end', threadId: thread.id, agent: agent.id, title: thread.title, error: null, stopped: true });
+    resolveDone({ text: '', error: null, stopped: true });
+    return run;
+  }
+  launchOpts = { ...opts, forceModel: launch.model, extraArgs: launch.args };
+  spawnOpts = {
     cwd: WORKSPACE,
     env: {
       ...AI.applyLaunchEnv(cleanEnv(), launch),
@@ -714,10 +936,12 @@ async function startRun(thread, { message, context = null, allowDanger = false, 
       HELM_LANG: thread.lang === 'en' ? 'en' : 'zh', // MCP 工具的错误提示用哪种语言（只影响「错误：…」这类用户会看到的文字）
       HELM_AGENT: agent.id,
       HELM_WRITE_ONLY: (agent.writeOnly || []).join(','), // MCP 的 write_file 按这个名单拦（调度者只能写 spec.md）
+      HELM_AUTOPILOT: thread.autopilot || '', // 自动研究：MCP 每次调用工具前后问服务端（硬规则 + 记账）
       MCP_TOOL_TIMEOUT: '1200000', // handoff wait=true 可能要等十几分钟
     },
     stdio: ['pipe', 'pipe', 'pipe'],
-  });
+  };
+  child = spawn(CLAUDE_BIN, buildArgs(agent, thread, context, allowDanger, launchOpts), spawnOpts);
   } catch (e) {
     runs.delete(thread.id);
     thread.messages.splice(-2, 2);
@@ -730,6 +954,21 @@ async function startRun(thread, { message, context = null, allowDanger = false, 
   child.stdin.end(message);
 
   const heartbeat = setInterval(() => { for (const res of run.subs) if (!res.writableEnded) res.write(': ping\n\n'); }, 15000);
+  // 工作台的硬上限：提示和 MCP 的拦截都没让它停下来时（比如一直在用 Read / Grep 这类不经过 MCP 的工具），直接停掉进程
+  let costBase = 0; let durBase = 0;
+  const hxLoop = Harness.loopOf(run.hx.h, run.hx.state);
+  const haltRun = (why) => {
+    if (run.hx.state.stopped) return;
+    run.hx.state.stopped = why;
+    const text = localize(thread.lang, why === 'time'
+      ? `\n\n（Helm 工作台：这次运行超过了时间上限 ${hxLoop.maxMinutes} 分钟，已经停下。）`
+      : `\n\n（Helm 工作台：这次运行的工具调用超过了硬上限 ${hxLoop.maxToolCalls * hxLoop.hardFactor} 次，已经停下。）`);
+    assistant.parts.push({ kind: 'text', helm: 'harness-stop', text });
+    send({ type: 'text_start' }); send({ type: 'delta', text });
+    stopRunTree(thread.id);
+  };
+  const hxTimer = hxLoop.maxMinutes ? setTimeout(() => haltRun('time'), (hxLoop.maxMinutes + 5) * 60000) : null; // 多给 5 分钟写总结
+  if (hxTimer && hxTimer.unref) hxTimer.unref();
   const tools = new Map();
   let draft = null; // 正在流式写参数的工具调用 { index, name, json, agent, sentAt }
   let curText = null;
@@ -793,6 +1032,7 @@ async function startRun(thread, { message, context = null, allowDanger = false, 
             const part = { kind: 'tool', id: b.id, name: b.name, input: b.input, parent: ev.parent_tool_use_id || null, status: 'running' };
             assistant.parts.push(part);
             tools.set(b.id, part);
+            if (!ev.parent_tool_use_id) { run.hx.state.seen += 1; if (run.hx.state.seen > hxLoop.maxToolCalls * hxLoop.hardFactor) haltRun('tools'); }
             curText = null;
             send({ type: 'tool_use', part });
           } else if (b.type === 'text' && !ev.parent_tool_use_id && deltaChars === 0 && b.text) {
@@ -820,8 +1060,15 @@ async function startRun(thread, { message, context = null, allowDanger = false, 
       case 'result':
         gotResult = true;
         thread.sessionId = ev.session_id || thread.sessionId;
-        assistant.cost = ev.total_cost_usd;
-        assistant.duration = ev.duration_ms;
+        assistant.cost = costBase ? costBase + (Number(ev.total_cost_usd) || 0) : ev.total_cost_usd; // 续跑过：几段加起来
+        assistant.duration = durBase ? durBase + (Number(ev.duration_ms) || 0) : ev.duration_ms;
+        { // 用了多少 token（手机伴侣和账本用）：按模型的明细加起来，没有明细就用总的 usage；续跑过的几段累加
+          const mu = ev.modelUsage && Object.keys(ev.modelUsage).length ? Object.values(ev.modelUsage) : null;
+          const n = (v) => Number(v) || 0;
+          const tk = mu ? mu.reduce((a, u) => ({ in: a.in + n(u.inputTokens), out: a.out + n(u.outputTokens), cache: a.cache + n(u.cacheReadInputTokens) + n(u.cacheCreationInputTokens) }), { in: 0, out: 0, cache: 0 })
+            : ev.usage ? { in: n(ev.usage.input_tokens), out: n(ev.usage.output_tokens), cache: n(ev.usage.cache_read_input_tokens) + n(ev.usage.cache_creation_input_tokens) } : null;
+          if (tk) assistant.tokens = { in: n(assistant.tokens && assistant.tokens.in) + tk.in, out: n(assistant.tokens && assistant.tokens.out) + tk.out, cache: n(assistant.tokens && assistant.tokens.cache) + tk.cache };
+        }
         if (ev.modelUsage && Object.keys(ev.modelUsage).length) {
           const used = Object.entries(ev.modelUsage).sort((a, b) => (b[1].costUSD || 0) - (a[1].costUSD || 0));
           assistant.model = used[0][0];
@@ -839,6 +1086,7 @@ async function startRun(thread, { message, context = null, allowDanger = false, 
   };
 
   // 按 UTF-8 流式解码。不设的话每个数据块单独转字符串，一个汉字（3 字节）正好被拆在两块里就会变成 �
+  const wire = (child) => { // eslint-disable-line no-shadow
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
   child.stdout.on('data', (chunk) => {
@@ -852,11 +1100,42 @@ async function startRun(thread, { message, context = null, allowDanger = false, 
     }
   });
   child.stderr.on('data', (c) => { stderr = (stderr + c).slice(-4000); });
+  };
+  wire(child);
 
   let finished = false;
+  // 工作台的外层循环：claude 结束了但交付检查没过（回测没等结果、结论没写明…），用同一个会话再起一段，只补缺的部分
+  const relaunch = (miss) => {
+    const note = localize(thread.lang, `\n\n（Helm 工作台：结果还不完整，已让${agent.name}继续补上：${miss.map((m) => m.split('：')[0]).join('；')}）\n\n`);
+    assistant.parts.push({ kind: 'text', helm: 'harness-continue', text: note });
+    send({ type: 'text_start' }); send({ type: 'delta', text: note });
+    costBase = Number(assistant.cost) || 0; durBase = Number(assistant.duration) || 0;
+    gotResult = false; buf = ''; stderr = ''; curText = null; deltaChars = 0; draft = null; run.draft = null;
+    child = spawn(CLAUDE_BIN, buildArgs(agent, thread, context, allowDanger, launchOpts), spawnOpts);
+    run.child = child;
+    finished = false;
+    wire(child);
+    child.on('error', (e) => finish(null, e));
+    child.on('close', (c) => finish(c));
+    child.stdin.on('error', () => {});
+    child.stdin.end(Harness.continueMessage(miss, thread.lang));
+  };
   const finish = async (code, spawnErr) => {
     if (finished) return;
     finished = true;
+    if (!spawnErr && gotResult && !child.killed && !assistant.error && !run.stopRequested && !run.hx.state.stopped && thread.sessionId) {
+      const miss = Harness.contract(run.hx.h, run.hx.state, finalText(assistant), { delegated: Boolean(thread.from) });
+      // 自动研究的根对话：登记过的想法还停在半路、预算和时间都还有，就一并列进「还缺」，用同一个会话续跑
+      const apNow = thread.autopilot ? apRuns.get(thread.autopilot) : null;
+      if (apNow && thread.id === apNow.rootThreadId) for (const m of Autopilot.unfinished(apNow)) if (!miss.includes(m)) miss.push(m);
+      run.hx.missing = miss;
+      const maxC = Harness.loopOf(run.hx.h, run.hx.state).maxContinuations;
+      if (miss.length && run.hx.state.continuations < maxC) {
+        run.hx.state.continuations += 1;
+        try { relaunch(miss); return; } catch { finished = true; /* 起不来就按现有结果结束 */ }
+      }
+    }
+    clearTimeout(hxTimer);
     clearInterval(heartbeat);
     for (const p of tools.values()) if (p.status === 'running') p.status = child.killed ? 'stopped' : 'done';
     if (child.killed) assistant.stopped = true;
@@ -881,6 +1160,23 @@ async function startRun(thread, { message, context = null, allowDanger = false, 
         : (stderr.trim().slice(-800) || `claude 异常退出（退出码 ${code}）`));
       send({ type: 'result', error: assistant.error, denied: [] });
     }
+    // 自动研究：累计用量（超过上限就停整轮）；根对话结束时附上代码记的账本，结束这一轮
+    const ap = thread.autopilot ? apRuns.get(thread.autopilot) : null;
+    if (ap) {
+      ap.cost = Math.round(((ap.cost || 0) + (Number(assistant.cost) || 0)) * 1e4) / 1e4;
+      if (assistant.tokens) { const t0 = ap.tokens || { in: 0, out: 0, cache: 0 }; ap.tokens = { in: t0.in + assistant.tokens.in, out: t0.out + assistant.tokens.out, cache: t0.cache + assistant.tokens.cache }; }
+      if (ap.status === 'running' && ap.cost >= ap.caps.usd && thread.id !== ap.rootThreadId) { stopRunTree(ap.rootThreadId); apEnd(ap, 'stopped', 'cost'); }
+      if (thread.id === ap.rootThreadId) {
+        assistant.parts.push({ kind: 'text', helm: 'autopilot-ledger', text: `\n\n---\n${Autopilot.ledgerText(ap)}` });
+        apEnd(ap, assistant.stopped ? 'stopped' : assistant.error ? 'error' : 'done', assistant.stopped ? (ap.reason || 'user') : assistant.error ? String(assistant.error).slice(0, 300) : null);
+        apTouch(ap);
+        // 连续模式：这一轮收尾（存对话、广播结束）之后再开下一轮
+        if (ap.status === 'done' && ap.untilFound) { const t = setTimeout(() => { apChainNext(ap).catch(() => {}); }, 1500); if (t.unref) t.unref(); }
+      } else apTouch(ap);
+    }
+    // 工作台：这次运行的摘要记在消息上（网页和审计用）；读过哪些 spec 留给同一个对话的下一次运行
+    assistant.harness = { ...Harness.summary(run.hx.h, run.hx.state), ...(run.hx.missing && run.hx.missing.length ? { missing: run.hx.missing } : {}) };
+    thread.harness = Harness.carryOf(run.hx.state);
     await saveThread(thread).catch(() => {});
     runs.delete(thread.id);
     send({ type: 'end', stopped: Boolean(assistant.stopped) });
@@ -1002,7 +1298,7 @@ async function handleHandoff(req, res) {
   if (depth > MAX_HANDOFF_DEPTH) return sendJson(res, 400, { error: `交接层数超过 ${MAX_HANDOFF_DEPTH} 层，请自己完成或回到用户确认。` });
 
   const srcAgent = agentById(src.agent);
-  const thread = newThread(target.id, task, { depth, from: { agent: src.agent, threadId: src.id }, ...(isLang(src.lang) ? { lang: src.lang } : {}) }); // 交接出去的对话沿用来源对话的语言
+  const thread = newThread(target.id, task, { depth, root: src.root || src.id, from: { agent: src.agent, threadId: src.id }, ...(isLang(src.lang) ? { lang: src.lang } : {}), ...(src.autopilot ? { autopilot: src.autopilot } : {}) }); // 交接出去的对话沿用来源对话的语言；自动研究的规则也跟着走
   const context = {};
   if (body.projectId) context.projectId = body.projectId;
   if (body.backtestId) context.backtestId = body.backtestId;
@@ -1022,12 +1318,168 @@ async function handleHandoff(req, res) {
     return sendJson(res, Number.isInteger(e.code) && e.code >= 400 && e.code < 600 ? e.code : 500, { error: e.message });
   }
   if (!body.wait) return sendJson(res, 200, { threadId: thread.id, agent: target.id, agentName: target.name, wait: false });
+  // wait=true：交出任务的一方在等结果，子对话属于它。它被停掉（或进程没了）时，子对话也要停，
+  // 否则用户点了「停止」，被等的那个 agent 还在后台继续跑、继续花钱（以前要到对方的对话里再停一次）。
+  // 两条路：1) /api/chat/stop 停父对话时顺着 waitingOn 一起停（stopRunTree）；2) 父进程没了 → MCP 的这个请求断开 → 停子对话。
+  // wait=false 的交接是有意并行的，不跟着停。
+  if (srcRun) (srcRun.waitingOn || (srcRun.waitingOn = new Set())).add(thread.id);
+  let answered = false;
+  const onGone = () => { if (!answered && runs.get(thread.id) === run) stopRunTree(thread.id); };
+  res.on('close', onGone);
   // 最多等 14 分钟（MCP 那边 16 分钟超时）：等不完就把 threadId 交回去，并说明对方仍在运行。
   // 以前一直等，MCP 先超时，调用方只看到「交接失败」，很可能再交接一次，同一个任务开出两个 agent
   let timer;
   const out = await Promise.race([run.done, new Promise((r) => { timer = setTimeout(() => r({ stillRunning: true }), HANDOFF_WAIT_MS); })]);
   clearTimeout(timer);
+  answered = true;
+  res.off('close', onGone);
+  // 等超时交回去以后，调用方已经知道对方还在跑，之后再停它就不连带这个子对话
+  if (srcRun && srcRun.waitingOn) srcRun.waitingOn.delete(thread.id);
   return sendJson(res, 200, { threadId: thread.id, agent: target.id, agentName: target.name, wait: true, ...out });
+}
+
+/** 停一个对话，以及它正用 wait=true 等着的子对话（递归）。返回停掉的对话数。 */
+function stopRunTree(threadId, seen = new Set()) {
+  if (seen.has(threadId)) return 0;
+  seen.add(threadId);
+  const r = runs.get(threadId);
+  if (!r) return 0;
+  let n = 0;
+  for (const childId of r.waitingOn || []) n += stopRunTree(childId, seen);
+  if (r.child && !r.child.killed) r.child.kill('SIGTERM');
+  else if (!r.child) r.stopRequested = true; // 还在自动选模型、没启动进程：startRun 看到这个就不启动了
+  return n + 1;
+}
+
+
+/* ---------------- 工作台（lib/harness/，设计见 docs/HARNESS.md） ---------------- */
+
+// 研究方向的账本：一条研究线（根对话 + 它交接 / 派出去的所有子对话）一份，存在 data/directions/<根对话 id>.json
+const DIRECTIONS_DIR = path.join(path.dirname(THREADS_DIR), 'directions');
+const dirLedgers = new Map();
+const rootOf = (thread) => (isId(thread.root) ? thread.root : thread.id);
+async function dirLoad(rootId, { create = false } = {}) {
+  if (dirLedgers.has(rootId)) return dirLedgers.get(rootId);
+  let l = null;
+  try { l = JSON.parse(await readFile(path.join(DIRECTIONS_DIR, `${rootId}.json`), 'utf8')); } catch { l = create ? Harness.Directions.newLedger(rootId) : null; }
+  if (l) dirLedgers.set(rootId, l);
+  return l;
+}
+async function dirSave(l) {
+  await mkdir(DIRECTIONS_DIR, { recursive: true });
+  await writeJsonAtomic(path.join(DIRECTIONS_DIR, `${l.rootThreadId}.json`), l);
+  broadcast({ type: 'direction_updated', rootThreadId: l.rootThreadId });
+}
+
+// MCP（qc-mcp.mjs）每次调用工具之前问 guard、之后报 record（和自动研究的那一对并列，先过工作台再过自动研究）
+async function handleHarnessTool(req, res, kind) {
+  if (!safeEqual(req.headers['x-helm-token'], HANDOFF_TOKEN)) return sendJson(res, 403, { error: 'bad token' });
+  const body = await readJsonRaw(req, 8_000_000);
+  const run = runs.get(body.threadId);
+  if (!run || !run.hx) return sendJson(res, 200, kind === 'guard' ? { allow: true } : { ok: true });
+  const tool = String(body.tool || '');
+  const args = body.args && typeof body.args === 'object' ? body.args : {};
+  const { h, state } = run.hx;
+  const ledger = run.thread.autopilot ? null : await dirLoad(rootOf(run.thread)).catch(() => null);
+  if (kind === 'guard') {
+    let g = Harness.guard(h, state, tool, args);
+    // 写策略文件之前（文件还是旧内容）看一眼：这次是不是只改了回测起止日期。跑验证期只能这么改，不该被当成「改了策略」
+    if (g.allow && tool === 'write_file' && args.projectId != null && /\.py$/i.test(String(args.name || ''))) {
+      run.hx.datesOnly = null;
+      try {
+        const dir = path.join(PROJECTS_DIR, String(Number(args.projectId)));
+        const olds = await Promise.all((await readdir(dir)).filter((f) => /\.py$/i.test(f)).slice(0, 40).map((f) => readFile(path.join(dir, f), 'utf8').catch(() => '')));
+        if (Harness.datesOnlyChange(String(args.content ?? args.code ?? ''), olds)) run.hx.datesOnly = `${Number(args.projectId)}/${args.name}`;
+      } catch { /* 读不到旧文件：按「改了策略」算 */ }
+    }
+    if (g.allow && ledger) {
+      const why = Harness.Directions.guardTest(ledger, tool);
+      if (why) { state.refusals.push({ at: Date.now(), tool, message: why.slice(0, 300) }); g = { allow: false, message: `错误：工作台规则：${why}` }; }
+    }
+    if (!g.allow) broadcast({ type: 'harness_refusal', threadId: run.thread.id, agent: run.thread.agent, tool, message: g.message });
+    return sendJson(res, 200, g);
+  }
+  const datesOnly = tool === 'write_file' && run.hx.datesOnly === `${Number(args.projectId)}/${args.name}`;
+  if (tool === 'write_file') run.hx.datesOnly = null;
+  const r = Harness.record(h, state, tool, args, String(body.result || ''), { isError: body.isError === true, datesOnly });
+  if (ledger && Harness.Directions.noteTool(ledger, tool, body.isError === true)) await dirSave(ledger).catch(() => {});
+  return sendJson(res, 200, { ok: true, note: r.note || '' });
+}
+
+// mcp__qc__research_direction：看 / 登记 / 结束研究方向，或者提建议
+async function handleDirection(req, res) {
+  if (!safeEqual(req.headers['x-helm-token'], HANDOFF_TOKEN)) return sendJson(res, 403, { error: 'bad token' });
+  const body = await readJsonRaw(req);
+  const run = runs.get(body.threadId);
+  if (!run || !run.hx) return sendJson(res, 400, { error: '找不到正在运行的对话' });
+  const thread = run.thread;
+  const action = String(body.action || 'read');
+  if (thread.autopilot && (action === 'set' || action === 'conclude')) return sendJson(res, 400, { error: '自动研究里的方向用 autopilot_plan 登记（带 direction），不用 research_direction。' });
+  const ledger = await dirLoad(rootOf(thread), { create: true });
+  const r = Harness.Directions.apply(ledger, action, body, { by: thread.agent, threadId: thread.id, mode: run.hx.h.direction || 'read' });
+  if (r.error) return sendJson(res, 400, { error: r.error });
+  if (r.changed) await dirSave(ledger);
+  let text = r.text;
+  if (action === 'read') {
+    // 定方向之前要知道：已经测过什么（不重复）、手上有什么数据
+    const ctx = await apContext(thread.lang).catch(() => ({}));
+    text += `${ctx.tested ? `\n\n${ctx.tested}` : ''}${ctx.menu ? `\n\n${ctx.menu}` : ''}`;
+  }
+  return sendJson(res, 200, { text });
+}
+
+// mcp__qc__subagent：一次并行派出几个子 agent，等它们都做完。能派给谁、派几个由调用方的工作台决定（Harness.planSubagents）。
+// 子 agent 也是网站上看得见的对话（和交接一样），scout 是只读的，都不能再往下派。
+async function handleSubagent(req, res) {
+  if (!safeEqual(req.headers['x-helm-token'], HANDOFF_TOKEN)) return sendJson(res, 403, { error: 'bad token' });
+  const body = await readJsonRaw(req);
+  const srcRun = runs.get(body.threadId);
+  if (!srcRun || !srcRun.hx) return sendJson(res, 400, { error: '找不到正在运行的对话' });
+  const src = srcRun.thread;
+  const plan = Harness.planSubagents(srcRun.hx.h, srcRun.hx.state, body.tasks, { isSub: Boolean(src.sub), agents: AGENTS.map((a) => a.id) });
+  if (plan.error) return sendJson(res, 400, { error: plan.error });
+  const depth = (src.depth || 0) + 1;
+  if (depth > MAX_HANDOFF_DEPTH) return sendJson(res, 400, { error: `交接层数超过 ${MAX_HANDOFF_DEPTH} 层，不能再派子 agent：自己完成，或者在总结里写明建议。` });
+  if (runs.size + plan.tasks.length > MAX_RUNS) return sendJson(res, 429, { error: `同时运行的对话已经有 ${runs.size} 个（上限 ${MAX_RUNS}）：少派几个，或者等别的结束。` });
+  srcRun.hx.state.children += plan.tasks.length; // 先记账：同时来的两次调用不会一起超过上限
+  const srcAgent = agentById(src.agent);
+  const kids = [];
+  for (const t of plan.tasks) {
+    const target = agentById(t.agent);
+    const thread = newThread(target.id, t.task, { depth, root: src.root || src.id, from: { agent: src.agent, threadId: src.id }, sub: { mode: t.mode, parent: src.id },
+      ...(isLang(src.lang) ? { lang: src.lang } : {}), ...(src.autopilot ? { autopilot: src.autopilot } : {}) });
+    const context = {};
+    if (t.projectId) context.projectId = t.projectId;
+    if (t.backtestId) context.backtestId = t.backtestId;
+    const message = `【${srcAgent ? srcAgent.name : src.agent} 派给你的子任务（${t.mode === 'scout' ? '只读' : '完整权限'}）】\n\n${t.task}`;
+    try {
+      const run = await startRun(thread, { message, context: Object.keys(context).length ? context : null,
+        model: srcRun.opts.auto && srcRun.opts.auto.model ? AUTO : srcRun.opts.model, effort: srcRun.opts.auto && srcRun.opts.auto.effort ? AUTO : srcRun.opts.effort,
+        from: { agent: src.agent, threadId: src.id } });
+      kids.push({ t, target, thread, run });
+    } catch (e) {
+      srcRun.hx.state.children -= 1;
+      kids.push({ t, target, error: e.message });
+    }
+  }
+  const live = kids.filter((k) => k.run);
+  const waitingOn = srcRun.waitingOn || (srcRun.waitingOn = new Set());
+  for (const k of live) waitingOn.add(k.thread.id);
+  let answered = false;
+  const onGone = () => { if (!answered) for (const k of live) if (runs.get(k.thread.id) === k.run) stopRunTree(k.thread.id); };
+  res.on('close', onGone);
+  let timer;
+  const late = new Promise((r) => { timer = setTimeout(() => r({ stillRunning: true }), HANDOFF_WAIT_MS); });
+  const outs = await Promise.all(live.map((k) => Promise.race([k.run.done, late])));
+  clearTimeout(timer);
+  answered = true;
+  res.off('close', onGone);
+  for (const k of live) waitingOn.delete(k.thread.id);
+  let i = 0;
+  const results = kids.map((k) => (k.run
+    ? { agent: k.target.id, agentName: k.target.name, mode: k.t.mode, threadId: k.thread.id, ...outs[i++] }
+    : { agent: k.target.id, agentName: k.target.name, mode: k.t.mode, threadId: null, error: k.error }));
+  return sendJson(res, 200, { results });
 }
 
 /* ---------------- http ---------------- */
@@ -1062,12 +1514,85 @@ const allowedOrigins = new Set([...allowedHosts].map((h) => `http://${h}`));
 // 注意：本机其它进程仍能 GET 首页拿到令牌并伪造 Origin，这只是纵深防御，不是对本机恶意进程的隔离。
 function checkMutation(req, pathname) {
   if (req.method === 'GET' || req.method === 'HEAD') return null;
-  if (pathname === '/api/handoff' || pathname === '/api/approval' || pathname === '/api/ask' || pathname === '/api/changes/verify' || pathname === '/api/changes/revert-mine') return null;
+  if (pathname === '/api/harness/guard' || pathname === '/api/harness/record' || pathname === '/api/subagent' || pathname === '/api/direction' || pathname === '/api/handoff' || pathname === '/api/approval' || pathname === '/api/ask' || pathname === '/api/changes/verify' || pathname === '/api/changes/revert-mine' || pathname === '/api/autopilot/guard' || pathname === '/api/autopilot/record') return null;
   if (!safeEqual(req.headers['x-helm-ui-token'], UI_TOKEN)) return '请求被拒绝：缺少或错误的页面令牌。如果服务刚重启过，请刷新页面。';
   if (!req.headers.origin || !allowedOrigins.has(req.headers.origin)) return '请求被拒绝：来源（Origin）不是本站。';
   const site = req.headers['sec-fetch-site'];
   if (site && site !== 'same-origin') return '请求被拒绝：不是同源请求。';
   return null;
+}
+
+/* ---------------- 手机伴侣（lib/companion.mjs，设计见 docs/COMPANION.md） ---------------- */
+// Helm 唯一会监听局域网的地方：默认关，用户在设置里打开后才起；另一个端口、另一个服务，只有配对 / 摘要 / 收件箱这几个接口。
+const COMP = new Companion({ dir: path.dirname(THREADS_DIR) });
+const COMP_DIR = path.join(PUBLIC_DIR, 'companion');
+const COMP_FILES = { '/': 'index.html', '/index.html': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css', '/manifest.webmanifest': 'manifest.webmanifest', '/icon.svg': 'icon.svg' };
+const COMP_MIME = { ...MIME, '.webmanifest': 'application/manifest+json' };
+const COMP_CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; manifest-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'";
+let compServer = null;
+const compJson = (res, code, data) => { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...SEC_HEADERS }); res.end(JSON.stringify(data)); };
+async function compSummary(en = false) {
+  const [runs, projs, pp, inbox] = await Promise.all([apList().catch(() => []), listProjects().catch(() => []), Paper.listSessions({}).catch(() => ({ sessions: [] })), COMP.inbox()]);
+  const names = new Map((Array.isArray(projs) ? projs : (projs && projs.projects) || []).map((p) => [Number(p.projectId), (en ? p.nameEn : p.nameZh) || p.name]));
+  // 运行记录里还没落盘的 token 数：正在跑的那一轮从内存里的记录补上
+  const withTok = runs.map((r) => { const ap = apRuns.get(r.runId); return { ...r, tokens: (ap && ap.tokens) || r.tokens || null }; });
+  const paper = ((pp && pp.sessions) || []).filter((s) => s.status === 'active').map((s) => ({ name: s.name, project: names.get(Number(s.projectId)) || `#${s.projectId}`, mode: s.mode, days: s.summary ? s.summary.days : 0, ret: s.summary ? s.summary.return : null, bench: s.summary ? s.summary.benchmarkReturn : null, ok: !(s.lastRun && s.lastRun.ok === false && !s.lastRun.skipped), dataDate: s.summary ? s.summary.dataDate : null }));
+  return buildSummary({ runs: withTok, projectName: (id) => names.get(Number(id)) || '', paper, inbox });
+}
+async function compHandler(req, res) {
+  try {
+    const p = new URL(req.url, 'http://x').pathname;
+    const ip = req.socket.remoteAddress || '';
+    if (!COMP.state || !COMP.state.enabled) return compJson(res, 503, { error: 'disabled' });
+    if (req.method === 'GET' && COMP_FILES[p]) {
+      const f = path.join(COMP_DIR, COMP_FILES[p]);
+      const data = await readFile(f);
+      res.writeHead(200, { 'Content-Type': COMP_MIME[path.extname(f)] || 'application/octet-stream', 'Cache-Control': 'no-cache', 'Content-Security-Policy': COMP_CSP, ...SEC_HEADERS });
+      return res.end(data);
+    }
+    if (!p.startsWith('/api/')) return compJson(res, 404, { error: 'not found' });
+    if (COMP.blocked(ip)) return compJson(res, 429, { error: 'too-many-attempts' });
+    if (p === '/api/pair' && req.method === 'POST') {
+      const b = await readJsonRaw(req, 2000);
+      const r = await COMP.pair(b && b.code);
+      if (r.error) { COMP.fail(ip); return compJson(res, r.error === 'disabled' ? 503 : 403, { error: r.error }); }
+      broadcast({ type: 'companion_updated' });
+      return compJson(res, 200, { token: r.token });
+    }
+    if (!COMP.authorized(req.headers.authorization)) { COMP.fail(ip); return compJson(res, 401, { error: 'unauthorized' }); }
+    if (p === '/api/summary' && req.method === 'GET') return compJson(res, 200, await compSummary(!/^zh/i.test(String(req.headers['accept-language'] || ''))));
+    if (p === '/api/ideas' && req.method === 'GET') return compJson(res, 200, { ideas: (await COMP.inbox()).slice(0, 50).map((x) => ({ id: x.id, at: x.at, text: x.text, status: x.status })) });
+    if (p === '/api/ideas' && req.method === 'POST') {
+      const b = await readJsonRaw(req, 16_000);
+      const r = await COMP.addIdea(b && b.text);
+      if (r.error) return compJson(res, r.error === 'inbox-full' ? 429 : 400, { error: r.error });
+      broadcast({ type: 'inbox_updated' });
+      return compJson(res, 200, { idea: { id: r.idea.id, at: r.idea.at, text: r.idea.text, status: r.idea.status } });
+    }
+    return compJson(res, 404, { error: 'not found' });
+  } catch (e) {
+    return compJson(res, e && e.status ? e.status : 400, { error: 'bad request' });
+  }
+}
+async function compApply() {
+  if (!COMP.state) await COMP.load();
+  const want = COMP.state.enabled;
+  if (want && !compServer) {
+    const port = Number(process.env.HELM_COMPANION_PORT) || COMP.state.port;
+    const srv = http.createServer(compHandler);
+    srv.requestTimeout = 15000; srv.headersTimeout = 10000;
+    await new Promise((resolve, reject) => { srv.once('error', reject); srv.listen(port, process.env.HELM_COMPANION_HOST || '0.0.0.0', resolve); });
+    srv.on('error', () => {});
+    compServer = srv; compServer.helmPort = port;
+  } else if (!want && compServer) {
+    const s = compServer; compServer = null;
+    if (s.closeAllConnections) s.closeAllConnections();
+    await new Promise((r) => s.close(r));
+  }
+}
+function compView(extra = {}) {
+  const port = compServer ? compServer.helmPort : (Number(process.env.HELM_COMPANION_PORT) || (COMP.state && COMP.state.port));
+  return { success: true, enabled: Boolean(COMP.state && COMP.state.enabled), listening: Boolean(compServer), port, urls: COMP.state && COMP.state.enabled ? lanUrls(port) : [], paired: Boolean(COMP.state && COMP.state.token), pairedAt: (COMP.state && COMP.state.pairedAt) || null, ...extra };
 }
 
 const server = http.createServer(async (req, res) => {
@@ -1127,6 +1652,13 @@ const server = http.createServer(async (req, res) => {
       if (!Number.isSafeInteger(pid) || pid <= 0 || !bid) return sendJson(res, 400, { success: false, errors: ['projectId 或 backtestId 不对'] });
       return sendJson(res, 200, await loadRobust(PROJECTS_DIR, pid, bid, res.helmLang));
     }
+    // 因子归因：只读回测已存结果 + French 因子数据（缓存 7 天），不跑回测、不计入尝试次数
+    if (p === '/api/data/backtests/attribution' && req.method === 'GET') {
+      const pid = Number(url.searchParams.get('projectId'));
+      const bid = String(url.searchParams.get('backtestId') || '').replace(/[^a-f0-9]/g, '');
+      if (!Number.isSafeInteger(pid) || pid <= 0 || !bid) return sendJson(res, 400, { success: false, errors: ['projectId 或 backtestId 不对'] });
+      return sendJson(res, 200, await loadAttribution({ projectsDir: PROJECTS_DIR, dataDir: path.join(ROOT, 'data'), projectId: pid, backtestId: bid, lang: res.helmLang === 'en' ? 'en' : 'zh' }));
+    }
     // 参数敏感性：只读，能不能做 + 参数清单 + 已有结果（运行中的进度也从这里读）
     if (p === '/api/data/backtests/sensitivity' && req.method === 'GET') {
       const pid = Number(url.searchParams.get('projectId'));
@@ -1169,7 +1701,7 @@ const server = http.createServer(async (req, res) => {
       const a = agentById(ma[1]);
       if (!a) return sendJson(res, 404, { error: '没有这个 agent' });
       return sendJson(res, 200, {
-        success: true, agent: a, tools: effectiveTools(a), localTools: localTools(a), baseTools: BASE_TOOLS, blocked: ALWAYS_BLOCKED,
+        success: true, agent: a, tools: effectiveTools(a), localTools: localTools(a), harness: Harness.describe(a), baseTools: BASE_TOOLS, blocked: ALWAYS_BLOCKED,
         teamPrompt: teamPrompt(a).trim(), orchestratorPrompt: a.orchestrator ? orchestratorPrompt(a).trim() : null,
         models: MODELS, efforts: EFFORTS, envModel: process.env.CLAUDE_MODEL || null, envEffort: process.env.CLAUDE_EFFORT || null,
       });
@@ -1454,6 +1986,154 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { success: true, errors: [] });
     }
 
+    /* ---- 发到 QuantConnect：用户自己的 QC 账户（User ID + API token），只建项目 / 上传 / 编译，不建云端回测、不碰实盘 ---- */
+    // token 只进不出：返回给网页的只有打码后的 User ID
+    if (p === '/api/qc/status' && req.method === 'POST') {
+      const b = await readJson(req);
+      return sendJson(res, 200, { success: true, errors: [], status: await QC.status({ verify: b.verify === true }) });
+    }
+    if (p === '/api/actions/qc-connect' && req.method === 'POST') {
+      const b = await readJson(req);
+      return sendJson(res, 200, await QC.saveCreds({ userId: String(b.userId || ''), token: String(b.token || '') }));
+    }
+    if (p === '/api/actions/qc-disconnect' && req.method === 'POST') {
+      await readJson(req);
+      return sendJson(res, 200, await QC.clearCreds());
+    }
+    if (p === '/api/actions/qc-exports' && req.method === 'POST') {
+      const b = await readJson(req);
+      const pid = Number(b.projectId);
+      if (!Number.isSafeInteger(pid) || pid <= 0) return sendJson(res, 400, { success: false, errors: ['projectId 不对'] });
+      const bid = b.backtestId ? String(b.backtestId).replace(/[^a-f0-9]/g, '') : undefined;
+      return sendJson(res, 200, { success: true, errors: [], exports: (await QC.listExports(PROJECTS_DIR, pid, bid)).slice(-10) });
+    }
+    if (p === '/api/actions/qc-push' && req.method === 'POST') {
+      const b = await readJson(req);
+      const pid = Number(b.projectId);
+      const bid = String(b.backtestId || '').replace(/[^a-f0-9]/g, '');
+      if (!Number.isSafeInteger(pid) || pid <= 0 || !bid) return sendJson(res, 400, { success: false, errors: ['projectId 或 backtestId 不对'] });
+      if (qcPushing.has(pid)) return sendJson(res, 200, { success: false, errors: ['这个项目正在发送到 QuantConnect，请等它完成'] });
+      qcPushing.add(pid); // 检查之后立刻占位：中间有 await，连点两次会建出两个 QC 项目
+      try {
+      const code = await READ_ENDPOINTS['backtests/code/read']({ projectId: pid, backtestId: bid });
+      if (!code.success) return sendJson(res, 200, code);
+      const hd = QC.helmDataUsage(code.files);
+      // helm_data 的策略在 QC 上跑不起来：网页先提示，用户确认「仍然发送」才放行
+      if (hd.uses && b.confirmHelmData !== true) return sendJson(res, 200, { success: false, needsConfirm: 'helm_data', helmData: hd, errors: ['代码用到了 helm_data，在 QuantConnect 上不能直接运行'] });
+      const proj = await READ_ENDPOINTS['projects/read']({ projectId: pid });
+      const pname = proj.success && proj.projects[0] ? (proj.projects[0].name || `Helm ${pid}`) : `Helm ${pid}`;
+      {
+        const r = await QC.pushProject({ name: QC.qcProjectName(pname, bid), files: code.files });
+        if (r.project) {
+          await QC.logExport(PROJECTS_DIR, pid, { backtestId: bid, qcProjectId: r.project.projectId, qcName: r.project.name, url: r.project.url, files: r.uploaded || [], compile: r.compile ? r.compile.state : null, ok: r.success, helmData: hd.uses }).catch(() => {});
+        }
+        return sendJson(res, 200, { ...r, helmData: hd });
+      }
+      } finally { qcPushing.delete(pid); }
+    }
+
+    /* ---- 叠加 Qlib 选股：预检（不花钱）→ 模型评估出 2–4 个方案 + 「不加这一层」→ 用户选 → 交给总控 ---- */
+    if (p.startsWith('/api/actions/layer-') && req.method === 'POST') {
+      const b = await readJson(req);
+      const pid = Number(b.projectId);
+      if (!Number.isSafeInteger(pid) || pid <= 0) return sendJson(res, 400, { success: false, errors: ['projectId 不对'] });
+      const lang = res.helmLang === 'en' ? 'en' : 'zh';
+      if (p === '/api/actions/layer-read') {
+        const j = await Layer.readLayer(PROJECTS_DIR, pid, String(b.layerId));
+        if (!j) return sendJson(res, 200, { success: false, errors: ['找不到这次叠加评估'] });
+        if (j.status === 'running' && layerRunning.get(pid) !== j.layerId) { j.status = 'error'; j.error = '评估被中断了（服务重启过），请重新评估'; }
+        return sendJson(res, 200, { success: true, errors: [], layer: j });
+      }
+      if (p === '/api/actions/layer-choose') {
+        const lid = String(b.layerId);
+        if (layerChoosing.has(lid)) return sendJson(res, 200, { success: false, errors: ['这次叠加评估还没完成，或已经选过了'] });
+        layerChoosing.add(lid);
+        try {
+        const j = await Layer.readLayer(PROJECTS_DIR, pid, lid);
+        if (!j || j.status !== 'ready') return sendJson(res, 200, { success: false, errors: ['这次叠加评估还没完成，或已经选过了'] });
+        const opt = (j.result?.options || []).find((o) => o.id === String(b.optionId));
+        if (!opt) return sendJson(res, 200, { success: false, errors: ['没有这个方案'] });
+        j.choice = { optionId: opt.id, at: new Date().toISOString() };
+        j.status = opt.kind === 'none' ? 'declined' : 'chosen';
+        await Layer.saveLayer(PROJECTS_DIR, j);
+        if (opt.kind === 'none') return sendJson(res, 200, { success: true, errors: [], declined: true });
+        return sendJson(res, 200, { success: true, errors: [], agent: 'mia', message: Layer.taskMessage({ option: opt, backtest: j.backtest || {}, lang: j.lang || lang }) });
+        } finally { layerChoosing.delete(lid); }
+      }
+      const assess = p === '/api/actions/layer-assess';
+      if (assess) {
+        if (layerRunning.has(pid)) return sendJson(res, 200, { success: true, errors: [], layerId: layerRunning.get(pid) });
+        if (layerStarting.has(pid)) return sendJson(res, 200, { success: false, errors: ['正在开始评估，请稍等'] });
+        layerStarting.add(pid);
+      }
+      try {
+      // 预检 / 评估都要先读：回测列表、主版本代码快照、股票池状态
+      const bl = await READ_ENDPOINTS['backtests/list']({ projectId: pid });
+      if (!bl.success) return sendJson(res, 200, bl);
+      const pick = Layer.pickBacktest(bl.backtests);
+      const code = pick ? await READ_ENDPOINTS['backtests/code/read']({ projectId: pid, backtestId: pick.backtestId }) : { files: [] };
+      const uni = await Promise.race([Q.listUniverses().catch(() => null), new Promise((r) => setTimeout(() => r(null), 8000))]);
+      const pc = Layer.precheck({ files: code.files || [], backtests: bl.backtests, universes: uni && uni.success ? uni.universes : null });
+      const running = layerRunning.get(pid) || null;
+      // 之前的想法检验（有没有信号）和其他项目的主版本（能不能组合）：都很便宜，预检和评估都用
+      const rj = await Q.listResearch({ projectId: pid }).catch(() => null);
+      const priorIdeas = Layer.priorIdeaResults(rj && rj.success ? rj.jobs : []);
+      const peers = [];
+      for (const pr of await listProjects().catch(() => [])) {
+        if (Number(pr.projectId) === pid || peers.length >= 8) continue;
+        const l = await READ_ENDPOINTS['backtests/list']({ projectId: pr.projectId }).catch(() => null);
+        const m = l && l.success ? l.backtests.find((x) => x.role === 'main' && !x.error && x.period !== 'holdout') : null;
+        if (m) peers.push({ projectId: pr.projectId, name: String(pr.name || pr.projectId).slice(0, 60), backtestId: m.backtestId, sharpe: m.sharpeRatio ?? null });
+      }
+      // 择时过滤要用的标普 500 市场宽度：已算好 / 股票池在、只差算 / 股票池都还没准备
+      const sp = uni && uni.success ? uni.universes.find((u) => u.key === 'sp500') : null;
+      const breadth = existsSync(path.join(DATA_DIR, 'helm', 'breadth', 'sp500.csv')) ? 'ready' : sp && sp.exported ? 'build' : 'prepare';
+      // 因子归因（诊断）：第一次要下载因子数据；最多等 8 秒，等不到就先不显示
+      const attr = pc.backtest ? await Promise.race([
+        loadAttribution({ projectsDir: PROJECTS_DIR, dataDir: path.join(ROOT, 'data'), projectId: pid, backtestId: pc.backtest.backtestId, lang }).catch(() => null),
+        new Promise((r) => setTimeout(() => r(null), 8000)),
+      ]) : null;
+      const attribution = attr && attr.success && attr.attribution.available ? attr.attribution : null;
+      if (p === '/api/actions/layer-precheck') {
+        const prior = (await Layer.listLayers(PROJECTS_DIR, pid)).filter((x) => x.status === 'ready' && x.backtest?.backtestId === pc.backtest?.backtestId).pop() || null;
+        return sendJson(res, 200, { success: true, errors: [], precheck: { ok: pc.ok, reason: pc.reason || null, legs: pc.legs, qlibBlocked: pc.qlibBlocked || null, usesVol: Boolean(pc.usesVol), noSignal: priorIdeas.filter((x) => x.best === 'none').length, peers: peers.length, breadth, attribution: attribution ? { r2: attribution.r2, summary: attribution.summary } : null, backtest: pc.backtest ? { backtestId: pc.backtest.backtestId, name: pc.backtest.name, role: pc.backtest.role } : null }, running, ready: prior ? prior.layerId : null });
+      }
+      if (p === '/api/actions/layer-assess') {
+        if (!pc.ok) return sendJson(res, 200, { success: false, errors: [pc.reason] });
+        if (running) return sendJson(res, 200, { success: true, errors: [], layerId: running });
+        const proj = await READ_ENDPOINTS['projects/read']({ projectId: pid });
+        const project = proj.success ? proj.projects[0] : {};
+        const spec = (code.files || []).find((f) => f.name === 'spec.md')?.content
+          || await readFile(path.join(PROJECTS_DIR, String(pid), 'backtests', pc.backtest.backtestId, 'code', 'spec.md'), 'utf8').catch(() => '')
+          || await readFile(path.join(PROJECTS_DIR, String(pid), 'spec.md'), 'utf8').catch(() => '');
+        const holdout = JSON.parse(await readFile(path.join(PROJECTS_DIR, String(pid), 'holdout_log.json'), 'utf8').catch(() => '[]') || '[]');
+        const context = Layer.buildContext({ project, spec, files: code.files || [], backtest: pc.backtest, holdoutRuns: Array.isArray(holdout) ? holdout.length : 0, legs: pc.legs, priorIdeas, attribution, lang });
+        const alts = Layer.alternativeOptions({ usesVol: pc.usesVol, usesBreadth: pc.usesBreadth, peers, equityLeg: pc.legs[0] ? pc.legs[0].etf : null, breadth, lang });
+        const job = { layerId: Layer.newLayerId(), projectId: pid, status: 'running', lang, createdAt: new Date().toISOString(), backtest: { backtestId: pc.backtest.backtestId, name: pc.backtest.name, role: pc.backtest.role }, legs: pc.legs, result: null, error: null, choice: null };
+        await Layer.saveLayer(PROJECTS_DIR, job);
+        layerRunning.set(pid, job.layerId);
+        Layer.runAssessment({ context, legs: pc.legs, lang, runModel: runModelOnce })
+          .then(async (r) => {
+            let result = Layer.composeOptions({ qlib: r, alts, priorIdeas, qlibBlocked: pc.qlibBlocked, lang });
+            // 审核员逐个审这些方案：被筛掉的排到后面；全部被筛掉时推荐「不加这一层」
+            const live = result.options.filter((o) => o.kind !== 'none');
+            if (Critic.enabled() && live.length) {
+              const items = [{ header: lang === 'en' ? 'Layer' : '叠加一层', question: lang === 'en' ? 'Which layer is worth adding to this strategy?' : '这个策略值得加哪一层？', options: live.map((o) => ({ label: o.title, description: `${o.tests} ${o.how || ''}`.trim() })) }];
+              const rv = await Critic.review({ input: Critic.buildInput({ kind: 'layer', items, project, spec, priorIdeas, facts: { attribution: attribution ? attribution.summary : null, qlibBlocked: pc.qlibBlocked || null } }), items, lang, runModel: runModelOnce });
+              result = Critic.applyToOptions(result, rv);
+            }
+            job.status = 'ready'; job.result = result;
+          })
+          .catch((e) => { job.status = 'error'; job.error = `评估失败：${String(e && e.message || e).slice(0, 300)}`; })
+          .then(() => Layer.saveLayer(PROJECTS_DIR, job))
+          .catch(() => {})
+          .finally(() => { if (layerRunning.get(pid) === job.layerId) layerRunning.delete(pid); broadcast({ type: 'layer_updated', projectId: pid, layerId: job.layerId, status: job.status }); });
+        return sendJson(res, 200, { success: true, errors: [], layerId: job.layerId });
+      }
+      return sendJson(res, 404, { success: false, errors: ['没有这个接口'] });
+      } finally { if (assess) layerStarting.delete(pid); }
+    }
+
     if (p === '/api/actions/signals' && req.method === 'POST') {
       const b = await readJson(req);
       return sendJson(res, 200, await Q.exportSignals({ projectId: Number(b.projectId), jobId: String(b.jobId || ''), feature: b.feature || undefined, ideaFactor: b.ideaFactor ? String(b.ideaFactor) : undefined }));
@@ -1465,6 +2145,8 @@ const server = http.createServer(async (req, res) => {
       if (!message) return sendJson(res, 400, { error: '消息为空' });
       let thread = body.threadId ? await loadThread(body.threadId) : null;
       if (!thread) thread = newThread(agentById(body.agent) ? body.agent : AGENTS[0].id, message);
+      // 自动研究的根对话：那一轮出错 / 中断 / 被停掉之后再发消息（比如换了模型重发）= 从原来的进度接着做
+      if (thread.autopilot && !runs.has(thread.id)) await resumeAutopilot(thread);
       thread.lang = langOf(req, body); // 这条消息用哪种语言回复（zh = 现有行为；en = 提示词里追加一句「用 English 回复」）
       let run;
       try {
@@ -1483,13 +2165,75 @@ const server = http.createServer(async (req, res) => {
     if (p === '/api/chat/stop' && req.method === 'POST') {
       const { threadId } = await readJson(req);
       const r = runs.get(threadId);
-      if (r && r.child) r.child.kill('SIGTERM');
-      return sendJson(res, 200, { ok: Boolean(r) });
+      const stopped = r ? stopRunTree(threadId) : 0;
+      return sendJson(res, 200, { ok: Boolean(r), stopped });
     }
     // 必须 await：直接 return 一个 Promise 的话，里面抛的错不会进下面的 catch，变成未处理的 rejection 把服务带崩
     if (p === '/api/handoff' && req.method === 'POST') return await handleHandoff(req, res);
     if (p === '/api/approval' && req.method === 'POST') return await handleApproval(req, res);
+    // 自动更新：状态 / 开关 / 立即检查 / 立即更新
+    if (p === '/api/update/status' && req.method === 'GET') {
+      const [st, set] = await Promise.all([localState(UPDATE_ROOT), readUpdateState(UPDATE_DATA)]);
+      return sendJson(res, 200, { success: true, branch: UPDATE_BRANCH, state: st, blockers: updateBlockers(st, { isIdle: updateIdle() }), settings: set, autoRestart: process.env.HELM_APP === '1' });
+    }
+    if (p === '/api/update/settings' && req.method === 'POST') {
+      const b = await readJsonRaw(req);
+      if (typeof b.autoUpdate !== 'boolean') return sendJson(res, 400, { error: 'autoUpdate 必须是 true 或 false' });
+      return sendJson(res, 200, { success: true, settings: await setAutoUpdate(UPDATE_DATA, b.autoUpdate) });
+    }
+    if (p === '/api/update/check' && req.method === 'POST') {
+      const r = await checkForUpdate({ root: UPDATE_ROOT, dataDir: UPDATE_DATA });
+      return sendJson(res, 200, { success: r.ok, ...r, blockers: r.state ? updateBlockers(r.state, { isIdle: updateIdle() }) : [] });
+    }
+    if (p === '/api/update/apply' && req.method === 'POST') {
+      const r = await applyUpdate({ root: UPDATE_ROOT, dataDir: UPDATE_DATA, isIdle: updateIdle() });
+      if (r.ok && r.updated) afterUpdate(r);
+      return sendJson(res, 200, { success: r.ok, ...r, autoRestart: process.env.HELM_APP === '1' });
+    }
     if (p === '/api/ask' && req.method === 'POST') return await handleAsk(req, res);
+    if (p === '/api/harness/guard' && req.method === 'POST') return await handleHarnessTool(req, res, 'guard');
+    if (p === '/api/harness/record' && req.method === 'POST') return await handleHarnessTool(req, res, 'record');
+    if (p === '/api/subagent' && req.method === 'POST') return await handleSubagent(req, res);
+    if (p === '/api/direction' && req.method === 'POST') return await handleDirection(req, res);
+    if (p === '/api/harness' && req.method === 'GET') return sendJson(res, 200, { success: true, harnesses: AGENTS.map((a) => Harness.describe(a)) });
+    if (p === '/api/autopilot/guard' && req.method === 'POST') return await handleAutopilotTool(req, res, 'guard');
+    if (p === '/api/autopilot/record' && req.method === 'POST') return await handleAutopilotTool(req, res, 'record');
+    if (p === '/api/autopilot' && req.method === 'GET') return sendJson(res, 200, { success: true, defaults: Autopilot.DEFAULTS, runs: await apList() });
+    if (p === '/api/companion' && req.method === 'GET') { if (!COMP.state) await COMP.load(); return sendJson(res, 200, compView()); }
+    if (p === '/api/companion' && req.method === 'POST') {
+      const b = await readJson(req);
+      const lang = langOf(req, b);
+      if (!COMP.state) await COMP.load();
+      const act = String(b.action || '');
+      if (act === 'enable' || act === 'disable') {
+        await COMP.setEnabled(act === 'enable');
+        try { await compApply(); } catch (e) { await COMP.setEnabled(false); await compApply().catch(() => {}); throw httpError(409, localize(lang, `手机伴侣没能启动：${e.code === 'EADDRINUSE' ? '端口被占用' : e.message}`)); }
+        return sendJson(res, 200, compView());
+      }
+      if (act === 'pair') { if (!COMP.state.enabled) throw httpError(409, localize(lang, '先打开手机伴侣')); return sendJson(res, 200, compView({ pair: COMP.newPairCode() })); }
+      if (act === 'reset') { await COMP.reset(); return sendJson(res, 200, compView()); }
+      throw httpError(400, 'action 只能是 enable、disable、pair 或 reset');
+    }
+    if (p === '/api/inbox' && req.method === 'GET') return sendJson(res, 200, { success: true, ideas: await COMP.inbox() });
+    if (p === '/api/inbox' && req.method === 'POST') {
+      const b = await readJson(req);
+      const r = await COMP.actIdea(String(b.id || ''), String(b.action || ''));
+      if (r.error) throw httpError(r.error === 'not-found' ? 404 : 400, r.error === 'not-found' ? '收件箱里没有这一条' : 'action 只能是 used 或 dismissed');
+      broadcast({ type: 'inbox_updated' });
+      return sendJson(res, 200, { success: true, idea: r.idea });
+    }
+    if (p === '/api/autopilot/start' && req.method === 'POST') { const b = await readJson(req); return sendJson(res, 200, { success: true, ...(await startAutopilot(b, langOf(req, b))) }); }
+    if (p === '/api/autopilot/stop' && req.method === 'POST') {
+      const b = await readJson(req);
+      const ap = apRuns.get(String(b.runId || ''));
+      if (!ap || ap.status !== 'running') return sendJson(res, 404, { error: localize(langOf(req, b), '这一轮自动研究不在运行') });
+      ap.reason = 'user';
+      stopRunTree(ap.rootThreadId);
+      apEnd(ap, 'stopped', 'user');
+      return sendJson(res, 200, { success: true });
+    }
+    const mAp = p.match(/^\/api\/autopilot\/(ap[a-z0-9]{4,24})$/);
+    if (mAp && req.method === 'GET') { const ap = await apLoad(mAp[1]); return ap ? sendJson(res, 200, { success: true, run: Autopilot.runView(ap) }) : sendJson(res, 404, { error: 'not found' }); }
     if (p === '/api/questions' && req.method === 'GET') {
       return sendJson(res, 200, { success: true, questions: [...questions.values()].map(questionView).sort((a, b) => b.at - a.at).slice(0, 50) });
     }
@@ -1595,6 +2339,9 @@ server.listen(PORT, HOST, () => {
   // 模拟实盘：每个交易日结束后（美东午夜过后）自动用最新数据跑一次
   Paper.onPaperEvent((ev) => broadcast(ev));
   Paper.startScheduler();
+  // 手机伴侣：上次打开过就接着开（默认关）
+  COMP.load().then(() => compApply()).then(() => { if (compServer) console.log(L(`  手机伴侣已打开（局域网可访问）：${lanUrls(compServer.helmPort).join('  ') || `端口 ${compServer.helmPort}`}`, `  Phone companion is on (reachable on your local network): ${lanUrls(compServer.helmPort).join('  ') || `port ${compServer.helmPort}`}`)); })
+    .catch((e) => console.error(L(`  手机伴侣没能启动：${e.message}`, `  Phone companion failed to start: ${e.message}`)));
   reconcileLedgers().then((r) => { if (r.trialsAdded || r.holdoutBackfilled.length) console.log(L(`  补记尝试 ${r.trialsAdded} 次，补记验证期 ${r.holdoutBackfilled.length} 次`, `  Backfilled ${r.trialsAdded} trial(s) and ${r.holdoutBackfilled.length} holdout record(s)`)); }).catch((e) => console.log(L(`  补账失败：${e.message}`, `  Ledger backfill failed: ${e.message}`)));
 });
 
@@ -1602,14 +2349,15 @@ server.listen(PORT, HOST, () => {
 // 回测、研究和参数敏感性是独立（detached）进程，不受影响，会继续跑完。
 // 模拟实盘的每日运行在这个进程里：正在跑的那一次会被打断，下次启动后定时任务马上补跑（lib/paper.mjs 的 shouldRunNow）。
 let shuttingDown = false;
-function shutdown(sig) {
-  if (shuttingDown) return process.exit(0);
+function shutdown(sig, exitCode = 0) {
+  if (shuttingDown) return process.exit(exitCode);
   shuttingDown = true;
   console.log(L(`\n  收到 ${sig}，正在关闭 Helm …（正在跑的回测 / 研究不会被中断）`, `\n  Got ${sig}, shutting down Helm … (running backtests / research keep going)`));
   const live = Paper.runningSessions().length;
   if (live) console.log(L(`  有 ${live} 个模拟实盘正在更新，这一次会被打断；下次启动 Helm 后会自动补跑，不会重复下单。`, `  ${live} paper session(s) are updating and will be interrupted; Helm re-runs them on next start without duplicate orders.`));
-  const hardStop = setTimeout(() => process.exit(0), 3000); hardStop.unref();
-  server.close(() => process.exit(0));
+  const hardStop = setTimeout(() => process.exit(exitCode), 3000); hardStop.unref();
+  if (compServer) { try { if (compServer.closeAllConnections) compServer.closeAllConnections(); compServer.close(); } catch { /* 已关 */ } }
+  server.close(() => process.exit(exitCode));
   for (const res of bus) { try { res.end(); } catch { /* 已断开 */ } }
   for (const r of runs.values()) {
     for (const res of r.subs || []) { try { res.end(); } catch { /* 已断开 */ } }
@@ -1617,5 +2365,20 @@ function shutdown(sig) {
   }
   server.closeAllConnections?.();
 }
+/* ---------------- 自动更新（lib/updater.mjs）：从 GitHub 的 main 拿最新版本 ---------------- */
+// 测试可以用 HELM_UPDATE_ROOT 指到一个临时仓库
+const UPDATE_ROOT = process.env.HELM_UPDATE_ROOT || ROOT;
+const UPDATE_DATA = path.dirname(THREADS_DIR);
+const updateIdle = () => runs.size === 0 && ![...approvals.values()].some((a) => a.state === 'pending') && ![...questions.values()].some((q) => q.state === 'pending') && Paper.runningSessions().length === 0;
+// Mac App 里运行时（HELM_APP=1）：退出码 75 = 「已更新，请重启我」，App 会马上重新启动服务；终端里运行时提示用户自己重启
+const RESTART_CODE = 75;
+async function afterUpdate(r) {
+  broadcast({ type: 'update_applied', from: r.from, to: r.to, needsSetup: r.needsSetup, needsApp: r.needsApp, autoRestart: process.env.HELM_APP === '1' });
+  if (process.env.HELM_APP === '1') setTimeout(() => shutdown('update', RESTART_CODE), 3000);
+}
+if (!process.env.HELM_NO_AUTO_UPDATE) {
+  startAutoUpdater({ root: UPDATE_ROOT, dataDir: UPDATE_DATA, isIdle: updateIdle, onUpdated: afterUpdate, log: (m) => console.log(`  ${m}`) });
+}
+
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));

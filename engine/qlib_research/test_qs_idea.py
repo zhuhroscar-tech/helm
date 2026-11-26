@@ -255,6 +255,15 @@ def test_market_return_is_point_in_time_equal_weight():
     assert np.isnan(I.market_return(closes, el2).iloc[4])
 
 
+def test_constant_series_argument_rejected():
+    # A data-series argument made only of numbers used to pass validation, then crash or silently give an
+    # all-NaN factor that still counted as a trial.
+    for bad in ["Mean(2*3, 5)+$close", "Ref(1+1,3)*$close", "Corr($close, 2*3, 20)+$close", "Std(-(4), 10)*$close"]:
+        _raises(I.parse_expr, bad)
+    for good in ["Mean($close,5)/$close", "Corr($close,$volume,20)", "Greater($close, 0)", "Ref($close*2, 3)"]:
+        I.parse_expr(good)
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:

@@ -1,0 +1,11 @@
+{
+  "name": "Helm",
+  "short_name": "Helm",
+  "description": "Helm companion: search status and an idea inbox for your Helm on this network.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f6f5f1",
+  "theme_color": "#f6f5f1",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

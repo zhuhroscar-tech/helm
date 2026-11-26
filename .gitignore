@@ -19,3 +19,6 @@ macos/dist/
 notes/
 # demo videos: attached to GitHub Releases instead of the repo
 demo/
+engine/qlib_research/mlruns/
+# Agent 行为评测的结果（每次运行的对话记录和报告）
+evals/results/

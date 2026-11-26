@@ -8,7 +8,7 @@ Helm is a local quant research console. A web page on `localhost` drives Claude 
 - Start with `npm start`, then open http://localhost:4377. `GET /api/health` lists what is missing on your machine.
 - Agents need the `claude` command installed and logged in.
 - Full backtests need the LEAN build, .NET 10 and the Python venv described under 「安装」 in the README. You do not need them for the fast test suite or for most edits.
-- **Python is only needed for the engine.** That means `engine/fetch_data.py`, `engine/helm_data.py`, `engine/lint_strategy.py`, `engine/qlib_bridge.py` and `engine/qlib_research/`. The qlib research engine needs an interpreter that has `qlib` and `lightgbm`; `engine/qlib_research/run.sh --which-python` shows which one it picks. The Python tests below need only numpy and pandas.
+- **Python is only needed for the engine.** That means `engine/fetch_data.py`, `engine/helm_data.py`, `engine/lint_strategy.py`, `engine/qlib_bridge.py` and `engine/qlib_research/`. Idea tests and universe exports run on `engine/.venv`; only full qlib research needs an interpreter with `qlib` and `lightgbm` (`engine/qlib_research/run.sh --which-python` shows which one it picks). The Python tests below need numpy, pandas, scipy and matplotlib.
 
 ## Running tests
 
@@ -23,12 +23,12 @@ Node (`test/all.mjs` runs every `*.test.mjs` file and `smoke.mjs`, each in its o
 Python (`engine/qlib_research`):
 
 - These are plain scripts, not pytest: `python3 engine/qlib_research/test_qs_core.py`. Each exits non-zero on failure.
-- `engine/qlib_research/run.sh --test` runs all five files with the qlib interpreter, including `test_qs_qlib.py`, which imports qlib.
-- CI runs four of the five. `test_qs_qlib.py` is excluded because it needs qlib; see `.github/workflows/ci.yml`.
+- `engine/qlib_research/run.sh --test` runs all seven `test_qs_*.py` files, including `test_qs_qlib.py`, which imports qlib.
+- CI runs the six that don't need qlib, plus `engine/test_helm_vol.py`; see `.github/workflows/ci.yml`.
 
 ## Layout
 
-The table in the README under 「结构」 is the map. In short: `server.mjs` (HTTP and agent streaming), `mcp/qc-mcp.mjs` (the tools agents call), `lib/` (engine, statistics, paper trading, policy), `public/` (the page), `engine/` (Python and LEAN glue), `engine/qlib_research/` (research engine), `workspace/CLAUDE.md` and `agents.json` (agent rules and prompts), `test/`, `docs/`.
+The table in the README under 「仓库」 is the map. In short: `server.mjs` (HTTP and agent streaming), `mcp/qc-mcp.mjs` (the tools agents call), `lib/` (engine, statistics, paper trading, policy), `public/` (the page), `engine/` (Python and LEAN glue), `engine/qlib_research/` (research engine), `workspace/CLAUDE.md` and `agents.json` (agent rules and prompts), `test/`, `docs/`.
 
 ## Code conventions (as the code is written today)
 
