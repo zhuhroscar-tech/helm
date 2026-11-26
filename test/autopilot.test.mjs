@@ -190,8 +190,152 @@ try {
   const jr2 = await J.loadJournal({ projectsDir: path.join(TMP, 'projects'), trialsFile: process.env.HELM_TRIALS_FILE, fresh: true });
   const card2 = P.buildPipeline({ journal: jr2, projects: [{ projectId: 501, name: 'p' }] }).cards.find((c) => c.projectId === 501);
   check('流水线：通过检验但没标 main → 「等你确认」', card2 && card2.stages.find((s) => s.id === 'gate').gate.label === '通过检验，等你确认标 main', card2 && JSON.stringify(card2.stages.find((s) => s.id === 'gate').gate));
+  // 统计检验标准（择时按风险调整）：只能在有回测之前设
+  await mkdir(path.join(TMP, 'projects', '502'), { recursive: true });
+  await writeFile(path.join(TMP, 'projects', '502', 'project.json'), JSON.stringify({ projectId: 502, name: 't' }));
+  const s1 = await E.setProjectValidation({ projectId: 502, mode: 'risk-adjusted' });
+  const pj = JSON.parse(await readFile(path.join(TMP, 'projects', '502', 'project.json'), 'utf8'));
+  check('新项目：设成风险调整标准，写进 project.json', s1.success && s1.changed === true && pj.validation === 'risk-adjusted' && pj.name === 't', JSON.stringify(pj));
+  check('再设一次：不重写', (await E.setProjectValidation({ projectId: 502, mode: 'risk-adjusted' })).changed === false);
+  const s2 = await E.setProjectValidation({ projectId: 501, mode: 'risk-adjusted' });
+  check('已经有回测的项目：不能再换标准', s2.success === false && /已经有回测/.test((s2.errors || []).join('')), JSON.stringify(s2));
+  check('不存在的项目：报错', (await E.setProjectValidation({ projectId: 999, mode: 'risk-adjusted' })).success === false);
 } finally {
   await rm(TMP, { recursive: true, force: true });
+}
+
+/* ---- 交付检查（unfinished）：登记过的想法有没有做到有结论 ---- */
+{
+  const mk = (opts = {}) => { const r = A.newRun({ budget: { ideas: 3, versions: 2 }, ...opts }, { now: T0 }); A.record(r, 'autopilot_plan', { ideas: [{ title: '盈利惊喜', logic: 'l', kind: 'stock' }, { title: '质量', logic: 'l', kind: 'stock' }, { title: '趋势择时', logic: 'l', kind: 'timing' }] }, 'ok'); return r; };
+  const at = { now: T0 + 60000 };
+  // 重现 2026-11-24 那一轮：想法 1 信号弱没进开发期，想法 2 没信号，想法 3 建了项目没回测
+  const r = mk();
+  A.record(r, 'create_project', { name: 'a', planIdea: 1 }, '已创建 projectId=11');
+  A.record(r, 'test_idea', { projectId: 11 }, '已提交');
+  check('想法检验提交了没读结论：要求 read_research', A.unfinished(r, at).some((m) => /想法 1/.test(m) && /read_research/.test(m)));
+  A.record(r, 'read_research', { projectId: 11, jobId: 'j' }, '【f1】结论：没有信号\n【f2】结论：信号弱\n');
+  check('几个因子里取最好的结论', r.ideaVerdicts[11] === 'weak', JSON.stringify(r.ideaVerdicts));
+  A.record(r, 'create_project', { name: 'b', planIdea: 2 }, '已创建 projectId=12');
+  A.record(r, 'test_idea', { projectId: 12 }, '已提交');
+  A.record(r, 'read_research', { projectId: 12, jobId: 'j' }, '【f】结论：没有信号\n');
+  A.record(r, 'create_project', { name: 'c', planIdea: 3 }, '已创建 projectId=13');
+  const u = A.unfinished(r, at);
+  check('信号弱但没进开发期：列出来', u.some((m) => /想法 1/.test(m) && /信号弱/.test(m) && /开发期/.test(m)), u.join(' | '));
+  check('没有信号的想法算做完了', !u.some((m) => /想法 2/.test(m)));
+  check('择时想法建了项目没回测：列出来', u.some((m) => /想法 3/.test(m) && /没跑开发期/.test(m)));
+  check('一共 2 项', u.length === 2, String(u.length));
+  // 往下做完
+  A.record(r, 'create_backtest', { projectId: 13 }, 'backtestId=t1');
+  check('回测跑了没检验：列出来', A.unfinished(r, at).some((m) => /想法 3/.test(m) && /t1/.test(m) && /validate_backtest/.test(m)));
+  A.record(r, 'validate_backtest', { projectId: 13, backtestId: 't1' }, FAIL);
+  check('开发期没通过：这个想法算做完（要不要再改一版由 agent 定）', !A.unfinished(r, at).some((m) => /想法 3/.test(m)));
+  A.record(r, 'create_backtest', { projectId: 11 }, 'backtestId=s1');
+  A.record(r, 'validate_backtest', { projectId: 11, backtestId: 's1' }, PASS);
+  check('开发期通过了没跑验证期：列出来', A.unfinished(r, at).some((m) => /想法 1/.test(m) && /没跑验证期/.test(m)));
+  A.record(r, 'create_backtest', { projectId: 11, period: 'holdout' }, 'backtestId=s2');
+  check('验证期跑了没检验：列出来', A.unfinished(r, at).some((m) => /s2/.test(m)));
+  A.record(r, 'validate_backtest', { projectId: 11, backtestId: 's2' }, FAIL);
+  check('每个想法都有结论：没有待办', A.unfinished(r, at).length === 0, A.unfinished(r, at).join(' | '));
+  // 不该催的情况
+  const r1 = mk();
+  check('登记了没开始：列出来', A.unfinished(r1, at).length === 3 && /planIdea=1/.test(A.unfinished(r1, at)[0]));
+  check('超过时间上限：不催', A.unfinished(r1, { now: T0 + 181 * 60000 }).length === 0);
+  r1.cost = 20; check('用量到上限：不催', A.unfinished(r1, at).length === 0);
+  r1.cost = 0; r1.found.push({ projectId: 1, backtestId: 'x' }); check('已经找到候选（找到就停）：不催', A.unfinished(r1, at).length === 0);
+  r1.found = []; r1.status = 'done'; check('已经结束的一轮：不催', A.unfinished(r1, at).length === 0);
+  check('还没登记：不催', A.unfinished(A.newRun({}, { now: T0 }), at).length === 0);
+  const re = mk(); re.lang = 'en';
+  check('英文界面给英文待办', /registered but never started/.test(A.unfinished(re, at)[0]));
+}
+
+/* ---- 择时信号检验（test_timing_signal）也记账 ---- */
+{
+  const r = A.newRun({ budget: { ideas: 3, versions: 2 } }, { now: T0 });
+  A.record(r, 'autopilot_plan', { ideas: [{ title: '宽度确认', logic: 'l', kind: 'timing' }, { title: '分化度避险', logic: 'l', kind: 'timing' }, { title: '信用利差', logic: 'l', kind: 'timing' }] }, 'ok');
+  [1, 2, 3].forEach((k) => A.record(r, 'create_project', { name: 'p', planIdea: k }, `已创建 projectId=${20 + k}`));
+  A.record(r, 'test_timing_signal', { projectId: 21, series: ['pct_above_200'] }, '择时信号检验（sp500…）\n- 站上 200 日线比例（pct_above_200）：**没有信号**。t 不够。');
+  A.record(r, 'test_timing_signal', { projectId: 22, series: ['dispersion'] }, '- 分化度（dispersion）：**信号弱**。…\n- 另一个：**没有信号**。');
+  A.record(r, 'test_timing_signal', { projectId: 99, series: ['x'] }, '- x：**有信号**。');
+  check('择时信号检验记进账本（不是这一轮的项目不记）', r.tests[21] === 1 && r.tests[22] === 1 && !r.tests[99] && A.ledger(r).tests === 2);
+  check('结论记下来：没有信号 / 信号弱', r.ideaVerdicts[21] === 'none' && r.ideaVerdicts[22] === 'weak');
+  const u = A.unfinished(r, { now: T0 + 60000 });
+  check('检验过、没有信号的择时想法算做完，不再催', !u.some((m) => /想法 1/.test(m)), u.join(' | '));
+  check('信号弱的择时想法：要进开发期（不提「导出信号」）', u.some((m) => /想法 2/.test(m) && /信号检验是「信号弱」/.test(m) && !/导出/.test(m)));
+  check('没检验也没回测的择时想法：照旧催开发期', u.some((m) => /想法 3/.test(m) && /没跑开发期/.test(m)));
+}
+
+/* ---- 择时想法的判定标准（开工前选定） ---- */
+{
+  check('默认按收益判', A.normalizeOptions({}).timingGate === 'return' && A.newRun({}).timingGate === 'return');
+  check('非法值回到默认', A.normalizeOptions({ timingGate: 'easy' }).timingGate === 'return');
+  const ra = A.newRun({ timingGate: 'risk-adjusted', budget: { ideas: 3 } }, { now: T0 });
+  check('可以选风险调整', ra.timingGate === 'risk-adjusted' && A.runView(ra).timingGate === 'risk-adjusted');
+  check('开工说明（收益标准）：提醒纯防守的择时过不了', /按「收益」判/.test(A.kickoffMessage(A.newRun({}))) && /纯防守/.test(A.kickoffMessage(A.newRun({}))));
+  check('开工说明（风险调整）：写明标准', /「风险调整」标准/.test(A.kickoffMessage(ra)) && /2\/3/.test(A.kickoffMessage(ra)) && !/按「收益」判/.test(A.kickoffMessage(ra)));
+  check('开工说明（英文）也有', /judged on RETURN/.test(A.kickoffMessage(A.newRun({}, { lang: 'en' }))) && /risk-adjusted standard/.test(A.kickoffMessage(A.newRun({ timingGate: 'risk-adjusted' }, { lang: 'en' }))));
+  check('开工说明：一批之内要是不同的一注、每个想法要有结论', /不同的一注/.test(A.kickoffMessage(ra)) && /做到有结论/.test(A.kickoffMessage(ra)));
+  check('风险调整这一轮：想法没写 kind 被拒', no(A.guard(ra, 'autopilot_plan', { ideas: [{ title: 't', logic: 'l' }] }, { now: T0 + 1 }), /kind/));
+  check('收益标准这一轮：不写 kind 照旧放行', ok(A.guard(A.newRun({}, { now: T0 }), 'autopilot_plan', { ideas: [{ title: 't', logic: 'l' }] }, { now: T0 + 1 })));
+  const pl = { ideas: [{ title: '选股', logic: 'l', kind: 'stock' }, { title: '择时', logic: 'l', kind: 'timing' }] };
+  check('写了 kind：放行', ok(A.guard(ra, 'autopilot_plan', pl, { now: T0 + 1 })));
+  A.record(ra, 'autopilot_plan', pl, 'ok');
+  check('只有择时想法用风险调整标准', A.wantsRiskAdjusted(ra, 2) === true && A.wantsRiskAdjusted(ra, 1) === false && A.wantsRiskAdjusted(ra, 9) === false);
+  const rr = A.newRun({}, { now: T0 }); A.record(rr, 'autopilot_plan', pl, 'ok');
+  check('没选风险调整：择时想法也按收益判', A.wantsRiskAdjusted(rr, 2) === false);
+}
+
+/* ---- 连续模式：没找到就开下一轮 ---- */
+{
+  check('默认不是连续模式', A.normalizeOptions({}).untilFound === false && A.newRun({}).chain === null && A.nextRound(Object.assign(A.newRun({}, { now: T0 }), { status: 'done' })) === null);
+  const stockPlan = { direction: { name: '财报质量' }, ideas: [{ title: '低应计', logic: 'l', kind: 'stock' }, { title: '低资产增长', logic: 'l', kind: 'stock' }] };
+  const play = (r, base) => { // 两个选股想法都「没有信号」
+    A.record(r, 'autopilot_plan', stockPlan, 'ok');
+    [1, 2].forEach((k) => { A.record(r, 'create_project', { name: 'p', planIdea: k }, `已创建 projectId=${base + k}`); A.record(r, 'test_idea', { projectId: base + k }, '已提交'); A.record(r, 'read_research', { projectId: base + k }, '结论：没有信号'); });
+    r.cost = 3.85; r.status = 'done'; return r;
+  };
+  const r1 = play(A.newRun({ untilFound: true, usd: 20, minutes: 180, budget: { ideas: 2 }, timingGate: 'risk-adjusted', direction: '不限' }, { now: T0 }), 100);
+  check('第 1 轮带着合计预算', r1.chain.round === 1 && r1.chain.usdTotal === 20 && r1.chain.minutesTotal === 180 && r1.chain.spent === 0);
+  check('第 1 轮的开工说明写明是连续搜索、不要放宽标准', /连续搜索 · 第 1 轮/.test(A.kickoffMessage(r1)) && /不要为了在这一轮里出结果而放宽/.test(A.kickoffMessage(r1)));
+  const n1 = A.nextRound(r1, { now: T0 + 25 * 60000 });
+  check('没找到、预算还有：开下一轮，预算是剩下的', n1 && n1.options && n1.options.usd === 16 && n1.options.minutes === 155 && n1.options.untilFound === true, JSON.stringify(n1 && n1.options));
+  check('下一轮沿用设置（想法数、范围、择时标准、方向）', n1.options.budget.ideas === 2 && n1.options.timingGate === 'risk-adjusted' && n1.options.direction === '不限' && n1.options.scope === 'any');
+  check('接力信息：第 2 轮、记着第一轮的 runId、已花的钱和每个方向的结果', n1.chain.round === 2 && n1.chain.id === r1.runId && n1.chain.spent === 3.85 && n1.chain.history.length === 1 && n1.chain.history[0].ideas.length === 2 && n1.chain.history[0].ideas[0].verdict === '想法检验没有信号', JSON.stringify(n1.chain.history));
+  const r2 = play(A.newRun(n1.options, { now: T0 + 26 * 60000, chain: n1.chain, runId: 'apround2' }), 200);
+  const k2 = A.kickoffMessage(r2);
+  check('第 2 轮开工说明列出前一轮试过的方向和结果', /第 2 轮/.test(k2) && /财报质量/.test(k2) && /低应计（stock） → 想法检验没有信号/.test(k2) && /花了 \$3\.85/.test(k2), k2.slice(k2.indexOf('【连续搜索'), k2.indexOf('【连续搜索') + 200));
+  check('上限按合计算：这一轮的上限是剩下的', r2.caps.usd === 16 && r2.caps.minutes === 155 && r2.chain.usdTotal === 20);
+  const n2 = A.nextRound(r2, { now: T0 + 60 * 60000 });
+  check('第 3 轮：累计花费、历史累加', n2.chain.round === 3 && Math.abs(n2.chain.spent - 7.7) < 1e-9 && n2.chain.history.length === 2 && n2.options.usd === 12 && n2.chain.id === r1.runId, JSON.stringify({ s: n2.chain.spent, u: n2.options.usd }));
+  const r3 = A.newRun(n2.options, { now: T0 + 61 * 60000, chain: n2.chain });
+  check('同一类连续 4 个都没过开发期：开工说明要求换一类', /选股想法已经连续 4 个没有一个通过开发期/.test(A.kickoffMessage(r3)) && !/择时想法已经连续/.test(A.kickoffMessage(r3)));
+  check('「开发期没通过」不会被当成通过', A.roundSummary(r2).every((d) => d.ideas.every((x) => x.devPass === false)));
+  // 停下来的几种情况
+  const f = play(A.newRun({ untilFound: true }, { now: T0 }), 300); f.found.push({ projectId: 301, backtestId: 'h' });
+  check('找到了：不再开', A.nextRound(f, { now: T0 + 1 }).stop === 'found');
+  const u = play(A.newRun({ untilFound: true, usd: 4 }, { now: T0 }), 400);
+  check('合计用量不够再开一轮：停（usd）', A.nextRound(u, { now: T0 + 1 }).stop === 'usd');
+  const t = play(A.newRun({ untilFound: true, minutes: 30 }, { now: T0 }), 500);
+  check('合计时间不够：停（time）', A.nextRound(t, { now: T0 + 25 * 60000 }).stop === 'time');
+  const e = A.newRun({ untilFound: true }, { now: T0 }); e.status = 'done';
+  check('这一轮什么都没测：停（no-progress），不空转', A.nextRound(e, { now: T0 + 1 }).stop === 'no-progress');
+  const m = play(A.newRun({ untilFound: true }, { now: T0, chain: { id: 'apx', round: A.MAX_ROUNDS, usdTotal: 500, minutesTotal: 1440, startedAt: T0, spent: 0, history: [] } }), 600);
+  check('轮数到上限：停（rounds）', A.nextRound(m, { now: T0 + 1 }).stop === 'rounds');
+  for (const st of ['error', 'stopped', 'interrupted', 'running']) { const x = play(A.newRun({ untilFound: true }, { now: T0 }), 700); x.status = st; check(`${st} 的一轮不接着开`, A.nextRound(x, { now: T0 + 1 }) === null); }
+  const en = play(A.newRun({ untilFound: true }, { now: T0, lang: 'en' }), 800);
+  const ne = A.nextRound(en, { now: T0 + 1 });
+  check('英文：历史和开工说明是英文', ne.chain.history[0].ideas[0].verdict === 'no signal' && /Continuous search — round 2/.test(A.kickoffMessage(A.newRun(ne.options, { lang: 'en', chain: ne.chain }))));
+  { // 开发期通过、验证期没跑成：不接着开下一轮
+    const hp = A.newRun({ untilFound: true, budget: { ideas: 1 } }, { now: T0 });
+    A.record(hp, 'autopilot_plan', { ideas: [{ title: '信用利差', logic: 'l', kind: 'timing' }] }, 'ok');
+    A.record(hp, 'create_project', { name: 'p', planIdea: 1 }, '已创建 projectId=901');
+    A.record(hp, 'create_backtest', { projectId: 901 }, 'backtestId=d1'); A.record(hp, 'validate_backtest', { projectId: 901, backtestId: 'd1' }, PASS);
+    hp.status = 'done';
+    check('开发期通过、验证期没跑：停（holdout-pending），不接着花预算', A.nextRound(hp, { now: T0 + 1 }).stop === 'holdout-pending');
+    A.record(hp, 'create_backtest', { projectId: 901, period: 'holdout' }, 'backtestId=h1'); A.record(hp, 'validate_backtest', { projectId: 901, backtestId: 'h1' }, FAIL);
+    check('验证期看过了（没通过）：照常接着找', Boolean(A.nextRound(hp, { now: T0 + 1 }).options));
+  }
+  const v = A.runView(r2);
+  check('网页摘要带着第几轮和合计', v.untilFound === true && v.chain.round === 2 && v.chain.spent === 3.85 && v.chain.usdTotal === 20);
 }
 
 console.log(failed ? `\n${failed} 项失败` : '\n全部通过');

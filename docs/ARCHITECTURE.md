@@ -58,6 +58,7 @@ How Helm is put together, where it keeps state, and which mechanisms keep resear
 | `lib/datasets.mjs` | Custom datasets: validation (availability date, source, sensitive-attribute check), save, list, read |
 | `lib/market-calendar.mjs` | US market holidays; shares `public/calendar.js` with the page |
 | `lib/agents.mjs` | Tool catalogue, per-agent permissions, `agents.json` validation and saving |
+| `lib/harness/` | One harness per agent: tool scope, loop limits, pre-call rules, delivery check, subagents, research-direction ledger ([HARNESS.md](HARNESS.md)) |
 | `lib/agent-perms.mjs` | Deny-list of sensitive paths for agent Read/Glob/Grep |
 | `lib/change-policy.mjs` | Which agent edits and commands run freely, need approval, or are refused; protected definitions |
 | `lib/changes.mjs` | Change sets: snapshot before editing, verify with tests, auto-revert, manual undo |

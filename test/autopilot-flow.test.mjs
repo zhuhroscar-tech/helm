@@ -1,7 +1,7 @@
 // 自动研究端到端：node test/autopilot-flow.test.mjs
 // 真实的 server.mjs + MCP + 工具替身 + 假 claude（按写好的步骤调工具），检查服务端这一侧：
 // 开工说明、硬规则拦截（MCP → /api/autopilot/guard）、记账、提问自动回答不弹给用户、账本附在汇报后面、运行记录和接口、停止。
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runOnce } from '../evals/run.mjs';
@@ -130,6 +130,66 @@ const t2 = r2.events.filter((e) => e.kind === 'tool');
 check('一批超过预算：被拒', t2[0] && t2[0].isError && /最多 1 个/.test(t2[0].result));
 const ap2 = JSON.parse(await readFile(path.join(r2.dir, 'data', 'autopilot', `${r2.autopilotRunId}.json`), 'utf8'));
 check('没登记成功也照常结束并有账本', ap2.status === 'done' && ap2.plan === null);
+
+/* ---- 交付检查：汇报时还有想法停在半路 → 用同一个会话续跑 ---- */
+const r5 = await runOnce({ ...scenario, id: 'autopilot-unfinished', autopilot: { scope: 'timing', timingGate: 'risk-adjusted', budget: { ideas: 2, versions: 1 } }, fixtures: { tools: { validate_backtest: [{ when: {}, result: '结论：❌ 没通过，不能标为主版本\n✗ ...' }] } } }, {
+  claudeBin: FAKE, timeoutMs: 90000, keepDir: true,
+  fakePlan: {
+    mia: [[
+      { tool: 'autopilot_plan', args: { ideas: [{ title: '没写 kind', logic: 'l' }] } },                                   // 拒：风险调整这一轮要写 kind
+      { tool: 'autopilot_plan', args: { ideas: [{ title: 'SPY 趋势', logic: '趋势延续', kind: 'timing' }, { title: 'QQQ 均线', logic: '风险规避', kind: 'timing' }] } },
+      { tool: 'create_project', args: { name: 'SPY 趋势', planIdea: 1 } },
+      { text: '先汇报一下：建了第一个项目。' },                                                                              // 两个想法都没做完就想收工
+    ]],
+    'mia:continue': [[
+      H('engineer', '项目 $pid：照 spec 写代码，跑开发期候选。'),
+      H('analyst', '项目 $pid：检验开发期候选。'),
+      { tool: 'create_project', args: { name: 'QQQ 均线', planIdea: 2 } },
+      { text: '想法 1 开发期没通过；想法 2 建了项目。' },
+    ]],
+    engineer: [[{ tool: 'create_backtest', args: { projectId: '$pid', name: 'v1', role: 'candidate', period: 'dev' } }, { text: '开发期 v1 跑完。' }]],
+    analyst: [[{ tool: 'validate_backtest', args: { projectId: '$pid', backtestId: '$bt:dev' } }, { text: '开发期没通过。' }]],
+  },
+});
+const t5 = r5.events.filter((e) => e.kind === 'tool');
+const ap5 = JSON.parse(await readFile(path.join(r5.dir, 'data', 'autopilot', `${r5.autopilotRunId}.json`), 'utf8'));
+check('风险调整这一轮：想法没写 kind 被拒', t5[0] && t5[0].isError && /kind/.test(t5[0].result), t5[0] && t5[0].result.slice(0, 80));
+check('运行记录记着择时的判定标准', ap5.timingGate === 'risk-adjusted');
+check('想法没做完就汇报：被叫回去续跑（续跑里的回测、检验、第二个项目都做了）', Object.keys(ap5.projects).length === 2 && Object.keys(ap5.backtests).length === 1 && Object.keys(ap5.validations).length === 1, JSON.stringify({ p: ap5.projects, b: Object.keys(ap5.backtests).length, v: Object.keys(ap5.validations).length }));
+check('续跑最多 2 次，之后照常结束并附账本', ap5.status === 'done' && r5.events.some((e) => e.kind === 'tool' && e.tool === 'create_project' && /QQQ/.test(JSON.stringify(e.args))));
+const root5 = JSON.parse(await readFile(path.join(r5.dir, 'data', 'threads', `${r5.rootId}.json`), 'utf8'));
+check('开工说明写明择时按风险调整标准判', /「风险调整」标准/.test(root5.messages[0].text));
+const cp5 = t5.find((e) => e.tool === 'create_project' && !e.isError);
+check('建择时项目时照实告诉 agent 标准有没有设上', cp5 && /风险调整标准/.test(cp5.result), cp5 && cp5.result.slice(-80));
+
+/* ---- 连续模式：一轮没找到，服务端自己开下一轮 ---- */
+const r6 = await runOnce({ ...scenario, id: 'autopilot-chain', autopilot: { scope: 'timing', untilFound: true, usd: 20, minutes: 60, budget: { ideas: 1, versions: 1 } }, fixtures: { tools: { validate_backtest: [{ when: {}, result: '结论：❌ 没通过，不能标为主版本\n✗ ...' }] } } }, {
+  claudeBin: FAKE, timeoutMs: 90000, keepDir: true,
+  fakePlan: {
+    mia: [
+      [ // 第 1 轮：一个想法，开发期没通过 → 没找到
+        { tool: 'autopilot_plan', args: { direction: { name: '趋势' }, ideas: [{ title: 'SPY 趋势', logic: '趋势延续', kind: 'timing' }] } },
+        { tool: 'create_project', args: { name: 'SPY 趋势', planIdea: 1 } },
+        H('engineer', '项目 $pid：照 spec 写代码，跑开发期候选。'),
+        H('analyst', '项目 $pid：检验开发期候选。'),
+        { text: '这一轮没找到。' },
+      ],
+      [{ text: '第二轮：什么都没登记就结束。' }], // 第 2 轮：什么都没测 → 不空转，停下
+    ],
+    engineer: [[{ tool: 'create_backtest', args: { projectId: '$pid', name: 'v1', role: 'candidate', period: 'dev' } }, { text: '开发期 v1 跑完。' }]],
+    analyst: [[{ tool: 'validate_backtest', args: { projectId: '$pid', backtestId: '$bt:dev' } }, { text: '开发期没通过。' }]],
+  },
+});
+const apDir6 = path.join(r6.dir, 'data', 'autopilot');
+const aps6 = (await Promise.all((await readdir(apDir6)).filter((f) => f.endsWith('.json')).map(async (f) => JSON.parse(await readFile(path.join(apDir6, f), 'utf8'))))).sort((a, b) => a.createdAt - b.createdAt);
+check('连续模式：一共两条运行记录（两轮）', aps6.length === 2, String(aps6.length));
+const [a61, a62] = aps6;
+check('第 1 轮正常结束、没找到，记着下一轮是谁', a61 && a61.status === 'done' && a61.found.length === 0 && a62 && a61.nextRunId === a62.runId, a61 && `${a61.status} next=${a61.nextRunId}`);
+check('第 2 轮：接力信息对（第 2 轮、合计 $20、历史里有第 1 轮的方向和结果）', a62 && a62.chain.round === 2 && a62.chain.id === a61.runId && a62.chain.usdTotal === 20 && a62.chain.history.length === 1 && /SPY 趋势/.test(a62.chain.history[0].ideas[0].title) && a62.chain.history[0].ideas[0].verdict === '开发期没通过', a62 && JSON.stringify(a62.chain));
+check('第 2 轮的上限是剩下的预算', a62 && a62.caps.usd <= 20 && a62.caps.minutes <= 60 && a62.caps.minutes >= 50, a62 && JSON.stringify(a62.caps));
+const root6 = a62 ? JSON.parse(await readFile(path.join(r6.dir, 'data', 'threads', `${a62.rootThreadId}.json`), 'utf8')) : null;
+check('第 2 轮是新的对话，开工说明写着第 2 轮和前一轮的结果', root6 && root6.id !== r6.rootId && /连续搜索 · 第 2 轮/.test(root6.messages[0].text) && /SPY 趋势（timing） → 开发期没通过/.test(root6.messages[0].text) && /第 2 轮/.test(root6.title), root6 && root6.title);
+check('第 2 轮什么都没测：不再空转，写明原因', a62 && a62.status === 'done' && a62.chainEnd === 'no-progress' && !a62.nextRunId, a62 && `${a62.status} ${a62.chainEnd}`);
 
 console.log(failed ? `\n${failed} 项失败` : '\n全部通过');
 process.exit(failed ? 1 : 0);

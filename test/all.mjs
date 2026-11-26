@@ -56,6 +56,7 @@ const SUITES = [
   ['agent-eval.test.mjs', [], []],
   ['autopilot.test.mjs', [], []],
   ['autopilot-flow.test.mjs', [], []],
+  ['harness.test.mjs', [], []],
   ['local-http.test.mjs', [], []],
   ['ai-connect.test.mjs', [], []],
   ['translate.test.mjs', [], []],

@@ -200,6 +200,9 @@ export async function runOnce(scenario, opts = {}) {
       if (rootEnded) {
         const list = (await request(BASE, 'GET', '/api/threads')).json || [];
         if (!list.some((t) => t.running)) {
+          // 自动研究的连续模式：一轮结束后服务端稍后会自己开下一轮，等它开出来（或写明不再接着找）再收场
+          const aps = scenario.autopilot && scenario.autopilot.untilFound ? ((await request(BASE, 'GET', '/api/autopilot')).json || {}).runs || [] : [];
+          if (aps.some((a) => a.untilFound && a.status === 'done' && !(a.found || []).length && !a.chainEnd && !a.nextRunId)) { await sleep(500); continue; }
           if (!followUps.length) break;
           rootEnded = false;
           const fu = await request(BASE, 'POST', '/api/chat', { headers: H, body: { threadId: out.rootId, message: followUps.shift(), ...mo } });

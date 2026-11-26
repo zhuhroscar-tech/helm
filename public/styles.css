@@ -2302,10 +2302,11 @@ details.ds-used { margin-top: 8px; }
 .pcol-o { display: flex; align-items: flex-start; gap: 6px; margin-top: 7px; color: var(--faint); font-size: 11.5px; line-height: 1.45; }
 .pcol-o span:last-child { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .pcol-o .ag-g { width: 18px; height: 18px; font-size: 10px; }
-.pcol-body { display: grid; gap: 8px; padding: 8px; align-content: start; min-height: 120px; }
+.pcol-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 8px; align-content: start; min-height: 120px; }
 .pcol-empty { color: var(--faint); text-align: center; padding: 24px 0; font-size: 12px; }
 
-.pipe-card { position: relative; display: grid; gap: 7px; min-width: 0; padding: 10px 10px 9px; border: 1px solid var(--line-2); border-radius: var(--radius); background: var(--bg); font-size: 12.5px; transition: border-color .15s; }
+/* 列宽用 minmax(0, 1fr)：默认的 auto 列会被不换行的长句（「…正在做：…」）撑到整句那么宽，进度条和文字一起溢出到隔壁几列 */
+.pipe-card { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); gap: 7px; min-width: 0; padding: 10px 10px 9px; border: 1px solid var(--line-2); border-radius: var(--radius); background: var(--bg); font-size: 12.5px; transition: border-color .15s; }
 .pipe-card:hover { border-color: var(--line-hover); }
 .pipe-card.sel { border-color: var(--accent); }
 .pipe-card.is-active { box-shadow: inset 2px 0 0 var(--accent); }
@@ -2324,7 +2325,8 @@ details.ds-used { margin-top: 8px; }
 .pc-last { color: var(--text-2); line-height: 1.5; font-size: 12px; overflow-wrap: anywhere; }
 .pc-last .mono, .pc-last b { color: var(--text); font-weight: 500; }
 .pc-stage { display: inline-block; margin-right: 6px; padding: 0 5px; border: 1px solid var(--line-2); border-radius: 3px; color: var(--faint); font-size: 11px; }
-.pc-doing { display: flex; align-items: center; gap: 7px; color: var(--accent); line-height: 1.4; }
+.pipe-card > * { min-width: 0; }
+.pc-doing { display: flex; align-items: center; gap: 7px; min-width: 0; color: var(--accent); line-height: 1.4; }
 .pc-doing span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .pc-doing .ag-g { width: 18px; height: 18px; font-size: 10px; }
 .pc-note { color: var(--muted); font-size: 12px; }
@@ -2992,3 +2994,38 @@ dialog.sc-dlg { width: min(620px, calc(100vw - 32px)); }
 .ap-form .ap-dir { flex: 1 1 260px; }
 .ap-form .ap-dir input { width: 100%; }
 .ap-plan .ap-dir-h { list-style: none; margin: 6px 0 0 -18px; font-weight: 600; color: var(--text-2); }
+
+/* ---- 首页项目表：按状态分组；没有信号的想法收成一行 ---- */
+table.home-proj tr.grp:first-child td { padding-top: 6px; }
+table.home-proj tr.grp-closed td { padding-bottom: 10px; }
+.grp-toggle { display: inline-flex; align-items: center; gap: 7px; padding: 2px 0; border: 0; background: none; color: var(--faint); font: inherit; cursor: pointer; text-align: left; }
+.grp-toggle:hover { color: var(--text-2); }
+.grp-toggle svg { flex: none; transition: transform .12s ease; }
+.grp-toggle[aria-expanded="true"] svg { transform: rotate(90deg); }
+.grp-toggle .grp-act { margin-left: 4px; color: var(--accent); }
+/* 两个字母的 agent 圆章（首字母撞了时） */
+.ag-g { letter-spacing: -0.02em; }
+/* 流水线卡片：状态标签和时间放不下一行时换行，不再把时间截掉 */
+.pc-meta { flex-wrap: wrap; row-gap: 2px; }
+/* 想法记录的验证期小字：项目名太长时截断，次数始终看得到 */
+.jr-ho { display: inline-block; max-width: 11em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+/* Agents 表：角色说明让出地方，右边的「配置 | 新任务」不再被挤出表格 */
+.ag-tbl .ag-role { max-width: 260px; }
+.ag-tbl .ag-act { white-space: nowrap; }
+table.home-proj tr.grp-closed td { white-space: normal; }
+.grp-toggle { flex-wrap: wrap; }
+/* 窄屏：「下一步」放不下时换行，不把整张表撑出屏幕 */
+@media (max-width: 560px) { table.home-proj td.next, table.home-proj td.next a { white-space: normal; } }
+
+/* ---- 手机伴侣：设置里的地址 / 配对码，首页的收件箱 ---- */
+.cp-urls { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 10px; }
+.cp-url { padding: 4px 8px; border: 1px solid var(--line-2); border-radius: var(--radius-sm); background: var(--panel-2); font: 12.5px var(--mono); user-select: all; }
+.cp-pair { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 14px; margin: 4px 0 12px; }
+.cp-code { font-size: 30px; font-weight: 300; letter-spacing: .08em; color: var(--text); user-select: all; }
+.cp-acts { display: flex; flex-wrap: wrap; gap: 8px; }
+.home-inbox { margin-top: 28px; }
+.inbox-list { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--line); }
+.inbox-list li { padding: 12px 0; border-bottom: 1px solid var(--line); }
+.inbox-list p { margin: 0 0 8px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
+.inbox-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.inbox-foot > span:last-child { display: inline-flex; align-items: center; gap: 14px; }

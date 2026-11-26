@@ -16,7 +16,7 @@
 // + 计数 n（这个工具在本次评测里第几次被调用，从 1 开始）。result 里可以用 {projectId} {backtestId} {jobId} {name} 占位。
 import { readFileSync, writeFileSync, renameSync, existsSync } from 'node:fs';
 
-export const PASSTHROUGH = new Set(['handoff', 'ask_user', 'autopilot_plan']); // autopilot_plan 不碰引擎，用真实的
+export const PASSTHROUGH = new Set(['handoff', 'ask_user', 'autopilot_plan', 'subagent', 'research_direction']); // autopilot_plan 不碰引擎，用真实的
 
 // 设计好了、还没实现的工具和参数。只在 fixtures 里 autopilot 为真时加进工具列表，让评测场景先于实现写好；
 // 真正实现之后，同名的真实工具 / 参数优先，这里的定义自动不再使用（自动研究的这几个已经都实现了，留着给以后的新工具用）。

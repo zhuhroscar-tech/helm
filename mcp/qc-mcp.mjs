@@ -26,6 +26,8 @@ const AGENTS = JSON.parse(readFileSync(process.env.HELM_AGENTS_FILE || path.join
 // 不碰真实的引擎和项目。正常使用 Helm 时不会设置这个变量。
 // 自动研究（lib/autopilot.mjs）：服务端启动 agent 时给 HELM_AUTOPILOT=<runId>；交接出去的子对话也带着
 const AUTOPILOT = String(process.env.HELM_AUTOPILOT || '').trim() || null;
+// 工作台：server.mjs 启动的 agent 都带 HELM_URL 和 HELM_THREAD_ID；单独跑这个 MCP（没有 Helm 服务）时不检查
+const HARNESS = Boolean(process.env.HELM_URL && process.env.HELM_THREAD_ID) && process.env.HELM_HARNESS !== '0';
 const EVAL = process.env.HELM_EVAL_FIXTURES ? (await import('../evals/stub-tools.mjs')).createStub(process.env.HELM_EVAL_FIXTURES) : null;
 
 const int = { type: 'integer' };
@@ -74,6 +76,15 @@ async function helmPost(p, body, timeoutMs = 60000) {
   const url = process.env.HELM_URL;
   if (!url || !process.env.HELM_THREAD_ID) throw new Error('只能在 Helm 网站发起的对话里使用');
   const r = await postLocal(`${url}${p}`, { threadId: process.env.HELM_THREAD_ID, ...body }, { headers: { 'x-helm-token': process.env.HELM_TOKEN || '' }, timeoutMs });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
+  return j;
+}
+// 工作台的检查：服务端没有这个接口（Helm 更新了代码但服务还没重启，旧服务回 403 / 404）时不拦，等重启后生效；
+// 其它失败（连不上、5xx）按「没有执行」处理
+async function harnessPost(p, body) {
+  const r = await postLocal(`${process.env.HELM_URL}${p}`, { threadId: process.env.HELM_THREAD_ID, ...body }, { headers: { 'x-helm-token': process.env.HELM_TOKEN || '' }, timeoutMs: 60000 });
+  if (r.status === 403 || r.status === 404) return null;
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || `HTTP ${r.status}`);
   return j;
@@ -206,6 +217,56 @@ const TOOLS = [
       if (!wait) return `已交给${j.agentName}，threadId=${j.threadId}。对方已经开始工作，用户可以点网站右侧的「${j.agentName}」标签实时查看。`;
       if (j.error && !j.text) return `错误：${j.agentName}运行出错（threadId=${j.threadId}）：${j.error}`;
       return `${j.agentName}已完成，threadId=${j.threadId}${j.stopped ? '（用户中途停止了它）' : ''}。它的最终回答：\n\n${j.text || '（没有文字回答）'}`;
+    },
+  },
+  {
+    name: 'subagent',
+    description: `并行派出几个子 agent，等它们都做完，一起拿回结果。适合几件互不依赖的事同时查（比如同时让两个子 agent 各读一个回测、各查一篇文献）；有先后依赖的阶段仍然用 handoff。mode=scout 是只读的（只能读项目、回测、研究结果和上网查，不能改任何东西）；mode=worker 有对方的完整权限（只有调度者能用）。能派给谁、一次几个、一共几个由你的工作台决定，超了会被拒绝。子 agent 看不到你的对话，也不能再往下派：每个 task 都要完整自洽（projectId / backtestId、要回答什么、怎样算完成）。可选 agent：${AGENTS.map((a) => `${a.id}（${a.name}）`).join('、')}。`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        tasks: {
+          type: 'array', description: '子任务（1–3 个，同时运行）',
+          items: { type: 'object', properties: { agent: { type: 'string', enum: AGENTS.map((a) => a.id) }, task: { ...str, description: '完整的任务说明' }, mode: { type: 'string', enum: ['scout', 'worker'], description: 'scout=只读（默认）；worker=完整权限' }, projectId: { ...int, description: '相关项目（可选）' }, backtestId: { ...str, description: '相关回测（可选）' } }, required: ['agent', 'task'] },
+        },
+      },
+      required: ['tasks'],
+    },
+    async run({ tasks }) {
+      let j;
+      try { j = await helmPost('/api/subagent', { tasks }, 16 * 60 * 1000); } catch (e) {
+        if (e && (e.name === 'TimeoutError' || e.name === 'AbortError')) return '子 agent 的请求等待超时：它们很可能还在运行。不要再派一次，请让用户在网站上查看进度。';
+        return `错误：${e.message}`;
+      }
+      return (j.results || []).map((r, i) => {
+        const head = `### 子任务 ${i + 1}：${r.agentName}（${r.mode}）${r.threadId ? `，threadId=${r.threadId}` : ''}`;
+        if (!r.threadId) return `${head}\n没有启动：${r.error}`;
+        if (r.stillRunning) return `${head}\n还在运行（已等约 14 分钟）。不要再派一次；先用已有的结果，或告诉用户到网站上查看。`;
+        if (r.error && !r.text) return `${head}\n运行出错：${r.error}`;
+        return `${head}${r.stopped ? '（中途被停止）' : ''}\n${r.text || '（没有文字回答）'}`;
+      }).join('\n\n');
+    },
+  },
+  {
+    name: 'research_direction',
+    description: '研究方向的账本（一条研究线共用一份，Helm 在代码里记和限制）。action=read：看已经登记的方向、其他 agent 的建议、以前测过什么、手上有什么数据——定方向之前先读。action=set：登记一个方向（name、thesis 经济逻辑、1–3 个事先定好的假设，每个写明 failIf；第二个方向起要写 whyNew），登记后才开始检验，想法检验次数按假设数算。action=conclude：结束进行中的方向（outcome：signal 有信号 / weak 信号弱 / none 没有信号 / abandoned 没法检验；evidence 照抄工具结果里的关键数字）。action=suggest：不负责定方向的 agent 提一条建议（text）。只有总控和研究员能 set / conclude；方向数有上限，用完就停下汇总。用户已经给了具体想法时不需要登记。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['read', 'set', 'conclude', 'suggest'] },
+        name: { ...str, description: 'set：方向名' },
+        thesis: { ...str, description: 'set：经济逻辑，为什么应该有效' },
+        whyNew: { ...str, description: 'set（第二个方向起必填）：为什么是不同的收益来源' },
+        data: { ...str, description: 'set：主要用什么数据' },
+        hypotheses: { type: 'array', description: 'set：1–3 个事先定好的假设', items: { type: 'object', properties: { title: { ...str, description: '一句话假设' }, failIf: { ...str, description: '怎样算失败' } }, required: ['title', 'failIf'] } },
+        outcome: { type: 'string', enum: ['signal', 'weak', 'none', 'abandoned'], description: 'conclude：结论' },
+        evidence: { ...str, description: 'conclude：依据（关键数字、jobId / backtestId），或没法检验的原因' },
+        text: { ...str, description: 'suggest：建议研究什么、为什么' },
+      },
+      required: ['action'],
+    },
+    async run(args) {
+      try { return (await helmPost('/api/direction', args, 60000)).text; } catch (e) { return `错误：${e.message}`; }
     },
   },
   {
@@ -910,6 +971,11 @@ async function onMessage(msg) {
         const g = await helmPost('/api/autopilot/guard', { tool: tool.name, args }).catch((e) => ({ allow: false, message: `错误：自动研究规则检查失败（${e.message}），这次没有执行` }));
         if (!g.allow) return write({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: userText(String(g.message || '错误：被自动研究规则拒绝')) }], isError: true } });
       }
+      // 工作台（lib/harness/）：自动研究的规则先过，再过每个 agent 自己的循环上限和硬规则。只在 Helm 网站发起的对话里有（服务端按对话找到这次运行的状态）
+      if (HARNESS && tool.name !== 'approve') {
+        const g = await harnessPost('/api/harness/guard', { tool: tool.name, args }).catch((e) => ({ allow: false, message: `错误：工作台规则检查失败（${e.message}），这次没有执行` }));
+        if (g && !g.allow) return write({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: userText(String(g.message || '错误：被工作台规则拒绝')) }], isError: true } });
+      }
       let text; let isError;
       if (EVAL && EVAL.handles(tool.name)) {
         const r = await EVAL.call(tool.name, args);
@@ -917,6 +983,10 @@ async function onMessage(msg) {
       } else {
         text = await tool.run(args);
         isError = /^错误：|^没有运行回测|^下载失败/.test(text);
+      }
+      if (HARNESS && tool.name !== 'approve') {
+        const rec = await harnessPost('/api/harness/record', { tool: tool.name, args, result: String(text).slice(0, 4000), isError }).catch(() => null);
+        if (rec && rec.note) text = `${text}\n${rec.note}`;
       }
       if (AUTOPILOT && tool.name !== 'approve') {
         const rec = await helmPost('/api/autopilot/record', { tool: tool.name, args, result: String(text).slice(0, 4000), isError }).catch(() => null);

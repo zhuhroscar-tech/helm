@@ -35,10 +35,14 @@ const planFile = process.env.EVAL_FAKE_PLAN;
 const plan = planFile ? JSON.parse(readFileSync(planFile, 'utf8')) : {};
 const countFile = planFile ? `${planFile}.count.json` : null;
 const counts = countFile && existsSync(countFile) ? JSON.parse(readFileSync(countFile, 'utf8')) : {};
-const k = counts[agent] || 0;
-counts[agent] = k + 1;
+// 工作台的续跑（server.mjs 的 relaunch：交付检查没过，用同一个会话再起一段）不算计划里的一次运行：
+// 步骤写在 "<agentId>:continue" 下面（没写就什么都不做，直接结束），这样原有的计划不会被续跑吃掉一格
+const isContinue = /^【Helm 工作台】|^\[Helm harness\]/.test(prompt);
+const planKey = isContinue ? `${agent}:continue` : agent;
+const k = counts[planKey] || 0;
+counts[planKey] = k + 1;
 if (countFile) writeFileSync(countFile, JSON.stringify(counts));
-const steps = ((plan[agent] || [])[k]) || [{ text: `（假 claude：${agent} 第 ${k + 1} 次运行没有计划）` }];
+const steps = ((plan[planKey] || [])[k]) || (isContinue ? [] : [{ text: `（假 claude：${agent} 第 ${k + 1} 次运行没有计划）` }]);
 
 const sid = `fake-${String(process.env.HELM_THREAD_ID || 'x').slice(0, 8)}`;
 emit({ type: 'system', subtype: 'init', session_id: sid, model: 'fake-model' });

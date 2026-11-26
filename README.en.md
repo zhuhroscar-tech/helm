@@ -97,7 +97,7 @@ Each project shows four stages: **idea test → backtest → statistical check �
 
 ## Security, briefly
 
-- The server listens on 127.0.0.1 only. State-changing requests need a per-start page token and a same-origin check.
+- The server listens on 127.0.0.1 only. State-changing requests need a per-start page token and a same-origin check. The one exception is the phone companion: off by default; when you turn it on in Settings, a second port opens to your local network with a small service that can only read a summary and add ideas to an inbox ([docs/COMPANION.md](docs/COMPANION.md)).
 - Strategy code runs in a macOS `sandbox-exec` sandbox: no network, no home folder, no secrets. Without the sandbox, backtests refuse to run unless you explicitly turn it off (`HELM_EXEC_SANDBOX=off`).
 - Keys (AI, Alpaca, QuantConnect) are stored locally with file mode 0600, are never sent back to the page, and agents can't read them.
 - Agents' edits to Helm's own code go through an approval policy. Changes to research-rule code need your approval and are reverted automatically if tests fail.
@@ -117,6 +117,8 @@ Five agents (`agents.json`, editable) share the rules in `workspace/CLAUDE.md`:
 | Risk officer | Drawdown, exposure, extreme-market behaviour |
 
 Hand-offs between agents appear as separate conversations. Stopping an agent also stops the agent it is waiting on.
+
+Each agent runs in its own harness (`lib/harness/`): a tool scope, loop limits, rules checked before each tool call, and a delivery check that resumes the run when something is missing. Agents can start parallel subagents and, within a fixed budget, choose a research direction. See [docs/HARNESS.md](docs/HARNESS.md).
 
 ## Repository
 

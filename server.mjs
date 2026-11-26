@@ -13,7 +13,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { engineStatus, listProjects, DATA_DIR, READ_ENDPOINTS, runSensitivity, sensitivityRead, runTune, tuneRead, PROJECTS_DIR, compileProject, createBacktest, createProject, trashProject, updateBacktest, reconcileLedgers, templateCode, secretDirs, setMainByUser, leanSandboxState, updateProjectFileByUser, renameProject } from './lib/engine.mjs';
+import { engineStatus, listProjects, DATA_DIR, READ_ENDPOINTS, runSensitivity, sensitivityRead, runTune, tuneRead, PROJECTS_DIR, compileProject, createBacktest, createProject, trashProject, setProjectValidation, updateBacktest, reconcileLedgers, templateCode, secretDirs, setMainByUser, leanSandboxState, updateProjectFileByUser, renameProject } from './lib/engine.mjs';
 import { setupHints, setupCommand } from './lib/setup-hints.mjs';
 import * as Q from './lib/qlib.mjs';
 import { loadRobust } from './lib/robust.mjs';
@@ -27,10 +27,12 @@ import * as Layer from './lib/layer.mjs';
 import { loadAttribution } from './lib/attribution.mjs';
 import * as Critic from './lib/critic.mjs';
 import * as Autopilot from './lib/autopilot.mjs';
+import { Companion, lanUrls, buildSummary } from './lib/companion.mjs';
+import * as Harness from './lib/harness/index.mjs';
 import { writeJsonAtomic } from './lib/fs-atomic.mjs';
 import * as AI from './lib/ai.mjs';
 import { sensitiveReadDenies } from './lib/agent-perms.mjs';
-import { effectiveTools, localTools, validateAgentPatch, saveAgentPatch, isQcTool } from './lib/agents.mjs';
+import { effectiveTools, localTools, validateAgentPatch, saveAgentPatch, isQcTool, QC_TOOLS } from './lib/agents.mjs';
 import { decide as decideChange, scopeKey, simpleDiff } from './lib/change-policy.mjs';
 import { sandboxReady, wrapAgentCommand } from './lib/exec-sandbox.mjs';
 import { ChangeStore, readTextSync, defaultRunTests } from './lib/changes.mjs';
@@ -317,13 +319,15 @@ async function apContext(lang) {
     menu: Autopilot.dataMenu({ universes, fundFields: Q.FUND_FIELDS || {}, datasets: (ds && ds.datasets) || [], breadth: existsSync(path.join(DATA_DIR, 'helm', 'breadth', 'sp500.csv')), lang }),
   };
 }
-async function startAutopilot(body, lang) {
+async function startAutopilot(body, lang, { chain = null } = {}) {
   if ([...apRuns.values()].some((x) => x.status === 'running')) throw httpError(409, localize(lang, '已经有一轮自动研究在跑，等它结束或先停掉。'));
-  const ap = Autopilot.newRun(body || {}, { lang });
+  const ap = Autopilot.newRun(body || {}, { lang, chain });
+  ap.start = { model: body && body.model ? String(body.model).slice(0, 80) : null, effort: body && body.effort ? String(body.effort).slice(0, 40) : null }; // 连续模式的下一轮沿用
   // 评测的快速探针：从一轮的中途开始（只在评测模式下允许，平时忽略 seed）
   const seeded = Boolean(process.env.HELM_EVAL_FIXTURES && body && body.seed && typeof body.seed === 'object');
   if (seeded) Autopilot.applySeed(ap, body.seed);
   const thread = newThread('mia', lang === 'en' ? `Autopilot research ${new Date(ap.createdAt).toISOString().slice(0, 16).replace('T', ' ')}` : `自动研究 ${new Date(ap.createdAt).toLocaleString('zh-CN', { hour12: false }).slice(0, 16)}`, { autopilot: ap.runId, lang });
+  if (ap.chain && ap.chain.round > 1) thread.title = `${thread.title} · ${lang === 'en' ? `round ${ap.chain.round}` : `第 ${ap.chain.round} 轮`}`.slice(0, 60);
   ap.rootThreadId = thread.id;
   apRuns.set(ap.runId, ap);
   await mkdir(AUTOPILOT_DIR, { recursive: true });
@@ -352,6 +356,18 @@ async function resumeAutopilot(thread) {
   apTimers.set(ap.runId, timer);
   apTouch(ap);
 }
+// 连续模式：一轮正常结束、没找到候选，就自动开下一轮（新的运行记录、新的对话），直到找到、总用量或总时间用完。
+// 出错 / 被停掉 / 中断的那一轮不接；用户重发消息恢复后做完，照样会走到这里。
+async function apChainNext(ap) {
+  const nx = Autopilot.nextRound(ap);
+  if (!nx) return;
+  if (nx.stop) { if (nx.stop !== 'found') { ap.chainEnd = nx.stop; apTouch(ap); } return; }
+  try {
+    const r = await startAutopilot({ ...nx.options, model: ap.start && ap.start.model, effort: ap.start && ap.start.effort }, ap.lang, { chain: nx.chain });
+    ap.nextRunId = r.runId; apTouch(ap);
+  } catch (e) { ap.chainEnd = `error: ${String(e.message || e).slice(0, 200)}`; apTouch(ap); }
+}
+
 // MCP（qc-mcp.mjs）在自动研究的对话里，每次调用工具之前问 guard、成功之后报 record
 async function handleAutopilotTool(req, res, kind) {
   if (!safeEqual(req.headers['x-helm-token'], HANDOFF_TOKEN)) return sendJson(res, 403, { error: 'bad token' });
@@ -367,7 +383,7 @@ async function handleAutopilotTool(req, res, kind) {
     if (g.allow && tool === 'autopilot_plan' && Critic.enabled()) {
       const items = Autopilot.planReviewItems(args, ap.lang);
       const ctx = await apContext(ap.lang).catch(() => ({}));
-      const input = Critic.buildInput({ kind: 'autopilot-plan', items, request: [ap.direction ? `用户指定的方向：${ap.direction}` : '', `范围：${ap.scope}，股票池：${ap.universe}`].filter(Boolean).join('\n'), facts: { alreadyTested: ctx.tested || '', availableData: ctx.menu || '' } });
+      const input = Critic.buildInput({ kind: 'autopilot-plan', items, request: [ap.direction ? `用户指定的方向：${ap.direction}` : '', `范围：${ap.scope}，股票池：${ap.universe}`, ap.timingGate === 'risk-adjusted' ? '择时想法的判定标准：风险调整（夏普差显著为正且最大回撤 ≤ 基准的 2/3）' : '择时想法的判定标准：收益要跑赢所交易资产的买入持有（纯防守、只为少跌的切换几乎过不了）'].filter(Boolean).join('\n'), facts: { alreadyTested: ctx.tested || '', availableData: ctx.menu || '' } });
       const rv = await Promise.race([Critic.review({ input, items, lang: ap.lang, runModel: runModelOnce }).catch(() => null), new Promise((r) => setTimeout(() => r(null), 90_000))]);
       g = Autopilot.planReviewVerdict(rv, items, ap.lang);
       if (rv) ap.planReviews = [...(ap.planReviews || []), { at: Date.now(), ideas: items[0].options.map((o) => o.label), verdicts: Object.fromEntries(Object.entries((rv.questions[0] || {}).options || {}).map(([k, v]) => [k, v.verdict])), summary: rv.summary || '' }];
@@ -376,6 +392,16 @@ async function handleAutopilotTool(req, res, kind) {
     return sendJson(res, 200, g);
   }
   const r = Autopilot.record(ap, tool, args, String(body.result || ''), { isError: body.isError === true });
+  // 用户开工前选了「择时按风险调整标准」：择时想法的项目一建好就写进 project.json（在任何回测之前），之后不再改
+  let gateNote = '';
+  if (tool === 'create_project' && ap.current != null && ap.projects[ap.current] === Number(args.planIdea) && Autopilot.wantsRiskAdjusted(ap, args.planIdea)) {
+    const sv = await setProjectValidation({ projectId: ap.current, mode: 'risk-adjusted' }).catch(() => null);
+    // 没写成（比如项目目录不在）：照实告诉 agent 这个项目仍按收益标准判，不假装已经设好
+    gateNote = sv && sv.success
+      ? (ap.lang === 'en' ? 'This timing project is judged on the risk-adjusted standard (set by the user before the run).' : '这个择时项目按风险调整标准判（用户开工前选定）。')
+      : (ap.lang === 'en' ? 'Helm could not set the risk-adjusted standard on this project; it is judged on return.' : 'Helm 没能给这个项目设上风险调整标准，它仍按收益标准判。');
+  }
+  if (gateNote) r.note = [r.note, gateNote].filter(Boolean).join('\n');
   if (r.found) ap.awaiting = [...(ap.awaiting || []), { at: Date.now(), projectId: r.found.projectId, backtestId: r.found.backtestId, devBacktestId: r.found.devBacktestId, what: 'main' }];
   apTouch(ap);
   return sendJson(res, 200, { ok: true, note: r.note || '' });
@@ -799,7 +825,10 @@ function askPrompt(thread) {
 }
 
 function buildArgs(agent, thread, context, allowDanger, opts) {
+  // 这个 agent 这次运行用的工作台（lib/harness/）：提示词里说明代码会强制什么，下面按它收紧工具
+  const hx = Harness.resolve(agent, thread);
   let sys = agent.prompt + teamPrompt(agent) + (agent.orchestrator ? orchestratorPrompt(agent) : selfFixPrompt()) + askPrompt(thread) + langPrompt(thread.lang);
+  sys += Harness.promptFor(hx, { autopilot: Boolean(thread.autopilot), sub: thread.sub || null });
   if (thread.from) {
     const src = agentById(thread.from.agent);
     sys += `\n\n## 交接来源\n这个对话是「${src ? src.name : thread.from.agent}」交接给你的任务。完成后给出清晰的最终总结（结论、关键数字、projectId/backtestId），对方会读到你的最终回答。`;
@@ -826,9 +855,9 @@ function buildArgs(agent, thread, context, allowDanger, opts) {
   if (thread.sessionId) args.push('--resume', thread.sessionId);
   args.push('--allowedTools', `mcp__${MCP_NAME}`, ...BASE_TOOLS, ...(agent.extraTools || []));
   // 敏感路径（含 Alpaca 密钥目录）：agent 的 Read/Grep/Glob 都读不到。拒绝优先于上面的裸 Read 允许
-  const agentDenied = (agent.deniedTools || []).filter(isQcTool).map((t) => `mcp__${MCP_NAME}__${t}`);
+  const agentDenied = [...new Set([...(agent.deniedTools || []), ...Harness.deniedTools(hx, QC_TOOLS.map((t) => t.id))])].filter(isQcTool).map((t) => `mcp__${MCP_NAME}__${t}`);
   // 调度者：改文件和跑命令直接禁用（不走审批）；其它 agent 的 Edit/Write/Bash 走 approve
-  const orchestratorBlocked = agent.orchestrator ? ['Bash', 'Edit', 'Write', 'MultiEdit'] : [];
+  const orchestratorBlocked = agent.orchestrator || hx.sub === 'scout' ? ['Bash', 'Edit', 'Write', 'MultiEdit'] : []; // 只读的子 agent 也一样
   args.push('--disallowedTools', ...READ_DENIES, ...ALWAYS_BLOCKED, ...orchestratorBlocked, ...agentDenied, ...(allowDanger ? [] : DANGEROUS.map((t) => `mcp__${MCP_NAME}__${t}`)));
   if (opts.extraArgs) args.push(...opts.extraArgs);
   return args;
@@ -859,6 +888,8 @@ async function startRun(thread, { message, context = null, allowDanger = false, 
   thread.messages.push(assistant);
 
   const run = { thread, assistant, opts, subs: new Set(), child: null, key: `${thread.id}:${assistant.at}`, dirty: false };
+  // 工作台：这次运行的循环状态（工具调用计数、读过哪些 spec、提交了哪些回测…），MCP 每次调用工具前后来问（handleHarnessTool）
+  run.hx = { h: Harness.resolve(agent, thread), state: Harness.newState({ carry: thread.harness || null, autopilot: Boolean(thread.autopilot) }) };
   let resolveDone;
   run.done = new Promise((r) => { resolveDone = r; });
   // 先登记再做任何 await：否则同一个对话的两个并发请求（连点两次发送）都能通过上面的检查，
@@ -870,7 +901,7 @@ async function startRun(thread, { message, context = null, allowDanger = false, 
 
   // spawn 的参数校验错误（比如上下文或 agent 提示里有 NUL 字符）是同步抛出的：不收拾的话 finish() 永远不跑，
   // 这个对话永远显示「运行中」、永远 409，还一直占着一个 MAX_RUNS 名额
-  let child;
+  let child; let launchOpts; let spawnOpts;
   try {
   // 用户在「AI 连接」里选的方式：订阅 / API key / 兼容接口（密钥经 apiKeyHelper 读，不进环境变量）
   const launch = AI.claudeLaunch(await AI.loadAi());
@@ -894,7 +925,8 @@ async function startRun(thread, { message, context = null, allowDanger = false, 
     resolveDone({ text: '', error: null, stopped: true });
     return run;
   }
-  child = spawn(CLAUDE_BIN, buildArgs(agent, thread, context, allowDanger, { ...opts, forceModel: launch.model, extraArgs: launch.args }), {
+  launchOpts = { ...opts, forceModel: launch.model, extraArgs: launch.args };
+  spawnOpts = {
     cwd: WORKSPACE,
     env: {
       ...AI.applyLaunchEnv(cleanEnv(), launch),
@@ -908,7 +940,8 @@ async function startRun(thread, { message, context = null, allowDanger = false, 
       MCP_TOOL_TIMEOUT: '1200000', // handoff wait=true 可能要等十几分钟
     },
     stdio: ['pipe', 'pipe', 'pipe'],
-  });
+  };
+  child = spawn(CLAUDE_BIN, buildArgs(agent, thread, context, allowDanger, launchOpts), spawnOpts);
   } catch (e) {
     runs.delete(thread.id);
     thread.messages.splice(-2, 2);
@@ -921,6 +954,21 @@ async function startRun(thread, { message, context = null, allowDanger = false, 
   child.stdin.end(message);
 
   const heartbeat = setInterval(() => { for (const res of run.subs) if (!res.writableEnded) res.write(': ping\n\n'); }, 15000);
+  // 工作台的硬上限：提示和 MCP 的拦截都没让它停下来时（比如一直在用 Read / Grep 这类不经过 MCP 的工具），直接停掉进程
+  let costBase = 0; let durBase = 0;
+  const hxLoop = Harness.loopOf(run.hx.h, run.hx.state);
+  const haltRun = (why) => {
+    if (run.hx.state.stopped) return;
+    run.hx.state.stopped = why;
+    const text = localize(thread.lang, why === 'time'
+      ? `\n\n（Helm 工作台：这次运行超过了时间上限 ${hxLoop.maxMinutes} 分钟，已经停下。）`
+      : `\n\n（Helm 工作台：这次运行的工具调用超过了硬上限 ${hxLoop.maxToolCalls * hxLoop.hardFactor} 次，已经停下。）`);
+    assistant.parts.push({ kind: 'text', helm: 'harness-stop', text });
+    send({ type: 'text_start' }); send({ type: 'delta', text });
+    stopRunTree(thread.id);
+  };
+  const hxTimer = hxLoop.maxMinutes ? setTimeout(() => haltRun('time'), (hxLoop.maxMinutes + 5) * 60000) : null; // 多给 5 分钟写总结
+  if (hxTimer && hxTimer.unref) hxTimer.unref();
   const tools = new Map();
   let draft = null; // 正在流式写参数的工具调用 { index, name, json, agent, sentAt }
   let curText = null;
@@ -984,6 +1032,7 @@ async function startRun(thread, { message, context = null, allowDanger = false, 
             const part = { kind: 'tool', id: b.id, name: b.name, input: b.input, parent: ev.parent_tool_use_id || null, status: 'running' };
             assistant.parts.push(part);
             tools.set(b.id, part);
+            if (!ev.parent_tool_use_id) { run.hx.state.seen += 1; if (run.hx.state.seen > hxLoop.maxToolCalls * hxLoop.hardFactor) haltRun('tools'); }
             curText = null;
             send({ type: 'tool_use', part });
           } else if (b.type === 'text' && !ev.parent_tool_use_id && deltaChars === 0 && b.text) {
@@ -1011,8 +1060,15 @@ async function startRun(thread, { message, context = null, allowDanger = false, 
       case 'result':
         gotResult = true;
         thread.sessionId = ev.session_id || thread.sessionId;
-        assistant.cost = ev.total_cost_usd;
-        assistant.duration = ev.duration_ms;
+        assistant.cost = costBase ? costBase + (Number(ev.total_cost_usd) || 0) : ev.total_cost_usd; // 续跑过：几段加起来
+        assistant.duration = durBase ? durBase + (Number(ev.duration_ms) || 0) : ev.duration_ms;
+        { // 用了多少 token（手机伴侣和账本用）：按模型的明细加起来，没有明细就用总的 usage；续跑过的几段累加
+          const mu = ev.modelUsage && Object.keys(ev.modelUsage).length ? Object.values(ev.modelUsage) : null;
+          const n = (v) => Number(v) || 0;
+          const tk = mu ? mu.reduce((a, u) => ({ in: a.in + n(u.inputTokens), out: a.out + n(u.outputTokens), cache: a.cache + n(u.cacheReadInputTokens) + n(u.cacheCreationInputTokens) }), { in: 0, out: 0, cache: 0 })
+            : ev.usage ? { in: n(ev.usage.input_tokens), out: n(ev.usage.output_tokens), cache: n(ev.usage.cache_read_input_tokens) + n(ev.usage.cache_creation_input_tokens) } : null;
+          if (tk) assistant.tokens = { in: n(assistant.tokens && assistant.tokens.in) + tk.in, out: n(assistant.tokens && assistant.tokens.out) + tk.out, cache: n(assistant.tokens && assistant.tokens.cache) + tk.cache };
+        }
         if (ev.modelUsage && Object.keys(ev.modelUsage).length) {
           const used = Object.entries(ev.modelUsage).sort((a, b) => (b[1].costUSD || 0) - (a[1].costUSD || 0));
           assistant.model = used[0][0];
@@ -1030,6 +1086,7 @@ async function startRun(thread, { message, context = null, allowDanger = false, 
   };
 
   // 按 UTF-8 流式解码。不设的话每个数据块单独转字符串，一个汉字（3 字节）正好被拆在两块里就会变成 �
+  const wire = (child) => { // eslint-disable-line no-shadow
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
   child.stdout.on('data', (chunk) => {
@@ -1043,11 +1100,42 @@ async function startRun(thread, { message, context = null, allowDanger = false, 
     }
   });
   child.stderr.on('data', (c) => { stderr = (stderr + c).slice(-4000); });
+  };
+  wire(child);
 
   let finished = false;
+  // 工作台的外层循环：claude 结束了但交付检查没过（回测没等结果、结论没写明…），用同一个会话再起一段，只补缺的部分
+  const relaunch = (miss) => {
+    const note = localize(thread.lang, `\n\n（Helm 工作台：结果还不完整，已让${agent.name}继续补上：${miss.map((m) => m.split('：')[0]).join('；')}）\n\n`);
+    assistant.parts.push({ kind: 'text', helm: 'harness-continue', text: note });
+    send({ type: 'text_start' }); send({ type: 'delta', text: note });
+    costBase = Number(assistant.cost) || 0; durBase = Number(assistant.duration) || 0;
+    gotResult = false; buf = ''; stderr = ''; curText = null; deltaChars = 0; draft = null; run.draft = null;
+    child = spawn(CLAUDE_BIN, buildArgs(agent, thread, context, allowDanger, launchOpts), spawnOpts);
+    run.child = child;
+    finished = false;
+    wire(child);
+    child.on('error', (e) => finish(null, e));
+    child.on('close', (c) => finish(c));
+    child.stdin.on('error', () => {});
+    child.stdin.end(Harness.continueMessage(miss, thread.lang));
+  };
   const finish = async (code, spawnErr) => {
     if (finished) return;
     finished = true;
+    if (!spawnErr && gotResult && !child.killed && !assistant.error && !run.stopRequested && !run.hx.state.stopped && thread.sessionId) {
+      const miss = Harness.contract(run.hx.h, run.hx.state, finalText(assistant), { delegated: Boolean(thread.from) });
+      // 自动研究的根对话：登记过的想法还停在半路、预算和时间都还有，就一并列进「还缺」，用同一个会话续跑
+      const apNow = thread.autopilot ? apRuns.get(thread.autopilot) : null;
+      if (apNow && thread.id === apNow.rootThreadId) for (const m of Autopilot.unfinished(apNow)) if (!miss.includes(m)) miss.push(m);
+      run.hx.missing = miss;
+      const maxC = Harness.loopOf(run.hx.h, run.hx.state).maxContinuations;
+      if (miss.length && run.hx.state.continuations < maxC) {
+        run.hx.state.continuations += 1;
+        try { relaunch(miss); return; } catch { finished = true; /* 起不来就按现有结果结束 */ }
+      }
+    }
+    clearTimeout(hxTimer);
     clearInterval(heartbeat);
     for (const p of tools.values()) if (p.status === 'running') p.status = child.killed ? 'stopped' : 'done';
     if (child.killed) assistant.stopped = true;
@@ -1076,13 +1164,19 @@ async function startRun(thread, { message, context = null, allowDanger = false, 
     const ap = thread.autopilot ? apRuns.get(thread.autopilot) : null;
     if (ap) {
       ap.cost = Math.round(((ap.cost || 0) + (Number(assistant.cost) || 0)) * 1e4) / 1e4;
+      if (assistant.tokens) { const t0 = ap.tokens || { in: 0, out: 0, cache: 0 }; ap.tokens = { in: t0.in + assistant.tokens.in, out: t0.out + assistant.tokens.out, cache: t0.cache + assistant.tokens.cache }; }
       if (ap.status === 'running' && ap.cost >= ap.caps.usd && thread.id !== ap.rootThreadId) { stopRunTree(ap.rootThreadId); apEnd(ap, 'stopped', 'cost'); }
       if (thread.id === ap.rootThreadId) {
         assistant.parts.push({ kind: 'text', helm: 'autopilot-ledger', text: `\n\n---\n${Autopilot.ledgerText(ap)}` });
         apEnd(ap, assistant.stopped ? 'stopped' : assistant.error ? 'error' : 'done', assistant.stopped ? (ap.reason || 'user') : assistant.error ? String(assistant.error).slice(0, 300) : null);
         apTouch(ap);
+        // 连续模式：这一轮收尾（存对话、广播结束）之后再开下一轮
+        if (ap.status === 'done' && ap.untilFound) { const t = setTimeout(() => { apChainNext(ap).catch(() => {}); }, 1500); if (t.unref) t.unref(); }
       } else apTouch(ap);
     }
+    // 工作台：这次运行的摘要记在消息上（网页和审计用）；读过哪些 spec 留给同一个对话的下一次运行
+    assistant.harness = { ...Harness.summary(run.hx.h, run.hx.state), ...(run.hx.missing && run.hx.missing.length ? { missing: run.hx.missing } : {}) };
+    thread.harness = Harness.carryOf(run.hx.state);
     await saveThread(thread).catch(() => {});
     runs.delete(thread.id);
     send({ type: 'end', stopped: Boolean(assistant.stopped) });
@@ -1204,7 +1298,7 @@ async function handleHandoff(req, res) {
   if (depth > MAX_HANDOFF_DEPTH) return sendJson(res, 400, { error: `交接层数超过 ${MAX_HANDOFF_DEPTH} 层，请自己完成或回到用户确认。` });
 
   const srcAgent = agentById(src.agent);
-  const thread = newThread(target.id, task, { depth, from: { agent: src.agent, threadId: src.id }, ...(isLang(src.lang) ? { lang: src.lang } : {}), ...(src.autopilot ? { autopilot: src.autopilot } : {}) }); // 交接出去的对话沿用来源对话的语言；自动研究的规则也跟着走
+  const thread = newThread(target.id, task, { depth, root: src.root || src.id, from: { agent: src.agent, threadId: src.id }, ...(isLang(src.lang) ? { lang: src.lang } : {}), ...(src.autopilot ? { autopilot: src.autopilot } : {}) }); // 交接出去的对话沿用来源对话的语言；自动研究的规则也跟着走
   const context = {};
   if (body.projectId) context.projectId = body.projectId;
   if (body.backtestId) context.backtestId = body.backtestId;
@@ -1257,6 +1351,137 @@ function stopRunTree(threadId, seen = new Set()) {
   return n + 1;
 }
 
+
+/* ---------------- 工作台（lib/harness/，设计见 docs/HARNESS.md） ---------------- */
+
+// 研究方向的账本：一条研究线（根对话 + 它交接 / 派出去的所有子对话）一份，存在 data/directions/<根对话 id>.json
+const DIRECTIONS_DIR = path.join(path.dirname(THREADS_DIR), 'directions');
+const dirLedgers = new Map();
+const rootOf = (thread) => (isId(thread.root) ? thread.root : thread.id);
+async function dirLoad(rootId, { create = false } = {}) {
+  if (dirLedgers.has(rootId)) return dirLedgers.get(rootId);
+  let l = null;
+  try { l = JSON.parse(await readFile(path.join(DIRECTIONS_DIR, `${rootId}.json`), 'utf8')); } catch { l = create ? Harness.Directions.newLedger(rootId) : null; }
+  if (l) dirLedgers.set(rootId, l);
+  return l;
+}
+async function dirSave(l) {
+  await mkdir(DIRECTIONS_DIR, { recursive: true });
+  await writeJsonAtomic(path.join(DIRECTIONS_DIR, `${l.rootThreadId}.json`), l);
+  broadcast({ type: 'direction_updated', rootThreadId: l.rootThreadId });
+}
+
+// MCP（qc-mcp.mjs）每次调用工具之前问 guard、之后报 record（和自动研究的那一对并列，先过工作台再过自动研究）
+async function handleHarnessTool(req, res, kind) {
+  if (!safeEqual(req.headers['x-helm-token'], HANDOFF_TOKEN)) return sendJson(res, 403, { error: 'bad token' });
+  const body = await readJsonRaw(req, 8_000_000);
+  const run = runs.get(body.threadId);
+  if (!run || !run.hx) return sendJson(res, 200, kind === 'guard' ? { allow: true } : { ok: true });
+  const tool = String(body.tool || '');
+  const args = body.args && typeof body.args === 'object' ? body.args : {};
+  const { h, state } = run.hx;
+  const ledger = run.thread.autopilot ? null : await dirLoad(rootOf(run.thread)).catch(() => null);
+  if (kind === 'guard') {
+    let g = Harness.guard(h, state, tool, args);
+    // 写策略文件之前（文件还是旧内容）看一眼：这次是不是只改了回测起止日期。跑验证期只能这么改，不该被当成「改了策略」
+    if (g.allow && tool === 'write_file' && args.projectId != null && /\.py$/i.test(String(args.name || ''))) {
+      run.hx.datesOnly = null;
+      try {
+        const dir = path.join(PROJECTS_DIR, String(Number(args.projectId)));
+        const olds = await Promise.all((await readdir(dir)).filter((f) => /\.py$/i.test(f)).slice(0, 40).map((f) => readFile(path.join(dir, f), 'utf8').catch(() => '')));
+        if (Harness.datesOnlyChange(String(args.content ?? args.code ?? ''), olds)) run.hx.datesOnly = `${Number(args.projectId)}/${args.name}`;
+      } catch { /* 读不到旧文件：按「改了策略」算 */ }
+    }
+    if (g.allow && ledger) {
+      const why = Harness.Directions.guardTest(ledger, tool);
+      if (why) { state.refusals.push({ at: Date.now(), tool, message: why.slice(0, 300) }); g = { allow: false, message: `错误：工作台规则：${why}` }; }
+    }
+    if (!g.allow) broadcast({ type: 'harness_refusal', threadId: run.thread.id, agent: run.thread.agent, tool, message: g.message });
+    return sendJson(res, 200, g);
+  }
+  const datesOnly = tool === 'write_file' && run.hx.datesOnly === `${Number(args.projectId)}/${args.name}`;
+  if (tool === 'write_file') run.hx.datesOnly = null;
+  const r = Harness.record(h, state, tool, args, String(body.result || ''), { isError: body.isError === true, datesOnly });
+  if (ledger && Harness.Directions.noteTool(ledger, tool, body.isError === true)) await dirSave(ledger).catch(() => {});
+  return sendJson(res, 200, { ok: true, note: r.note || '' });
+}
+
+// mcp__qc__research_direction：看 / 登记 / 结束研究方向，或者提建议
+async function handleDirection(req, res) {
+  if (!safeEqual(req.headers['x-helm-token'], HANDOFF_TOKEN)) return sendJson(res, 403, { error: 'bad token' });
+  const body = await readJsonRaw(req);
+  const run = runs.get(body.threadId);
+  if (!run || !run.hx) return sendJson(res, 400, { error: '找不到正在运行的对话' });
+  const thread = run.thread;
+  const action = String(body.action || 'read');
+  if (thread.autopilot && (action === 'set' || action === 'conclude')) return sendJson(res, 400, { error: '自动研究里的方向用 autopilot_plan 登记（带 direction），不用 research_direction。' });
+  const ledger = await dirLoad(rootOf(thread), { create: true });
+  const r = Harness.Directions.apply(ledger, action, body, { by: thread.agent, threadId: thread.id, mode: run.hx.h.direction || 'read' });
+  if (r.error) return sendJson(res, 400, { error: r.error });
+  if (r.changed) await dirSave(ledger);
+  let text = r.text;
+  if (action === 'read') {
+    // 定方向之前要知道：已经测过什么（不重复）、手上有什么数据
+    const ctx = await apContext(thread.lang).catch(() => ({}));
+    text += `${ctx.tested ? `\n\n${ctx.tested}` : ''}${ctx.menu ? `\n\n${ctx.menu}` : ''}`;
+  }
+  return sendJson(res, 200, { text });
+}
+
+// mcp__qc__subagent：一次并行派出几个子 agent，等它们都做完。能派给谁、派几个由调用方的工作台决定（Harness.planSubagents）。
+// 子 agent 也是网站上看得见的对话（和交接一样），scout 是只读的，都不能再往下派。
+async function handleSubagent(req, res) {
+  if (!safeEqual(req.headers['x-helm-token'], HANDOFF_TOKEN)) return sendJson(res, 403, { error: 'bad token' });
+  const body = await readJsonRaw(req);
+  const srcRun = runs.get(body.threadId);
+  if (!srcRun || !srcRun.hx) return sendJson(res, 400, { error: '找不到正在运行的对话' });
+  const src = srcRun.thread;
+  const plan = Harness.planSubagents(srcRun.hx.h, srcRun.hx.state, body.tasks, { isSub: Boolean(src.sub), agents: AGENTS.map((a) => a.id) });
+  if (plan.error) return sendJson(res, 400, { error: plan.error });
+  const depth = (src.depth || 0) + 1;
+  if (depth > MAX_HANDOFF_DEPTH) return sendJson(res, 400, { error: `交接层数超过 ${MAX_HANDOFF_DEPTH} 层，不能再派子 agent：自己完成，或者在总结里写明建议。` });
+  if (runs.size + plan.tasks.length > MAX_RUNS) return sendJson(res, 429, { error: `同时运行的对话已经有 ${runs.size} 个（上限 ${MAX_RUNS}）：少派几个，或者等别的结束。` });
+  srcRun.hx.state.children += plan.tasks.length; // 先记账：同时来的两次调用不会一起超过上限
+  const srcAgent = agentById(src.agent);
+  const kids = [];
+  for (const t of plan.tasks) {
+    const target = agentById(t.agent);
+    const thread = newThread(target.id, t.task, { depth, root: src.root || src.id, from: { agent: src.agent, threadId: src.id }, sub: { mode: t.mode, parent: src.id },
+      ...(isLang(src.lang) ? { lang: src.lang } : {}), ...(src.autopilot ? { autopilot: src.autopilot } : {}) });
+    const context = {};
+    if (t.projectId) context.projectId = t.projectId;
+    if (t.backtestId) context.backtestId = t.backtestId;
+    const message = `【${srcAgent ? srcAgent.name : src.agent} 派给你的子任务（${t.mode === 'scout' ? '只读' : '完整权限'}）】\n\n${t.task}`;
+    try {
+      const run = await startRun(thread, { message, context: Object.keys(context).length ? context : null,
+        model: srcRun.opts.auto && srcRun.opts.auto.model ? AUTO : srcRun.opts.model, effort: srcRun.opts.auto && srcRun.opts.auto.effort ? AUTO : srcRun.opts.effort,
+        from: { agent: src.agent, threadId: src.id } });
+      kids.push({ t, target, thread, run });
+    } catch (e) {
+      srcRun.hx.state.children -= 1;
+      kids.push({ t, target, error: e.message });
+    }
+  }
+  const live = kids.filter((k) => k.run);
+  const waitingOn = srcRun.waitingOn || (srcRun.waitingOn = new Set());
+  for (const k of live) waitingOn.add(k.thread.id);
+  let answered = false;
+  const onGone = () => { if (!answered) for (const k of live) if (runs.get(k.thread.id) === k.run) stopRunTree(k.thread.id); };
+  res.on('close', onGone);
+  let timer;
+  const late = new Promise((r) => { timer = setTimeout(() => r({ stillRunning: true }), HANDOFF_WAIT_MS); });
+  const outs = await Promise.all(live.map((k) => Promise.race([k.run.done, late])));
+  clearTimeout(timer);
+  answered = true;
+  res.off('close', onGone);
+  for (const k of live) waitingOn.delete(k.thread.id);
+  let i = 0;
+  const results = kids.map((k) => (k.run
+    ? { agent: k.target.id, agentName: k.target.name, mode: k.t.mode, threadId: k.thread.id, ...outs[i++] }
+    : { agent: k.target.id, agentName: k.target.name, mode: k.t.mode, threadId: null, error: k.error }));
+  return sendJson(res, 200, { results });
+}
+
 /* ---------------- http ---------------- */
 
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json' };
@@ -1289,12 +1514,85 @@ const allowedOrigins = new Set([...allowedHosts].map((h) => `http://${h}`));
 // 注意：本机其它进程仍能 GET 首页拿到令牌并伪造 Origin，这只是纵深防御，不是对本机恶意进程的隔离。
 function checkMutation(req, pathname) {
   if (req.method === 'GET' || req.method === 'HEAD') return null;
-  if (pathname === '/api/handoff' || pathname === '/api/approval' || pathname === '/api/ask' || pathname === '/api/changes/verify' || pathname === '/api/changes/revert-mine' || pathname === '/api/autopilot/guard' || pathname === '/api/autopilot/record') return null;
+  if (pathname === '/api/harness/guard' || pathname === '/api/harness/record' || pathname === '/api/subagent' || pathname === '/api/direction' || pathname === '/api/handoff' || pathname === '/api/approval' || pathname === '/api/ask' || pathname === '/api/changes/verify' || pathname === '/api/changes/revert-mine' || pathname === '/api/autopilot/guard' || pathname === '/api/autopilot/record') return null;
   if (!safeEqual(req.headers['x-helm-ui-token'], UI_TOKEN)) return '请求被拒绝：缺少或错误的页面令牌。如果服务刚重启过，请刷新页面。';
   if (!req.headers.origin || !allowedOrigins.has(req.headers.origin)) return '请求被拒绝：来源（Origin）不是本站。';
   const site = req.headers['sec-fetch-site'];
   if (site && site !== 'same-origin') return '请求被拒绝：不是同源请求。';
   return null;
+}
+
+/* ---------------- 手机伴侣（lib/companion.mjs，设计见 docs/COMPANION.md） ---------------- */
+// Helm 唯一会监听局域网的地方：默认关，用户在设置里打开后才起；另一个端口、另一个服务，只有配对 / 摘要 / 收件箱这几个接口。
+const COMP = new Companion({ dir: path.dirname(THREADS_DIR) });
+const COMP_DIR = path.join(PUBLIC_DIR, 'companion');
+const COMP_FILES = { '/': 'index.html', '/index.html': 'index.html', '/app.js': 'app.js', '/style.css': 'style.css', '/manifest.webmanifest': 'manifest.webmanifest', '/icon.svg': 'icon.svg' };
+const COMP_MIME = { ...MIME, '.webmanifest': 'application/manifest+json' };
+const COMP_CSP = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; manifest-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'";
+let compServer = null;
+const compJson = (res, code, data) => { res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...SEC_HEADERS }); res.end(JSON.stringify(data)); };
+async function compSummary(en = false) {
+  const [runs, projs, pp, inbox] = await Promise.all([apList().catch(() => []), listProjects().catch(() => []), Paper.listSessions({}).catch(() => ({ sessions: [] })), COMP.inbox()]);
+  const names = new Map((Array.isArray(projs) ? projs : (projs && projs.projects) || []).map((p) => [Number(p.projectId), (en ? p.nameEn : p.nameZh) || p.name]));
+  // 运行记录里还没落盘的 token 数：正在跑的那一轮从内存里的记录补上
+  const withTok = runs.map((r) => { const ap = apRuns.get(r.runId); return { ...r, tokens: (ap && ap.tokens) || r.tokens || null }; });
+  const paper = ((pp && pp.sessions) || []).filter((s) => s.status === 'active').map((s) => ({ name: s.name, project: names.get(Number(s.projectId)) || `#${s.projectId}`, mode: s.mode, days: s.summary ? s.summary.days : 0, ret: s.summary ? s.summary.return : null, bench: s.summary ? s.summary.benchmarkReturn : null, ok: !(s.lastRun && s.lastRun.ok === false && !s.lastRun.skipped), dataDate: s.summary ? s.summary.dataDate : null }));
+  return buildSummary({ runs: withTok, projectName: (id) => names.get(Number(id)) || '', paper, inbox });
+}
+async function compHandler(req, res) {
+  try {
+    const p = new URL(req.url, 'http://x').pathname;
+    const ip = req.socket.remoteAddress || '';
+    if (!COMP.state || !COMP.state.enabled) return compJson(res, 503, { error: 'disabled' });
+    if (req.method === 'GET' && COMP_FILES[p]) {
+      const f = path.join(COMP_DIR, COMP_FILES[p]);
+      const data = await readFile(f);
+      res.writeHead(200, { 'Content-Type': COMP_MIME[path.extname(f)] || 'application/octet-stream', 'Cache-Control': 'no-cache', 'Content-Security-Policy': COMP_CSP, ...SEC_HEADERS });
+      return res.end(data);
+    }
+    if (!p.startsWith('/api/')) return compJson(res, 404, { error: 'not found' });
+    if (COMP.blocked(ip)) return compJson(res, 429, { error: 'too-many-attempts' });
+    if (p === '/api/pair' && req.method === 'POST') {
+      const b = await readJsonRaw(req, 2000);
+      const r = await COMP.pair(b && b.code);
+      if (r.error) { COMP.fail(ip); return compJson(res, r.error === 'disabled' ? 503 : 403, { error: r.error }); }
+      broadcast({ type: 'companion_updated' });
+      return compJson(res, 200, { token: r.token });
+    }
+    if (!COMP.authorized(req.headers.authorization)) { COMP.fail(ip); return compJson(res, 401, { error: 'unauthorized' }); }
+    if (p === '/api/summary' && req.method === 'GET') return compJson(res, 200, await compSummary(!/^zh/i.test(String(req.headers['accept-language'] || ''))));
+    if (p === '/api/ideas' && req.method === 'GET') return compJson(res, 200, { ideas: (await COMP.inbox()).slice(0, 50).map((x) => ({ id: x.id, at: x.at, text: x.text, status: x.status })) });
+    if (p === '/api/ideas' && req.method === 'POST') {
+      const b = await readJsonRaw(req, 16_000);
+      const r = await COMP.addIdea(b && b.text);
+      if (r.error) return compJson(res, r.error === 'inbox-full' ? 429 : 400, { error: r.error });
+      broadcast({ type: 'inbox_updated' });
+      return compJson(res, 200, { idea: { id: r.idea.id, at: r.idea.at, text: r.idea.text, status: r.idea.status } });
+    }
+    return compJson(res, 404, { error: 'not found' });
+  } catch (e) {
+    return compJson(res, e && e.status ? e.status : 400, { error: 'bad request' });
+  }
+}
+async function compApply() {
+  if (!COMP.state) await COMP.load();
+  const want = COMP.state.enabled;
+  if (want && !compServer) {
+    const port = Number(process.env.HELM_COMPANION_PORT) || COMP.state.port;
+    const srv = http.createServer(compHandler);
+    srv.requestTimeout = 15000; srv.headersTimeout = 10000;
+    await new Promise((resolve, reject) => { srv.once('error', reject); srv.listen(port, process.env.HELM_COMPANION_HOST || '0.0.0.0', resolve); });
+    srv.on('error', () => {});
+    compServer = srv; compServer.helmPort = port;
+  } else if (!want && compServer) {
+    const s = compServer; compServer = null;
+    if (s.closeAllConnections) s.closeAllConnections();
+    await new Promise((r) => s.close(r));
+  }
+}
+function compView(extra = {}) {
+  const port = compServer ? compServer.helmPort : (Number(process.env.HELM_COMPANION_PORT) || (COMP.state && COMP.state.port));
+  return { success: true, enabled: Boolean(COMP.state && COMP.state.enabled), listening: Boolean(compServer), port, urls: COMP.state && COMP.state.enabled ? lanUrls(port) : [], paired: Boolean(COMP.state && COMP.state.token), pairedAt: (COMP.state && COMP.state.pairedAt) || null, ...extra };
 }
 
 const server = http.createServer(async (req, res) => {
@@ -1403,7 +1701,7 @@ const server = http.createServer(async (req, res) => {
       const a = agentById(ma[1]);
       if (!a) return sendJson(res, 404, { error: '没有这个 agent' });
       return sendJson(res, 200, {
-        success: true, agent: a, tools: effectiveTools(a), localTools: localTools(a), baseTools: BASE_TOOLS, blocked: ALWAYS_BLOCKED,
+        success: true, agent: a, tools: effectiveTools(a), localTools: localTools(a), harness: Harness.describe(a), baseTools: BASE_TOOLS, blocked: ALWAYS_BLOCKED,
         teamPrompt: teamPrompt(a).trim(), orchestratorPrompt: a.orchestrator ? orchestratorPrompt(a).trim() : null,
         models: MODELS, efforts: EFFORTS, envModel: process.env.CLAUDE_MODEL || null, envEffort: process.env.CLAUDE_EFFORT || null,
       });
@@ -1893,9 +2191,37 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { success: r.ok, ...r, autoRestart: process.env.HELM_APP === '1' });
     }
     if (p === '/api/ask' && req.method === 'POST') return await handleAsk(req, res);
+    if (p === '/api/harness/guard' && req.method === 'POST') return await handleHarnessTool(req, res, 'guard');
+    if (p === '/api/harness/record' && req.method === 'POST') return await handleHarnessTool(req, res, 'record');
+    if (p === '/api/subagent' && req.method === 'POST') return await handleSubagent(req, res);
+    if (p === '/api/direction' && req.method === 'POST') return await handleDirection(req, res);
+    if (p === '/api/harness' && req.method === 'GET') return sendJson(res, 200, { success: true, harnesses: AGENTS.map((a) => Harness.describe(a)) });
     if (p === '/api/autopilot/guard' && req.method === 'POST') return await handleAutopilotTool(req, res, 'guard');
     if (p === '/api/autopilot/record' && req.method === 'POST') return await handleAutopilotTool(req, res, 'record');
     if (p === '/api/autopilot' && req.method === 'GET') return sendJson(res, 200, { success: true, defaults: Autopilot.DEFAULTS, runs: await apList() });
+    if (p === '/api/companion' && req.method === 'GET') { if (!COMP.state) await COMP.load(); return sendJson(res, 200, compView()); }
+    if (p === '/api/companion' && req.method === 'POST') {
+      const b = await readJson(req);
+      const lang = langOf(req, b);
+      if (!COMP.state) await COMP.load();
+      const act = String(b.action || '');
+      if (act === 'enable' || act === 'disable') {
+        await COMP.setEnabled(act === 'enable');
+        try { await compApply(); } catch (e) { await COMP.setEnabled(false); await compApply().catch(() => {}); throw httpError(409, localize(lang, `手机伴侣没能启动：${e.code === 'EADDRINUSE' ? '端口被占用' : e.message}`)); }
+        return sendJson(res, 200, compView());
+      }
+      if (act === 'pair') { if (!COMP.state.enabled) throw httpError(409, localize(lang, '先打开手机伴侣')); return sendJson(res, 200, compView({ pair: COMP.newPairCode() })); }
+      if (act === 'reset') { await COMP.reset(); return sendJson(res, 200, compView()); }
+      throw httpError(400, 'action 只能是 enable、disable、pair 或 reset');
+    }
+    if (p === '/api/inbox' && req.method === 'GET') return sendJson(res, 200, { success: true, ideas: await COMP.inbox() });
+    if (p === '/api/inbox' && req.method === 'POST') {
+      const b = await readJson(req);
+      const r = await COMP.actIdea(String(b.id || ''), String(b.action || ''));
+      if (r.error) throw httpError(r.error === 'not-found' ? 404 : 400, r.error === 'not-found' ? '收件箱里没有这一条' : 'action 只能是 used 或 dismissed');
+      broadcast({ type: 'inbox_updated' });
+      return sendJson(res, 200, { success: true, idea: r.idea });
+    }
     if (p === '/api/autopilot/start' && req.method === 'POST') { const b = await readJson(req); return sendJson(res, 200, { success: true, ...(await startAutopilot(b, langOf(req, b))) }); }
     if (p === '/api/autopilot/stop' && req.method === 'POST') {
       const b = await readJson(req);
@@ -2013,6 +2339,9 @@ server.listen(PORT, HOST, () => {
   // 模拟实盘：每个交易日结束后（美东午夜过后）自动用最新数据跑一次
   Paper.onPaperEvent((ev) => broadcast(ev));
   Paper.startScheduler();
+  // 手机伴侣：上次打开过就接着开（默认关）
+  COMP.load().then(() => compApply()).then(() => { if (compServer) console.log(L(`  手机伴侣已打开（局域网可访问）：${lanUrls(compServer.helmPort).join('  ') || `端口 ${compServer.helmPort}`}`, `  Phone companion is on (reachable on your local network): ${lanUrls(compServer.helmPort).join('  ') || `port ${compServer.helmPort}`}`)); })
+    .catch((e) => console.error(L(`  手机伴侣没能启动：${e.message}`, `  Phone companion failed to start: ${e.message}`)));
   reconcileLedgers().then((r) => { if (r.trialsAdded || r.holdoutBackfilled.length) console.log(L(`  补记尝试 ${r.trialsAdded} 次，补记验证期 ${r.holdoutBackfilled.length} 次`, `  Backfilled ${r.trialsAdded} trial(s) and ${r.holdoutBackfilled.length} holdout record(s)`)); }).catch((e) => console.log(L(`  补账失败：${e.message}`, `  Ledger backfill failed: ${e.message}`)));
 });
 
@@ -2027,6 +2356,7 @@ function shutdown(sig, exitCode = 0) {
   const live = Paper.runningSessions().length;
   if (live) console.log(L(`  有 ${live} 个模拟实盘正在更新，这一次会被打断；下次启动 Helm 后会自动补跑，不会重复下单。`, `  ${live} paper session(s) are updating and will be interrupted; Helm re-runs them on next start without duplicate orders.`));
   const hardStop = setTimeout(() => process.exit(exitCode), 3000); hardStop.unref();
+  if (compServer) { try { if (compServer.closeAllConnections) compServer.closeAllConnections(); compServer.close(); } catch { /* 已关 */ } }
   server.close(() => process.exit(exitCode));
   for (const res of bus) { try { res.end(); } catch { /* 已断开 */ } }
   for (const r of runs.values()) {

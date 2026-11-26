@@ -426,7 +426,9 @@ def resolve_ciks(sec: Sec, spans: dict, renames: dict, log=print) -> dict:
         if len(name) < 4:
             return []
         found = []
-        for q in {title[cik], re.sub(r"(?<=[a-z])(?=[A-Z])", " ", title[cik])}:
+        for q in {entity_query(title[cik]), entity_query(re.sub(r"(?<=[a-z])(?=[A-Z])", " ", title[cik]))}:
+            if not q:
+                continue
             url = f"https://efts.sec.gov/LATEST/search-index?keysTyped={requests_quote(q)}"
             d = sec.get_json(url, SEC_DIR / "entities" / f"{re.sub(r'[^A-Za-z0-9]', '_', q)}.json", 60, missing_ok=True) or {}
             for h in d.get("hits", {}).get("hits", []):
@@ -505,6 +507,13 @@ def mapping_kind(m: dict) -> str:
     if "predecessor" in b:
         return "with name-matched predecessor CIK (uncertain)"
     return "ticker rename" if b.startswith("ticker rename") else "SEC current ticker"
+
+
+def entity_query(title: str) -> str:
+    """SEC title as an entity-search query. Drops the state-of-incorporation tag ('US BANCORP \\DE\\',
+    'FOO CORP /DE/') and backslashes, which make the search endpoint return 400."""
+    q = re.sub(r"\s*[\\/][A-Za-z]{2,3}[\\/]?\s*$", "", title or "")
+    return re.sub(r"\s+", " ", q.replace("\\", " ")).strip()
 
 
 def requests_quote(s: str) -> str:

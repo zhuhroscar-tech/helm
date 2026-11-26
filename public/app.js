@@ -485,11 +485,21 @@ const S = {
 // agents.json 里的默认名字 / 定位 / 示例任务是中文；英文界面下换成字典里的英文。用户改过的（和默认不一样）原样显示。
 function localizeAgents(raw) {
   const zh = HELM_I18N.dict.zh;
-  return raw.map((x) => {
+  const list = raw.map((x) => {
     const loc = (v, key) => (v === zh[key] ? _t(key) : v);
     const name = loc(x.name, `ag_${x.id}_name`);
     return { ...x, name, role: loc(x.role, `ag_${x.id}_role`), starters: (x.starters || []).map((s, i) => loc(s, `ag_${x.id}_s${i + 1}`)), color: 'var(--muted)', glyph: String(name || '?').slice(0, 1) };
   });
+  // 首字母撞了（英文界面的 Risk Officer / Researcher 都是 R）：流水线上的小圆章分不出是谁，撞的改用两个字母
+  const seen = {};
+  for (const x of list) (seen[x.glyph] = seen[x.glyph] || []).push(x);
+  for (const g of Object.keys(seen)) if (seen[g].length > 1) for (const x of seen[g]) x.glyph = agentGlyph2(x.name);
+  return list;
+}
+// 两个词取两个首字母（Risk Officer → RO），一个词取前两个字母（Researcher → Re）
+function agentGlyph2(name) {
+  const w = String(name || '?').trim().split(/\s+/);
+  return w.length > 1 ? (w[0].slice(0, 1) + w[1].slice(0, 1)).toUpperCase() : w[0].slice(0, 2);
 }
 // 模型 / 思考深度选项（服务器给的是中文说明）：默认文字换成字典里的英文，用户设置的原样显示
 function localizeOpt(m) {
@@ -676,15 +686,27 @@ async function loadProjectsNow() {
   btn.classList.remove('spin');
   // 读取失败不等于「没有项目」：保留上一次的列表，并明确提示
   S.projectsError = r.success ? null : (r.errors || []).join(_t('k0007')) || _t('k0097');
+  const firstLoad = !S.projects;
   S.projects = r.success ? r.projects : (S.projects || []);
   if (S.route.projectId) S.project = S.projects.find((p) => p.projectId === S.route.projectId) || S.project;
   renderProjects();
-  if (onHomePage()) { renderHomeSoon(); loadLatest(); }
+  if (onHomePage()) { renderHomeSoon(); loadLatest(); loadInbox(); }
+  // 想法记录、流水线先于项目列表画出来时，项目名是服务端的原名（可能是另一种语言）：名字到了重画一次
+  else if (firstLoad && (S.route.journal || S.route.page === 'pipeline')) renderMain();
   renderCrumbs();
 }
+// 首页要知道每个项目走到哪一步：之前只读最近改过的 8 个，更早的项目（比如一直在跑模拟实盘的那个）
+// 既不会出现在首页，出了问题也不会算进「等你处理」。现在全部读（上限 HOME_LOAD_MAX），分批以免一次发太多请求。
+const HOME_LOAD_MAX = 60;
 async function loadLatest() {
-  const top = (S.projects || []).slice(0, 8);
+  const all = (S.projects || []).slice(0, HOME_LOAD_MAX);
   S.home = S.home || {};
+  for (let i = 0; i < all.length; i += 8) {
+    await loadLatestBatch(all.slice(i, i + 8));
+    renderHomeSoon();
+  }
+}
+async function loadLatestBatch(top) {
   await Promise.all(top.map(async (p) => {
     const pid = p.projectId;
     const [r, rs, pp] = await Promise.all([
@@ -695,7 +717,6 @@ async function loadLatest() {
     if (r.success) S.latest[pid] = r.backtests.find((b) => !isRunning(b) && !isFailed(b)) || r.backtests[0] || null;
     S.home[pid] = { bts: r.success ? r.backtests : [], rs: rs.success ? rs.jobs : [], pap: pp.success ? pp.sessions : [] };
   }));
-  renderHomeSoon();
 }
 function renderProjects() {
   const ul = $('#projectList');
@@ -2666,7 +2687,7 @@ function journalHTML() {
   if (!entries.length) return `<div class="page">${head}<div class="panel empty"><div class="big">${_t('k0955')}</div><p>${_t('k0956')}</p></div></div>`;
   const cell = (k, v, sub) => `<div class="pg-cell"><div class="pg-k">${k}</div><div class="pg-v mono">${v}</div>${sub ? `<div class="pg-sub">${sub}</div>` : ''}</div>`;
   const st = S0.byStage || {};
-  const holdSub = (S0.holdout || []).filter((h) => h.looks).map((h) => `${esc(h.name.split(/[（(]/)[0].trim().slice(0, 12))} ${h.looks}`).join('<br>') || _t('k0957');
+  const holdSub = (S0.holdout || []).filter((h) => h.looks).map((h) => { const n = pNameById(h.projectId, h.name).split(/[（(]/)[0].trim(); return `<span class="jr-ho" title="${esc(n)}">${esc(n)}</span> · ${_t('hm_looks', { n: h.looks })}`; }).join('<br>') || _t('k0957');
   const tr = S0.trials || {};
   const stages = [_t('k0115'), _t('k0958'), _t('k0058'), _t('k0176'), _t('k0116')];
   const sum = `<div class="pg-grid jr-sum">
@@ -2764,17 +2785,55 @@ function autoPickHTML(a) {
   const v = [a.model ? modelLabel(a.model) : '', eff ? _t('k1441', { v: eff }) : ''].filter(Boolean).join(' · ');
   return `<span class="auto-pick" title="${esc(a.reason || '')}">${esc(_t('am_picked', { v }))}</span>`;
 }
+// 首页项目表按「状态」分组，而不是只按最近修改时间排：
+//   等你处理 → 模拟实盘中 → 进行中 → 未开始 → 想法检验没有信号（收成一行，点开才展开）。
+// 之前按修改时间取前 8 个：一直在跑的模拟实盘项目会被几个刚试过、已经没信号的想法挤出首页。
+const HOME_ROWS_MAX = 12;
+function homeGroup(p) {
+  if (attnScore(p) > 0) return 'attn';
+  const st = projStage(p);
+  if (!st) return null; // 这个项目的数据还没读到
+  if (st.step === 4) return 'live';
+  if (st.step === 1 && st.next && st.next.ask) return 'closed';
+  return st.step === 0 ? 'new' : 'work';
+}
+function homeProjects() {
+  if (!S.projects) return null;
+  const all = S.projects;
+  const grp = (label) => `<tr class="static grp"><td colspan="6">${label}</td></tr>`;
+  const groups = { attn: [], live: [], work: [], new: [], closed: [] };
+  let pending = 0;
+  for (const p of all) { const g = homeGroup(p); if (g) groups[g].push(p); else pending += 1; }
+  // 数据还没到齐：先按原来的顺序画（最近改过的在前），不分组，免得标题一行行跳出来
+  if (pending) {
+    const top = all.slice(0, HOME_ROWS_MAX);
+    return { all, rows: top.map(projRow).join(''), more: all.length - top.length };
+  }
+  const open = Boolean(store.get('homeClosed', false));
+  const live = [...groups.attn, ...groups.live, ...groups.work, ...groups.new];
+  const shown = new Set(live.slice(0, HOME_ROWS_MAX));
+  let rows = '';
+  for (const [k, key] of [['attn', 'hm_gAttn'], ['live', 'hm_gLive'], ['work', 'hm_gWork'], ['new', 'hm_gNew']]) {
+    const list = groups[k].filter((p) => shown.has(p));
+    if (list.length) rows += grp(_t(key)) + list.map(projRow).join('');
+  }
+  if (groups.closed.length) {
+    rows += `<tr class="static grp grp-closed"><td colspan="6"><button type="button" class="grp-toggle" data-home-closed aria-expanded="${open}"><svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="m6 3 5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>${_t('hm_gClosed', { n: groups.closed.length })}<span class="grp-act">${open ? _t('hm_hide') : _t('hm_show')}</span></button></td></tr>`;
+    if (open) rows += groups.closed.map(projRow).join('');
+  }
+  return { all, rows, more: live.length - shown.size };
+}
 // 首页视线：① 标题直接说「有几件事卡在你这里」→ ② 项目表，需要你处理的排最前、下一步用强调色 → ③ 写下一个想法 → ④ 直接问智能体。
 // 回访用户的顺序固定不变（不随状态跳动）；第一次用、还没有项目时，输入框就是全部重点，放最前。
 function homeHTML() {
   const h = new Date().getHours();
   const greet = h < 5 ? _t('k0999') : h < 11 ? _t('k1000') : h < 14 ? _t('k1001') : h < 18 ? _t('k1002') : _t('k1003');
   const setup = healthHTML();
-  const projs = S.projects ? S.projects.slice().sort((a, b) => attnScore(b) - attnScore(a)).slice(0, 8) : null;
+  const hp = homeProjects();
+  const projs = hp ? hp.all : null;
   const firstRun = projs && !projs.length && !S.projectsError;
   const attn = attnSummary();
-  const nHot = projs ? projs.filter((p) => attnScore(p) > 0).length : 0;
-  const rows = projs ? projs.map((p, i) => (i === nHot && nHot ? `<tr class="static grp"><td colspan="6">${_t('hm_other')}</td></tr>` : '') + projRow(p)).join('') : '<tr class="static"><td colspan="6"><div class="skeleton" style="height:40px"></div></td></tr>';
+  const rows = hp ? hp.rows : '<tr class="static"><td colspan="6"><div class="skeleton" style="height:40px"></div></td></tr>';
   const projSec = S.projectsError && !(projs && projs.length) ? errorBox(_t('k1004'), S.projectsError)
     : firstRun ? `<ol class="first-run" aria-label="${_t('k1005')}">
         <li>${_t('k1006')}</li>
@@ -2784,7 +2843,7 @@ function homeHTML() {
       </ol>
       <p class="empty-line">${_t('k1010')}<button type="button" class="linkish" data-new-project>${_t('k1011')}</button>${_t('k1012')}</p>`
       : `<div class="table-wrap"><table class="data home-proj"><thead><tr><th>${_t('k0268')}</th><th>${_t('k0974')}</th><th class="r">${_t('k0272')}</th><th class="r">${_t('k0273')}</th><th class="r">${_t('k1014')}</th><th class="r">${_t('k0173')}</th></tr></thead><tbody>${rows}</tbody></table></div>
-      ${S.projects && S.projects.length > 8 ? `<p class="data-note">${_t('k1013')}</p>` : ''}`;
+      ${hp && hp.more ? `<p class="data-note">${_t('hm_more', { n: hp.more })}</p>` : ''}`;
   const composer = `<form class="idea" id="ideaForm">
       <textarea id="ideaInput" rows="3" aria-label="${_t('k1021')}" aria-describedby="ideaHint" placeholder="${_t('k1022')}"></textarea>
       <div class="idea-foot">
@@ -2804,6 +2863,7 @@ function homeHTML() {
   if (firstRun || S.projectsError) return `<div class="page">
     <div class="hero"><h1>${_t('k1019')}</h1><p class="sub">${_t('k1020')}</p></div>
     ${composer}
+    ${inboxHTML()}
     ${setup}
     <section class="home-sec"><div class="sec-head"><h2>${firstRun ? _t('k1018') : _t('h015')}</h2></div>${projSec}</section>
     ${quick}
@@ -2813,6 +2873,7 @@ function homeHTML() {
   return `<div class="page">
     <div class="hero home-status ${attn && attn.n ? 'has-attn' : ''} ${attn && attn.bad ? 'bad' : ''}"><h1>${title}</h1>${sub ? `<p class="sub">${esc(sub)}</p>` : ''}</div>
     ${setup}
+    ${inboxHTML()}
     <section class="home-sec home-proj-sec">
       <div class="sec-head"><h2>${_t('h015')}</h2><span class="meta">${S.projects && S.projects.length ? S.projects.length : ''}</span></div>
       ${projSec}
@@ -3102,7 +3163,7 @@ function paperDriftHTML(s, P) {
 }
 
 // KPI 里的资金：放得下又不过粗（$1.02M），完整金额在悬停提示里
-const moneyM = (v) => (v == null || !Number.isFinite(+v) ? '—' : Math.abs(+v) >= 1e6 ? `$${(+v / 1e6).toFixed(2)}M` : money0(v));
+const moneyM = (v) => (v == null || !Number.isFinite(+v) ? '—' : Math.abs(+v) >= 1e6 ? `$${(+v / 1e6).toFixed(2)}M` : Math.abs(+v) >= 1e5 ? `$${(+v / 1e3).toFixed(0)}k` : money0(v)); // 六位数写成 $956k：指标格放不下 $956,234 会被截成 $956,…（完整数字在悬停提示里）
 function paperHTML() {
   const P = S.paper;
   const { projectId } = S.route;
@@ -3302,6 +3363,32 @@ function setUpdHTML() {
     <dl class="set-kv"><dt>${_t('upd04')}</dt><dd>${ver}</dd><dt>GitHub</dt><dd>${news ? esc(news) : '—'}${when}</dd></dl>${list}${bl}${setup}${err}
     <div class="set-btns"><button type="button" class="btn sm" data-upd-check>${_t('upd07')}</button>${av && av.behind ? `<button type="button" class="btn sm primary" data-upd-apply ${(U.blockers || []).length ? 'disabled' : ''}>${_t('upd08')}</button>` : ''}</div>`;
 }
+/* ---- 手机伴侣（lib/companion.mjs）：设置里开关、配对；首页显示手机发来的想法 ---- */
+async function loadCompanion() {
+  try { const keep = S.comp && S.comp.pair; S.comp = await api('/api/companion'); if (keep && keep.expiresAt > Date.now() && !S.comp.pairedAt) S.comp.pair = keep; } catch (e) { S.comp = { error: e.message }; }
+  renderSettings('comp');
+}
+function setCompHTML() {
+  const c = S.comp;
+  if (!c) return '<div class="skeleton" style="height:48px"></div>';
+  if (c.error) return `<p class="modal-hint warn-t">${esc(c.error)}</p>`;
+  if (!c.enabled) return `<p class="modal-hint">${_t('cp02')}</p><div class="set-row"><button type="button" class="btn" data-comp="enable">${_t('cp04')}</button></div>`;
+  const urls = (c.urls || []).map((u) => `<code class="cp-url">${esc(u)}</code>`).join('');
+  const pair = c.pair && c.pair.expiresAt > Date.now() ? `<div class="cp-pair"><span class="cp-code mono">${esc(c.pair.code.slice(0, 3))} ${esc(c.pair.code.slice(3))}</span><span class="modal-hint">${_t('cp08', { v: new Date(c.pair.expiresAt).toLocaleTimeString(LOC(), { hour: '2-digit', minute: '2-digit' }) })}</span></div>` : '';
+  return `<p class="modal-hint">${_t('cp05')}</p><div class="cp-urls">${urls || `<span class="modal-hint warn-t">${_t('cp06')}</span>`}</div>
+    <p class="modal-hint">${c.paired ? _t('cp09', { v: c.pairedAt ? ago(c.pairedAt) : '' }) : _t('cp07')}</p>${pair}
+    <div class="set-row cp-acts"><button type="button" class="btn" data-comp="pair">${_t('cp10')}</button>${c.paired ? `<button type="button" class="btn" data-comp="reset">${_t('cp11')}</button>` : ''}<button type="button" class="btn" data-comp="disable">${_t('cp13')}</button></div>`;
+}
+async function loadInbox() {
+  try { const r = await api('/api/inbox'); S.inbox = (r.ideas || []).filter((x) => x.status === 'new'); } catch { /* 伴侣没开过：没有收件箱 */ }
+  renderHomeSoon();
+}
+function inboxHTML() {
+  const list = S.inbox || [];
+  if (!list.length) return '';
+  return `<section class="home-sec home-inbox" aria-label="${_t('cp20')}"><div class="sec-head"><h2>${_t('cp20')}</h2><span class="meta">${list.length}</span></div>
+    <ul class="inbox-list">${list.map((x) => `<li><p>${esc(x.text)}</p><div class="inbox-foot"><span class="when">${agoT(x.at)}</span><span><button type="button" class="linkish" data-inbox-act="dismissed" data-inbox-id="${esc(x.id)}">${_t('cp22')}</button><button type="button" class="btn sm" data-inbox-act="used" data-inbox-id="${esc(x.id)}">${_t('cp21')}</button></span></div></li>`).join('')}</ul></section>`;
+}
 async function loadUpdate() {
   try { S.upd = await api('/api/update/status'); } catch (e) { S.upd = { error: e.message }; }
   renderSettings('upd');
@@ -3312,6 +3399,7 @@ function settingsBodyHTML() {
     <section class="set-sec" id="setAi" aria-labelledby="setAiH"><h3 id="setAiH">${_t('h092')}</h3><div class="set-in">${setAiHTML()}</div></section>
     <section class="set-sec" id="setAlp" aria-labelledby="setAlpH"><h3 id="setAlpH">${_t('h081')}</h3><div class="set-in">${setAlpHTML()}</div></section>
     <section class="set-sec" id="setUpd" aria-labelledby="setUpdH"><h3 id="setUpdH">${_t('upd01')}</h3><div class="set-in">${setUpdHTML()}</div></section>
+    <section class="set-sec" id="setComp" aria-labelledby="setCompH"><h3 id="setCompH">${_t('cp01')}</h3><div class="set-in">${setCompHTML()}</div></section>
     <section class="set-sec" id="setLook" aria-labelledby="setLookH"><h3 id="setLookH">${_t('ux056')}</h3><div class="set-in side-foot">${lookRowsHTML()}</div></section>
     <div class="modal-actions"><button type="button" class="btn" data-onb-open>${_t('ob080')}</button><button type="button" class="btn primary" data-set-close>${_t('ux057')}</button></div>`;
 }
@@ -3322,6 +3410,7 @@ function renderSettings(part) {
   if (part === 'ai') { const el = d.querySelector('#setAi .set-in'); if (el) el.innerHTML = setAiHTML(); return; }
   if (part === 'alp') { const el = d.querySelector('#setAlp .set-in'); if (el) el.innerHTML = setAlpHTML(); return; }
   if (part === 'upd') { const el = d.querySelector('#setUpd .set-in'); if (el) el.innerHTML = setUpdHTML(); return; }
+  if (part === 'comp') { const el = d.querySelector('#setComp .set-in'); if (el) el.innerHTML = setCompHTML(); return; }
   const body = d.querySelector('.set-body'); if (body) body.innerHTML = settingsBodyHTML();
 }
 async function loadAlpacaStatus() {
@@ -3331,6 +3420,16 @@ async function loadAlpacaStatus() {
 }
 async function onSettingsClick(e, close) {
   if (e.target.closest('[data-set-close]') || e.target.closest('[data-onb-open]')) { close(); return; }
+  const cp = e.target.closest('[data-comp]');
+  if (cp) {
+    const act = cp.dataset.comp;
+    if (act === 'reset' && !(await askConfirm({ title: _t('cp01'), message: _t('cp12') }))) return;
+    if (act === 'enable' && !(await askConfirm({ title: _t('cp01'), message: _t('cp03') }))) return;
+    cp.disabled = true;
+    try { const keep = S.comp && S.comp.pair; S.comp = await api('/api/companion', { method: 'POST', body: JSON.stringify({ action: act }) }); if (act !== 'pair' && act !== 'disable' && act !== 'reset' && keep) S.comp.pair = keep; } catch (err) { toast(err.message); }
+    renderSettings('comp');
+    return;
+  }
   const ut = e.target.closest('[data-upd-toggle]');
   if (ut) {
     const r = await safePost('/api/update/settings', { autoUpdate: ut.checked });
@@ -3385,6 +3484,7 @@ function openSettings(section) {
     loadAi(true).then(() => { S.aiCheckedAt = Date.now(); renderSettings('ai'); });
     loadAlpacaStatus();
     loadUpdate();
+    loadCompanion();
   }
   const sec = section === 'alpaca' ? settingsDlg.d.querySelector('#setAlp') : null;
   if (sec) { sec.scrollIntoView({ block: 'start' }); setTimeout(() => { const k = settingsDlg && settingsDlg.d.querySelector('#setAlpKey'); if (k) k.focus(); }, 300); }
@@ -3639,7 +3739,7 @@ function pipeCardHTML(c) {
   const segs = c.stages.map((s, i) => `<span class="seg ${i <= c.stageIdx && s.gate ? GATE_CLS[s.gate.state] || '' : ''} ${i === c.stageIdx ? 'cur' : ''}" title="${esc(s.zh)}${s.gate ? `${_t('k1232', { v: esc(s.gate.label) })}` : _t('k1233')}"></span>`).join('');
   const w = c.working[0];
   const doing = c.drafting
-    ? `<div class="pc-doing">${agentGlyph(c.drafting.from, 'live')}${_t('k1234', { v: esc(agentOf(c.drafting.from).name) })}${c.drafting.agent ? ` → ${esc(agentOf(c.drafting.agent).name)}` : ''}</span></div>`
+    ? `<div class="pc-doing">${agentGlyph(c.drafting.from, 'live')}<span>${_t('k1234', { v: esc(agentOf(c.drafting.from).name) })}${c.drafting.agent ? ` → ${esc(agentOf(c.drafting.agent).name)}` : ''}</span></div>`
     : w ? `<div class="pc-doing">${agentGlyph(w.agent, 'live')}<span>${_t('k1235', { v: esc(agentOf(w.agent).name), v2: esc(w.title) })}</span></div>` : '';
   const last = c.last ? `<div class="pc-last"><span class="pc-stage">${esc(c.last.stage)}</span>${esc(c.last.outcome)}${c.key ? ` · ${esc(c.key.label)} <b class="mono">${num(c.key.value)}</b>` : ''}</div>` : _t('k1236');
   return `<article class="pipe-card ${sel ? 'sel' : ''} ${c.status === 'active' ? 'is-active' : ''}">
@@ -3745,12 +3845,21 @@ function apRunHTML(r, live) {
     const head = bs.length > 1 && (i === 0 || (r.plan[i - 1].batch || 1) !== b) ? `<li class="ap-dir-h">${_t('ap48', { n: b })}${bs[b - 1] && bs[b - 1].name ? `：${esc(bs[b - 1].name)}` : ''}${bs[b - 1] && bs[b - 1].whyNew ? ` <span class="muted">${esc(bs[b - 1].whyNew)}</span>` : ''}</li>` : '';
     return `${head}<li><b>${i + 1}. ${esc(x.title)}</b> <span class="muted">${esc(x.logic || '')}</span> — ${per ? `<a href="#/pipeline/${per.projectId}">#${per.projectId}</a> ${esc(apVerdict(per))}` : esc(_t('ap37'))}</li>`;
   }).join('') : `<li class="muted">${_t('ap28')}</li>`;
-  const dirLine = r.direction ? `<div class="muted">${_t('ap46')}：${esc(r.direction)}</div>` : '';
+  const dirLine = (r.direction ? `<div class="muted">${_t('ap46')}：${esc(r.direction)}</div>` : '') + (r.timingGate === 'risk-adjusted' ? `<div class="muted">${_t('ap50')}：${_t('ap53')}</div>` : '') + apChainLine(r, live);
   const wait = (r.found || []).map((f) => `<div class="ap-wait"><b>${_t('ap19')}</b> ${_t('ap20', { p: f.projectId })} <a class="btn sm" href="#/p/${f.projectId}/b/${encodeURIComponent(f.devBacktestId || f.backtestId)}">${_t('ap21')}</a></div>`).join('');
   const dec = (r.decisions || []).length ? `<details class="ap-more"><summary>${_t('ap29')} (${r.decisions.length})</summary><ul>${r.decisions.map((d) => `<li>${agentGlyph(d.agent || 'mia')}${esc(d.question)} → <b>${esc(d.picked || '—')}</b> <span class="muted">${esc(d.why || '')}</span></li>`).join('')}</ul></details>` : '';
   const ref = (r.refusals || []).length ? `<details class="ap-more"><summary>${_t('ap30')} (${r.refusals.length})</summary><ul>${r.refusals.map((d) => `<li>${agentGlyph(d.agent || 'mia')}<code>${esc(d.tool)}</code> <span class="muted">${esc(d.message || '')}</span></li>`).join('')}</ul></details>` : '';
   const acts = `<div class="ap-acts">${r.rootThreadId ? `<button type="button" class="btn sm" data-open-thread="${esc(r.rootThreadId)}">${_t('ap15')}</button>` : ''}${live ? `<button type="button" class="btn sm danger" data-ap-stop="${esc(r.runId)}">${_t('ap14')}</button>` : ''}</div>`;
   return `<div class="ap-run"><div class="ap-run-h">${st}${reason}<span class="muted">${agoT(r.createdAt)}</span>${acts}</div>${canResume ? `<div class="muted">${_t('ap44')}</div>` : ''}${dirLine}${nums}${wait}<div class="ap-plan-h">${_t('ap27')}</div><ul class="ap-plan">${plan}</ul>${dec}${ref}</div>`;
+}
+// 连续模式的一行：第几轮、合计花了多少；结束时写明为什么不再接着找
+let AP_CHAIN_END; _regT(() => { AP_CHAIN_END = { usd: _t('ap59'), time: _t('ap60'), rounds: _t('ap61'), 'no-progress': _t('ap62'), 'holdout-pending': _t('ap64') }; });
+function apChainLine(r, live) {
+  if (!r.untilFound || !r.chain) return '';
+  const spent = (Number(r.chain.spent) || 0) + (Number(r.cost) || 0);
+  const head = _t('ap57', { n: r.chain.round, c: spent.toFixed(2), t: r.chain.usdTotal });
+  const tail = live ? '' : r.chainEnd ? ` · ${esc(AP_CHAIN_END[r.chainEnd] || _t('ap63', { v: r.chainEnd }))}` : r.status === 'done' && !(r.found || []).length && !r.nextRunId ? ` · ${_t('ap58')}` : '';
+  return `<div class="muted ap-chain">${head}${tail}</div>`;
 }
 function autopilotHTML(A) {
   if (!A || !A.runs) return '';
@@ -3763,10 +3872,12 @@ function autopilotHTML(A) {
       <label>${_t('ap45')}<select name="directions">${[1, 2, 3, 4, 5].map((n) => opt(n, d.directions || 3)).join('')}</select></label>
       <label>${_t('ap04')}<select name="versions">${[1, 2, 3].map((n) => opt(n, d.versions || 2)).join('')}</select></label>
       <label>${_t('ap05')}<select name="scope"><option value="any">${_t('ap06')}</option><option value="stock">${_t('ap07')}</option><option value="timing">${_t('ap08')}</option></select></label>
+      <label title="${esc(_t('ap52'))}">${_t('ap50')}<select name="timingGate"><option value="return" ${d.timingGate === 'risk-adjusted' ? '' : 'selected'}>${_t('ap51')}</option><option value="risk-adjusted" ${d.timingGate === 'risk-adjusted' ? 'selected' : ''}>${_t('ap53')}</option></select></label>
       <label>${_t('ap09')}<input name="usd" type="number" min="1" max="500" step="1" value="${d.usd || 20}"></label>
       <label>${_t('ap10')}<input name="minutes" type="number" min="10" max="1440" step="10" value="${d.minutes || 180}"></label>
       <label class="ap-dir">${_t('ap46')}<input name="direction" type="text" maxlength="300" placeholder="${esc(_t('ap47'))}"></label>
       <label class="ap-chk"><input name="stopOnFind" type="checkbox" ${d.stopOnFind === false ? '' : 'checked'}>${_t('ap11')}</label>
+      <label class="ap-chk" title="${esc(_t('ap55'))}"><input name="untilFound" type="checkbox" ${store.get('apUntil', true) ? 'checked' : ''}>${_t('ap54')}</label>
       <button type="submit" class="btn primary">${_t('ap12')}</button></form>`;
   return `<section class="ap-panel ${live ? 'is-live' : ''}" aria-label="${_t('ap01')}"><details ${live || (last && (last.found || []).length) ? 'open' : ''}><summary><b>${_t('ap01')}</b><span class="muted">${_t('ap02')}</span></summary>
     ${form}${live ? apRunHTML(live, true) : last ? `<div class="ap-last-h">${_t('ap22')}</div>${apRunHTML(last, false)}` : ''}</details></section>`;
@@ -3921,8 +4032,9 @@ function wirePipelineAgents() {
     e.preventDefault();
     const f = new FormData(e.target);
     // 模型和思考深度跟对话框里选的一致（默认「自动」）：不传的话 claude 用它自己的默认模型，账号不一定能用
-    const body = { budget: { ideas: Number(f.get('ideas')), versions: Number(f.get('versions')), directions: Number(f.get('directions')) }, direction: String(f.get('direction') || '').trim(), scope: String(f.get('scope') || 'any'), usd: Number(f.get('usd')), minutes: Number(f.get('minutes')), stopOnFind: f.get('stopOnFind') === 'on', model: S.model || 'auto', effort: S.effort || 'auto' };
-    if (!(await askConfirm({ title: _t('ap01'), message: _t('ap35') }))) return;
+    const body = { budget: { ideas: Number(f.get('ideas')), versions: Number(f.get('versions')), directions: Number(f.get('directions')) }, direction: String(f.get('direction') || '').trim(), scope: String(f.get('scope') || 'any'), timingGate: String(f.get('timingGate') || 'return'), untilFound: f.get('untilFound') === 'on', usd: Number(f.get('usd')), minutes: Number(f.get('minutes')), stopOnFind: f.get('stopOnFind') === 'on', model: S.model || 'auto', effort: S.effort || 'auto' };
+    store.set('apUntil', body.untilFound);
+    if (!(await askConfirm({ title: _t('ap01'), message: body.untilFound ? `${_t('ap35')} ${_t('ap56', { usd: body.usd, min: body.minutes })}` : _t('ap35') }))) return;
     const btn = e.target.querySelector('button[type=submit]'); if (btn) btn.disabled = true;
     try {
       const r = await api('/api/autopilot/start', { method: 'POST', body: JSON.stringify(body) });
@@ -4968,6 +5080,10 @@ function connectBus() {
     } else if (ev.type === 'approval_settled') {
       const x = S.approvals.get(ev.id); if (x) x.state = ev.state;
       onApprovalsChanged();
+    } else if (ev.type === 'inbox_updated') {
+      loadInbox();
+    } else if (ev.type === 'companion_updated') {
+      if (settingsDlg) { if (S.comp) S.comp.pair = null; loadCompanion(); }
     } else if (ev.type === 'changes_updated') {
       if (S.route.page === 'agents' && S.route.agentsView === 'changes') loadChanges().then(() => renderMain());
       refreshRestart();
@@ -5508,10 +5624,23 @@ function wire() {
     const ex = e.target.closest('[data-example]');
     if (ex) { const t = $('#ideaInput'); if (t) { t.value = ex.dataset.example; store.set('ideaDraft', t.value); t.focus(); t.setSelectionRange(t.value.length, t.value.length); } return; }
     if (e.target.closest('[data-idea-retry]')) { const f = $('#ideaForm'); if (f) f.requestSubmit(); return; }
+    const ib = e.target.closest('[data-inbox-act]');
+    if (ib) {
+      const it = (S.inbox || []).find((x) => x.id === ib.dataset.inboxId);
+      const act = ib.dataset.inboxAct;
+      api('/api/inbox', { method: 'POST', body: JSON.stringify({ id: ib.dataset.inboxId, action: act }) }).then(() => {
+        S.inbox = (S.inbox || []).filter((x) => x.id !== ib.dataset.inboxId);
+        renderMain();
+        // 「用这个想法」：填进想法框，由你看一眼再交给团队
+        if (act === 'used' && it) { const t = $('#ideaInput'); if (t) { t.value = it.text; store.set('ideaDraft', t.value); t.scrollIntoView({ block: 'center' }); t.focus(); t.setSelectionRange(t.value.length, t.value.length); } }
+      }).catch((err) => toast(err.message));
+      return;
+    }
     if (e.target.closest('#runsBtn')) { const rm = $('#runsMenu'); rm.hidden = !rm.hidden; return; }
     const ot = e.target.closest('[data-open-thread]');
     if (ot) { const rm = $('#runsMenu'); if (rm) rm.hidden = true; openThread(ot.dataset.openThread); return; }
     if (e.target.closest('[data-new-project]')) { openProjectModal(); return; }
+    if (e.target.closest('[data-home-closed]')) { store.set('homeClosed', !store.get('homeClosed', false)); renderMain(); const b = $('[data-home-closed]'); if (b) b.focus(); return; }
     const r2 = e.target.closest('[data-route2]');
     if (r2) { S.route2 = r2.dataset.route2; store.set('ideaRoute', S.route2); const box = r2.closest('.route-pick'); box.querySelectorAll('[data-route2]').forEach((b) => { const on = b === r2; b.classList.toggle('active', on); b.setAttribute('aria-checked', on); }); const rt = (ROUTES.find((x) => x[0] === S.route2) || ROUTES[0]); const tipEl = box.querySelector('.route-tip'); tipEl.textContent = rt[3]; tipEl.title = rt[2]; return; }
     const prep = e.target.closest('[data-prepare]');

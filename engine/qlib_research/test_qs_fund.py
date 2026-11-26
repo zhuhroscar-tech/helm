@@ -153,6 +153,19 @@ def test_search_candidate_trading_under_other_symbol_is_rejected():
     assert m["cik"] is None and "another symbol" in m["basis"], m
 
 
+def test_entity_query_drops_state_tag_and_backslashes():
+    assert F.entity_query("US BANCORP \\DE\\") == "US BANCORP"
+    assert F.entity_query("FOO CORP /DE/") == "FOO CORP"
+    assert F.entity_query("Exxon Mobil Corp") == "Exxon Mobil Corp"
+    assert "\\" not in F.entity_query("A\\B INC")
+    seen = []
+    fake = _FakeSec()
+    fake.current_tickers = lambda: {"0": {"ticker": "USB", "cik_str": 1, "title": "US BANCORP \\DE\\"}}
+    fake.get_json = lambda url, *a, **k: seen.append(url) or {}
+    F.resolve_ciks(fake, {"USB": (pd.Timestamp("2008-01-02"), pd.Timestamp("2026-10-16"))}, {}, log=lambda *_: None)
+    assert seen and all("%5C" not in u for u in seen), seen
+
+
 def test_sic_sectors():
     assert F.sector_of_sic(3674) == "Information Technology"
     assert F.sector_of_sic(2834) == "Health Care"

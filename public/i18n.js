@@ -24,6 +24,14 @@
     var s = d[key];
     if (s == null) s = (D.zh || {})[key];
     if (s == null) s = key;
+    // 英文单复数："{n} project(s)" 按它前面最近的那个数字占位符决定：1 → "project"，其它 → "projects"。
+    // 没有数字可依据时原样保留 "(s)"。中文没有 "(s)"，不受影响。
+    if (lang === 'en' && vars && s.indexOf('(s)') >= 0) {
+      s = s.replace(/\{(\w+)\}([^{}]*?)\(s\)/g, function (m, n, mid) {
+        var v = Object.prototype.hasOwnProperty.call(vars, n) ? Number(String(vars[n]).replace(/,/g, '')) : NaN;
+        return isFinite(v) ? '{' + n + '}' + mid + (v === 1 ? '' : 's') : m;
+      });
+    }
     if (vars) s = s.replace(/\{(\w+)\}/g, function (m, n) { return Object.prototype.hasOwnProperty.call(vars, n) ? String(vars[n]) : m; });
     return s;
   }
