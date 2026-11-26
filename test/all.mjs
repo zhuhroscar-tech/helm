@@ -69,6 +69,8 @@ const SUITES = [
   ['p0-fixes.test.mjs', [], []],
   ['efficiency.test.mjs', [], []],
   ['first-run.test.mjs', [], []],
+  // 要起真实服务并监听端口；不在清单里的测试会放进 agent 沙盒跑，沙盒不许联网，在 Mac 上 27 项全部连接失败
+  ['companion.test.mjs', [], []],
   ['sandbox.test.mjs', [], null],
 ];
 // 清单里没写的 *.test.mjs 也会跑（两种模式都不带参数），免得新加的测试文件被悄悄漏掉。

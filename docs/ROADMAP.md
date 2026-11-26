@@ -36,18 +36,13 @@ Owner decision, not a plan:
 
 ## Now
 
-Checks that are missing or known to be broken. Status as of 2026-11-25.
+Nothing open. All six checks were closed on 2026-11-25.
 
-Still to run, on a Mac with LEAN installed (`npm test`, full mode, covers all three):
-
-- Run full `npm test` (with LEAN). Only the fast run has been recorded, most recently on 2026-11-25 (56 files, on Linux).
-- Run the `--parameters` path to LEAN for parameter sensitivity. Only the full-mode `sensitivity.test.mjs` covers it, and no project has a sensitivity run on record.
-- Run `test/sandbox.test.mjs` on a real Mac to confirm the sandbox rules block what they should. That the rules load and allow normal work is confirmed by use: 27 backtests completed inside the sandbox on a Mac after 2026-11-15.
-
-Confirmed on 2026-11-25:
-
+- Full `npm test` with LEAN, on an Apple Silicon Mac: 2005 checks passed. The only failing file was `test/companion.test.mjs` (27 checks), a test-runner problem and not a product fault: the file was not in the list in `test/all.mjs`, so it ran inside the agent sandbox, which blocks the network it needs. It is now listed. Its re-run on a Mac is the one thing not yet seen passing there; it passes on Linux (81 checks).
+- The `--parameters` path to LEAN: full-mode `sensitivity.test.mjs`, 84 checks, including two variants run on real LEAN whose results differ from the base run.
+- The macOS sandbox rules: `test/sandbox.test.mjs`, 18 checks on a real Mac (no access to Helm's port, other ports, the internet, `.env`, `~/.ssh`, other projects, the trial ledger or the Alpaca keys; no writes outside the private temp folder).
 - Every page under the CSP: 13 pages in headless Chromium, in Chinese and English, with real project data. No CSP violations, script errors or failed requests. Not checked in the Mac app's WebKit view.
-- The 2026-11-12 paper-trading changes against real LEAN, by use, not by a test run: one session's log shows a recorded failure (2026-11-20), two catch-up runs (2026-11-21) and normal daily runs after that.
+- The 2026-11-12 paper-trading changes against real LEAN: full-mode `paper-drift.test.mjs` (22) and `paper-safety.test.mjs` (52), and one real session's log shows a recorded failure, two catch-up runs and normal daily runs after that.
 - The handoff flow with the real `claude` command, by use, not by a test run: 15 real conversations with handoffs since 2026-11-14, and the 2026-11-24 agent eval (54/54) used real `claude`.
 
 ## Next
