@@ -33,6 +33,7 @@ const SUITES = [
   ['calendar.test.mjs', [], []],
   ['handoff-card.test.mjs', [], []],
   ['drift.test.mjs', [], []],
+  ['stats-calibration.test.mjs', [], ['--fast']],
   ['journal.test.mjs', [], []],
   ['research-list.test.mjs', [], []],
   ['project-delete.test.mjs', [], []],

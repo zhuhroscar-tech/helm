@@ -2,7 +2,7 @@
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { bootstrapBand, percentRank, assessDrift, forwardFromLatest, loadDrift, maxDrawdownOfReturns } from '../lib/drift.mjs';
+import { bootstrapBand, percentRank, assessDrift, forwardFromLatest, loadDrift, maxDrawdownOfReturns, checkpointsUpTo, nextCheckpoint } from '../lib/drift.mjs';
 
 let failed = 0;
 const check = (name, cond, extra = '') => { console.log(`${cond ? 'PASS' : 'FAIL'}  ${name}${extra ? `  (${extra})` : ''}`); if (!cond) failed++; };
@@ -37,9 +37,32 @@ const near = (a, b, t) => Math.abs(a - b) <= t;
   const mk = (n, rr) => assessDrift({ btReturns: r, fwd: { n, r: rr, dd: 0.01, bench: null, excess: null, from: 'a', to: 'b' } });
   check('n<20：太早，但仍给出范围', (() => { const d = mk(10, 0.5); return d.verdict === 'early' && d.band && d.verdictText === '太早，还看不出来'; })());
   check('n≥20 且在范围内：在回测预期范围内', mk(60, band.p50).verdict === 'in');
-  const low = mk(60, band.p5 - 0.05); const high = mk(60, band.p95 + 0.05);
-  check('低于 5%：低于回测预期，建议先查数据/执行差异', low.verdict === 'low' && /数据|执行/.test(low.notes.join('')));
-  check('高于 95%：高于回测预期，说明偏高也是偏离', high.verdict === 'high' && /偏离/.test(high.notes.join('')));
+  // 结论的门槛是每一侧 1.25%（固定检查点 + Bonferroni），不是 5%：落在 5% 和 1.25% 之间不再算偏离
+  const q = (x) => sorted[Math.round((sorted.length - 1) * x)];
+  check('5% 分位以下、1.25% 以上：仍在预期范围内', mk(60, (q(0.0125) + band.p5) / 2).verdict === 'in' && mk(60, (q(0.9875) + band.p95) / 2).verdict === 'in');
+  const low = mk(60, q(0.0125) - 0.02); const high = mk(60, q(0.9875) + 0.02);
+  check('低于 1.25%：低于回测预期，建议先查数据/执行差异', low.verdict === 'low' && /数据|执行/.test(low.notes.join('')));
+  check('高于 98.75%：高于回测预期，说明偏高也是偏离', high.verdict === 'high' && /偏离/.test(high.notes.join('')));
+  // 有逐日路径时：结论取最近一个检查点（20 / 60 / 120 / 250，之后每 250 天）上的累计收益，两个检查点之间不变
+  check('检查点：20、60、120、250，之后每 250 天', JSON.stringify(checkpointsUpTo(19)) === '[]' && JSON.stringify(checkpointsUpTo(130)) === '[20,60,120]' && JSON.stringify(checkpointsUpTo(760)) === '[20,60,120,250,500,750]' && nextCheckpoint(0) === 20 && nextCheckpoint(60) === 120 && nextCheckpoint(250) === 500 && nextCheckpoint(600) === 750);
+  const withPath = (path) => assessDrift({ btReturns: r, fwd: { n: path.length - 1, r: path[path.length - 1], path, dd: 0.01, bench: null, excess: null, from: 'a', to: 'b' } });
+  const flat = (n, v) => Array.from({ length: n + 1 }, (_, i) => (i === 0 ? 0 : v));
+  {
+    // 第 60 天在范围内，之后到第 100 天暴跌：下一个检查点（120）还没到，结论保持“在预期内”，但今天的百分位照实给出
+    const p = flat(100, band.p50); p[100] = -0.6;
+    const d = withPath(p);
+    check('两个检查点之间：结论不变，今天的位置只作参考', d.verdict === 'in' && d.checkpoint.n === 60 && d.rank < 0.01 && d.nextCheckpoint === 120 && /只作参考/.test(d.notes.join('')), JSON.stringify([d.verdict, d.checkpoint, d.rank]));
+    // 到了第 120 天仍然很低：结论变成偏低
+    const p2 = flat(120, band.p50); for (let i = 100; i <= 120; i++) p2[i] = -0.6;
+    const d2 = withPath(p2);
+    check('到下一个检查点仍偏离：结论更新', d2.verdict === 'low' && d2.checkpoint.n === 120 && d2.checkpoints.length === 3);
+    // 第 60 天偏低，第 120 天回到范围内：结论是“在预期内”，说明里保留之前偏离过
+    const p3 = flat(120, 0.02); p3[60] = -0.6;
+    const d3 = withPath(p3);
+    check('之前的检查点偏离过：结论按最新检查点，说明里写出来', d3.verdict === 'in' && /第 60 天（偏低）/.test(d3.notes.join('')), d3.notes.join(' | '));
+    check('不到 20 天：太早，没有检查点', withPath(flat(12, 0.3)).verdict === 'early' && withPath(flat(12, 0.3)).checkpoints.length === 0);
+    check('英文说明', /checkpoint/.test(assessDrift({ btReturns: r, fwd: { n: 60, r: -0.9, path: flat(60, -0.9), dd: 0 }, lang: 'en' }).notes.join(' ')));
+  }
   check('说明里有“不证明策略有效”', /不证明/.test(low.notes.join('')));
   check('回撤对比：返回回测最大回撤', near(mk(60, 0).dd.backtest, maxDrawdownOfReturns(r), 1e-12));
 }
@@ -48,6 +71,7 @@ const near = (a, b, t) => Math.abs(a - b) <= t;
 {
   const f = forwardFromLatest({ equity: [['d0', 100], ['d1', 110], ['d2', 99]], benchmark: [['d0', 50], ['d1', 51], ['d2', 52]] });
   check('forward：n、r 来自曲线首尾', f.n === 2 && near(f.r, -0.01, 1e-12));
+  check('forward：path 是逐日累计收益', f.path.length === 3 && f.path[0] === 0 && near(f.path[1], 0.1, 1e-12) && near(f.path[2], -0.01, 1e-12));
   check('forward：超额 = 策略 − 基准（同日期）', near(f.excess, -0.01 - 0.04, 1e-12));
   check('forward：回撤取曲线最大回撤', near(f.dd, 0.1, 1e-12));
   check('forward：没有基准 → excess 为 null', forwardFromLatest({ equity: [['a', 1], ['b', 2]] }).excess === null);
